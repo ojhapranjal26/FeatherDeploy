@@ -7,14 +7,16 @@
 #    sudo bash build.sh
 #
 #  What this script does:
-#   1. Detects the OS package manager and installs build dependencies
-#      (git, curl, gcc, Node.js 20, Go 1.22)
+#   1. Detects the OS package manager and installs ALL runtime + build deps:
+#      git, curl, gcc, Node.js 20, Go 1.22, Podman, Caddy
 #   2. Clones / updates the FeatherDeploy source code
 #   3. Builds the frontend (npm ci + npm run build)
 #   4. Builds the Go binary with CGO (single self-contained executable)
-#   5. Runs the interactive installer:  sudo ./featherdeploy install
-#      which will ask for domain, superadmin credentials, and the OS user
-#      that FeatherDeploy will run as (non-root, default: featherdeploy)
+#   5. Runs the interactive installer:  featherdeploy install
+#      which will ask for:
+#        - Service OS username (default: featherdeploy) and its password
+#        - Panel domain (e.g. panel.example.com)
+#        - Superadmin email, name and password
 # =============================================================================
 set -euo pipefail
 
@@ -40,6 +42,30 @@ install_deps_apt() {
     curl git gcc make ca-certificates \
     libsqlite3-dev build-essential
 
+  # Podman
+  if ! command -v podman >/dev/null 2>&1; then
+    echo "==> Installing Podman..."
+    apt-get install -y podman 2>/dev/null || \
+      apt-get install -y podman-docker 2>/dev/null || \
+      echo "  WARNING: podman not found in apt — install manually if needed"
+  else
+    echo "  Podman already installed — skipping"
+  fi
+
+  # Caddy
+  if ! command -v caddy >/dev/null 2>&1; then
+    echo "==> Installing Caddy..."
+    apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl 2>/dev/null || true
+    curl -fsSL 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | \
+      gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg 2>/dev/null || true
+    curl -fsSL 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | \
+      tee /etc/apt/sources.list.d/caddy-stable.list >/dev/null 2>&1 || true
+    apt-get update -y 2>/dev/null || true
+    apt-get install -y caddy
+  else
+    echo "  Caddy already installed — skipping"
+  fi
+
   # Node.js 20 via NodeSource
   if ! command -v node >/dev/null 2>&1 || [ "$(node --version | cut -d. -f1 | tr -d v)" -lt 18 ]; then
     echo "==> Installing Node.js 20..."
@@ -47,12 +73,15 @@ install_deps_apt() {
     apt-get install -y nodejs
   fi
 
-  # Go (latest stable via official tarball if not installed or too old)
   install_go_tarball
 }
 
 install_deps_dnf() {
   dnf install -y curl git gcc make ca-certificates sqlite-devel
+  command -v podman >/dev/null 2>&1 || dnf install -y podman
+  command -v caddy  >/dev/null 2>&1 || dnf install -y caddy 2>/dev/null || \
+    (dnf copr enable -y @caddy/caddy 2>/dev/null && dnf install -y caddy) || \
+    echo "  WARNING: caddy not available via dnf — install manually"
   if ! command -v node >/dev/null 2>&1; then
     dnf module enable -y nodejs:20 2>/dev/null || true
     dnf install -y nodejs npm
@@ -62,6 +91,9 @@ install_deps_dnf() {
 
 install_deps_yum() {
   yum install -y curl git gcc make ca-certificates sqlite-devel
+  command -v podman >/dev/null 2>&1 || yum install -y podman
+  command -v caddy  >/dev/null 2>&1 || (yum install -y yum-plugin-copr && yum copr enable -y @caddy/caddy && yum install -y caddy) || \
+    echo "  WARNING: caddy not available via yum — install manually"
   if ! command -v node >/dev/null 2>&1; then
     curl -fsSL https://rpm.nodesource.com/setup_20.x | bash -
     yum install -y nodejs
@@ -71,12 +103,12 @@ install_deps_yum() {
 
 install_deps_apk() {
   apk update
-  apk add --no-cache curl git gcc musl-dev make nodejs npm sqlite-dev
+  apk add --no-cache curl git gcc musl-dev make nodejs npm sqlite-dev podman caddy
   install_go_tarball
 }
 
 install_deps_pacman() {
-  pacman -Sy --noconfirm curl git gcc make nodejs npm go sqlite
+  pacman -Sy --noconfirm curl git gcc make nodejs npm go sqlite podman caddy
 }
 
 install_go_tarball() {
