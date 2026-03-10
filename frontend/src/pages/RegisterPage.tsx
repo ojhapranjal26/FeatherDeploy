@@ -1,6 +1,5 @@
 import { Link } from 'react-router-dom'
 import { ShieldCheck } from 'lucide-react'
-import { Button } from '@/components/ui/button'
 
 export function RegisterPage() {
   return (
@@ -18,9 +17,12 @@ export function RegisterPage() {
             invitation link.
           </p>
         </div>
-        <Button asChild variant="outline" className="w-full">
-          <Link to="/login">Back to sign in</Link>
-        </Button>
+        <Link
+          to="/login"
+          className="flex h-9 w-full items-center justify-center rounded-md border border-input bg-background px-4 text-sm font-medium shadow-sm transition-colors hover:bg-accent hover:text-accent-foreground"
+        >
+          Back to sign in
+        </Link>
       </div>
     </div>
   )

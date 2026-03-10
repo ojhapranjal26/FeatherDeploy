@@ -41,7 +41,7 @@ export function EnvPage() {
   const qc = useQueryClient()
   const [addOpen, setAddOpen] = useState(false)
   const [bulkOpen, setBulkOpen] = useState(false)
-  const [revealedIds, setRevealedIds] = useState<Set<string>>(new Set())
+  const [revealedIds, setRevealedIds] = useState<Set<number>>(new Set())
   const [bulkText, setBulkText] = useState('')
 
   const { data: vars, isLoading } = useQuery({
@@ -102,7 +102,7 @@ export function EnvPage() {
     bulkMutation.mutate(vars)
   }
 
-  const toggleReveal = (id: string) => {
+  const toggleReveal = (id: number) => {
     setRevealedIds((prev) => {
       const next = new Set(prev)
       next.has(id) ? next.delete(id) : next.add(id)

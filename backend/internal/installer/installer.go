@@ -41,7 +41,14 @@ const (
 	backendPort    = "8080"
 )
 
-// Run starts the interactive setup wizard. Exits on error.
+// IsInstalled returns true when a prior installation is detected on this machine.
+func IsInstalled() bool {
+	_, envErr := os.Stat(envFile)
+	_, unitErr := os.Stat(systemdUnit)
+	return envErr == nil || unitErr == nil
+}
+
+// Run starts the interactive first-time setup wizard. Exits on error.
 func Run() {
 	if runtime.GOOS != "linux" {
 		die("installer only supported on Linux (got %s)", runtime.GOOS)
@@ -452,4 +459,82 @@ func writeSystemdService(svcUser string) {
 		svcUser, envFile, binDest, dataDir,
 	})
 	writeFile(systemdUnit, buf.String(), 0644)
+}
+
+// ─── Update (non-interactive) ─────────────────────────────────────────────────
+
+// RunUpdate updates an existing FeatherDeploy installation in-place:
+//   - The new binary is already in place (build.sh copied it before calling this)
+//   - Opens the existing DB so appDb.Open applies any new schema migrations
+//   - Restarts the systemd service
+//   - Reloads Caddy
+func RunUpdate() {
+	if runtime.GOOS != "linux" {
+		die("update only supported on Linux (got %s)", runtime.GOOS)
+	}
+	if os.Geteuid() != 0 {
+		die("update must be run as root (use sudo)")
+	}
+
+	printBanner()
+	fmt.Println("  Updating existing FeatherDeploy installation...")
+	fmt.Println()
+
+	// Determine DB path from the existing env file
+	dbPath := readEnvVar(envFile, "DB_PATH")
+	if dbPath == "" {
+		dbPath = filepath.Join(dataDir, "deploy.db")
+	}
+
+	// ── Run database migrations ───────────────────────────────────────────────
+	fmt.Println("── Applying database migrations ────────────────────────────────")
+	if _, err := os.Stat(dbPath); err == nil {
+		db, err := appDb.Open(dbPath)
+		if err != nil {
+			die("cannot open database for migration: %v", err)
+		}
+		db.Close()
+		fmt.Printf("  ✓ migrations applied to %s\n", dbPath)
+	} else {
+		fmt.Println("  (no existing database found — skipping migrations)")
+	}
+
+	// ── Restart service ───────────────────────────────────────────────────────
+	fmt.Println("\n── Restarting service ──────────────────────────────────────────")
+	mustRun("systemctl", "daemon-reload")
+	mustRun("systemctl", "restart", "featherdeploy")
+	fmt.Println("  ✓ featherdeploy service restarted")
+
+	// ── Reload Caddy ──────────────────────────────────────────────────────────
+	if runSilent("systemctl", "is-active", "--quiet", "caddy") == nil {
+		runSilent("systemctl", "reload", "caddy")
+		fmt.Println("  ✓ Caddy reloaded")
+	}
+
+	fmt.Println(`
+  ══════════════════════════════════════════════════════
+  ✓  FeatherDeploy updated successfully!
+
+     Check status:  sudo systemctl status featherdeploy
+     View logs:     sudo journalctl -u featherdeploy -f
+  ══════════════════════════════════════════════════════`)
+}
+
+// readEnvVar reads a KEY=VALUE pair from a shell env file.
+func readEnvVar(file, key string) string {
+	data, err := os.ReadFile(file)
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "#") || !strings.Contains(line, "=") {
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) == 2 && strings.TrimSpace(parts[0]) == key {
+			return strings.TrimSpace(parts[1])
+		}
+	}
+	return ""
 }

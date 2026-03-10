@@ -64,7 +64,7 @@ export function DomainsPage() {
   })
 
   const deleteMutation = useMutation({
-    mutationFn: (domainId: string) =>
+    mutationFn: (domainId: number) =>
       domainsApi.delete(projectId!, serviceId!, domainId),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['domains', serviceId] })
@@ -74,7 +74,7 @@ export function DomainsPage() {
   })
 
   const verifyMutation = useMutation({
-    mutationFn: (domainId: string) =>
+    mutationFn: (domainId: number) =>
       domainsApi.verify(projectId!, serviceId!, domainId),
     onSuccess: (d) => {
       qc.invalidateQueries({ queryKey: ['domains', serviceId] })

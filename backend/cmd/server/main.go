@@ -32,6 +32,7 @@ Usage:
   deploypaaas                    Run the server (default)
   deploypaaas serve              Run the server (explicit)
   deploypaaas install            Interactive first-time setup wizard (Linux, root)
+  deploypaaas update             Update an existing installation in-place (Linux, root)
   deploypaaas --help             Show this help
 
 Flags (all overridable via environment variables):
@@ -55,6 +56,9 @@ func main() {
 		switch os.Args[1] {
 		case "install":
 			installer.Run()
+			return
+		case "update":
+			installer.RunUpdate()
 			return
 		case "serve":
 			// Remove "serve" from args so flag.Parse works normally
