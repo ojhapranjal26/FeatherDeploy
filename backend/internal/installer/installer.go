@@ -26,6 +26,8 @@ import (
 	"text/template"
 	"time"
 
+	"golang.org/x/term"
+
 	"github.com/deploy-paas/backend/internal/auth"
 	appDb "github.com/deploy-paas/backend/internal/db"
 )
@@ -78,11 +80,11 @@ func Run() {
 		svcUser = strings.TrimSpace(svcUserInput)
 	}
 
-	svcPassword := promptPassword(reader, fmt.Sprintf("Password for OS user '%s' (min 8 chars): ", svcUser))
+	svcPassword := promptPassword(tty, fmt.Sprintf("Password for OS user '%s' (min 8 chars): ", svcUser))
 	if len(svcPassword) < 8 {
 		die("OS user password must be at least 8 characters")
 	}
-	confirmSvcPassword := promptPassword(reader, "Confirm OS user password: ")
+	confirmSvcPassword := promptPassword(tty, "Confirm OS user password: ")
 	if svcPassword != confirmSvcPassword {
 		die("OS user passwords do not match")
 	}
@@ -102,11 +104,11 @@ func Run() {
 	if len(strings.TrimSpace(adminName)) < 2 {
 		die("name must be at least 2 characters")
 	}
-	adminPassword := promptPassword(reader, "Superadmin password (min 8 chars): ")
+	adminPassword := promptPassword(tty, "Superadmin password (min 8 chars): ")
 	if len(adminPassword) < 8 {
 		die("password must be at least 8 characters")
 	}
-	confirmPassword := promptPassword(reader, "Confirm superadmin password: ")
+	confirmPassword := promptPassword(tty, "Confirm superadmin password: ")
 	if adminPassword != confirmPassword {
 		die("passwords do not match")
 	}
@@ -130,10 +132,21 @@ func Run() {
 	if err != nil {
 		die("cannot determine binary path: %v", err)
 	}
-	copyFile(self, binDest)
-	mustRun("chmod", "+x", binDest)
-	mustRun("chown", "root:"+svcUser, binDest)
-	fmt.Printf("  ✓ installed %s\n", binDest)
+	// Resolve symlinks so we can compare real paths.
+	realSelf, _ := filepath.EvalSymlinks(self)
+	realDest, _ := filepath.EvalSymlinks(binDest)
+	if realSelf == realDest {
+		// Already running from binDest (build.sh put us here) — no copy needed.
+		fmt.Printf("  ✓ binary already at %s\n", binDest)
+	} else {
+		// Remove before copy to avoid "text file busy" when overwriting a
+		// running executable.
+		os.Remove(binDest)
+		copyFile(self, binDest)
+		mustRun("chmod", "+x", binDest)
+		mustRun("chown", "root:"+svcUser, binDest)
+		fmt.Printf("  ✓ installed %s\n", binDest)
+	}
 
 	// ── Step 6: Generate secrets and write env file ───────────────────────────
 	fmt.Println("\n── Writing configuration ───────────────────────────────────────")
@@ -243,11 +256,18 @@ func prompt(r *bufio.Reader, label string) string {
 	return strings.TrimRight(line, "\r\n")
 }
 
-func promptPassword(r *bufio.Reader, label string) string {
-	// Input is visible; we cannot mask it without cgo/syscall tricks.
-	fmt.Print(label + "(input visible) ")
-	line, _ := r.ReadString('\n')
-	return strings.TrimRight(line, "\r\n")
+func promptPassword(tty *os.File, label string) string {
+	_, _ = fmt.Fprint(tty, label)
+	password, err := term.ReadPassword(int(tty.Fd()))
+	_, _ = fmt.Fprintln(tty) // move to next line after hidden input
+	if err != nil {
+		// Fallback: visible input (e.g. tty not a real terminal)
+		_, _ = fmt.Fprint(tty, "(echo fallback) ")
+		r := bufio.NewReader(tty)
+		line, _ := r.ReadString('\n')
+		return strings.TrimRight(line, "\r\n")
+	}
+	return string(password)
 }
 
 func die(format string, args ...any) {
