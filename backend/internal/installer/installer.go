@@ -59,10 +59,19 @@ func Run() {
 
 	printBanner()
 
-	reader := bufio.NewReader(os.Stdin)
+	// Open /dev/tty directly so interactive prompts work even when stdin is a
+	// pipe (e.g. curl -fsSL ... | sudo bash). Without this, ReadString returns
+	// empty immediately because the pipe EOF is inherited as stdin.
+	tty, ttyErr := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if ttyErr != nil {
+		tty = os.Stdin // fallback for environments without /dev/tty
+	} else {
+		defer tty.Close()
+	}
+	reader := bufio.NewReader(tty)
 
 	// ── Step 0: Service OS user ───────────────────────────────────────────────
-	fmt.Printf("Service OS username [%s]: ", defaultSvcUser)
+	fmt.Fprintf(tty, "Service OS username [%s]: ", defaultSvcUser)
 	svcUserInput := strings.TrimRight(func() string { l, _ := reader.ReadString('\n'); return l }(), "\r\n")
 	svcUser := defaultSvcUser
 	if strings.TrimSpace(svcUserInput) != "" {
@@ -235,7 +244,7 @@ func prompt(r *bufio.Reader, label string) string {
 }
 
 func promptPassword(r *bufio.Reader, label string) string {
-	// Print a note since we cannot mask input without platform-specific syscalls
+	// Input is visible; we cannot mask it without cgo/syscall tricks.
 	fmt.Print(label + "(input visible) ")
 	line, _ := r.ReadString('\n')
 	return strings.TrimRight(line, "\r\n")
