@@ -1,0 +1,50 @@
+# DeployPaaS — Caddyfile
+# Caddy acts as a reverse proxy + automatic TLS terminator in front of:
+#   - Go backend  → localhost:8080
+#   - React frontend (static) → served from /data/www
+#
+# In local/WSL2 mode (no public domain), Caddy uses self-signed TLS.
+# For production, replace :80 / :443 with your domain name and Caddy
+# will automatically obtain a Let's Encrypt certificate.
+# ─────────────────────────────────────────────────────────────────────────────
+
+{
+    # Admin API on a local-only port
+    admin localhost:2019
+
+    # For development / WSL2 usage without a real domain
+    # Comment this out and use your domain in production
+    local_certs
+}
+
+# ── Frontend (static files) ──────────────────────────────────────────────────
+:80 {
+    # Serve the pre-built React app
+    root * /data/www
+    file_server
+
+    # SPA fallback: serve index.html for all non-asset paths
+    try_files {path} /index.html
+
+    # Proxy API requests to the Go backend
+    handle /api/* {
+        reverse_proxy localhost:8080
+    }
+
+    # Health check passthrough
+    handle /healthz {
+        reverse_proxy localhost:8080
+    }
+
+    # Security headers
+    header {
+        X-Frame-Options "DENY"
+        X-Content-Type-Options "nosniff"
+        X-XSS-Protection "1; mode=block"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        Permissions-Policy "geolocation=(), microphone=(), camera=()"
+        -Server
+    }
+
+    encode gzip
+}

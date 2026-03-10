@@ -1,0 +1,219 @@
+import { NavLink, useNavigate } from 'react-router-dom'
+import {
+  LayoutDashboard,
+  FolderKanban,
+  Users,
+  ShieldCheck,
+  LogOut,
+  Settings,
+  Sun,
+  Moon,
+  Monitor,
+  PanelLeftClose,
+  Github,
+} from 'lucide-react'
+import { cn } from '@/lib/utils'
+import { useAuth } from '@/context/AuthContext'
+import { useTheme } from '@/context/ThemeContext'
+import { Avatar, AvatarFallback } from '@/components/ui/avatar'
+import { Button } from '@/components/ui/button'
+import { Separator } from '@/components/ui/separator'
+import type { User } from '@/api/auth'
+
+type Role = User['role']
+
+interface NavItem {
+  to: string
+  label: string
+  icon: React.ElementType
+  /** If set, only users whose role is in this array see the item */
+  roles?: Role[]
+}
+
+const NAV_ITEMS: NavItem[] = [
+  { to: '/dashboard',       label: 'Dashboard',      icon: LayoutDashboard },
+  { to: '/projects',        label: 'Projects',       icon: FolderKanban },
+  { to: '/settings/github', label: 'GitHub',         icon: Github },
+  { to: '/admin/users',     label: 'User Management', icon: Users,       roles: ['admin', 'superadmin'] },
+  { to: '/admin/settings',  label: 'System Settings', icon: ShieldCheck, roles: ['superadmin'] },
+]
+
+interface SidebarProps {
+  collapsed: boolean
+  onToggle: () => void
+}
+
+export function Sidebar({ collapsed, onToggle }: SidebarProps) {
+  const { user, logout } = useAuth()
+  const { theme, setTheme } = useTheme()
+  const navigate = useNavigate()
+
+  const handleLogout = () => {
+    logout()
+    navigate('/login')
+  }
+
+  const cycleTheme = () =>
+    setTheme(theme === 'light' ? 'dark' : theme === 'dark' ? 'system' : 'light')
+
+  const ThemeIcon = theme === 'dark' ? Moon : theme === 'light' ? Sun : Monitor
+  const themeLabel = theme === 'light' ? 'Light' : theme === 'dark' ? 'Dark' : 'System'
+
+  const initials =
+    user?.name
+      ?.split(' ')
+      .map((w) => w[0])
+      .slice(0, 2)
+      .join('')
+      .toUpperCase() ?? 'U'
+
+  return (
+    <aside
+      className={cn(
+        'flex h-screen shrink-0 flex-col border-r border-sidebar-border bg-sidebar text-sidebar-foreground transition-[width] duration-200 ease-in-out select-none',
+        collapsed ? 'w-14' : 'w-60',
+      )}
+    >
+      {/* ── Header ── */}
+      <div
+        className={cn(
+          'flex h-14 shrink-0 items-center border-b border-sidebar-border',
+          collapsed ? 'justify-center' : 'justify-between pl-4 pr-2',
+        )}
+      >
+        {collapsed ? (
+          <button
+            onClick={onToggle}
+            title="Expand sidebar"
+            className="flex h-9 w-9 items-center justify-center rounded-md hover:bg-sidebar-accent transition-colors"
+          >
+            <div className="flex h-7 w-7 items-center justify-center rounded-md bg-primary text-primary-foreground text-sm font-bold">
+              P
+            </div>
+          </button>
+        ) : (
+          <>
+            <div className="flex items-center gap-2.5">
+              <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-primary text-primary-foreground text-sm font-bold">
+                P
+              </div>
+              <span className="font-semibold tracking-tight">DeployPaaS</span>
+            </div>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8 text-sidebar-foreground/50 hover:text-sidebar-foreground hover:bg-sidebar-accent"
+              onClick={onToggle}
+              title="Collapse sidebar"
+            >
+              <PanelLeftClose className="h-4 w-4" />
+            </Button>
+          </>
+        )}
+      </div>
+
+      {/* ── Navigation ── */}
+      <nav className="flex-1 overflow-y-auto px-2 py-3 space-y-0.5">
+        {NAV_ITEMS.filter(item => !item.roles || (user?.role && item.roles.includes(user.role))).map(({ to, label, icon: Icon }) => (
+          <NavLink
+            key={to}
+            to={to}
+            title={collapsed ? label : undefined}
+            className={({ isActive }) =>
+              cn(
+                'flex items-center rounded-md px-2.5 py-2 text-sm transition-colors',
+                collapsed ? 'justify-center' : 'gap-2.5',
+                isActive
+                  ? 'bg-sidebar-primary/10 text-sidebar-primary font-medium'
+                  : 'text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-foreground',
+              )
+            }
+          >
+            <Icon className="h-4 w-4 shrink-0" />
+            {!collapsed && <span className="flex-1 truncate">{label}</span>}
+          </NavLink>
+        ))}
+      </nav>
+
+      {/* ── Footer ── */}
+      <div className="border-t border-sidebar-border">
+        {/* Theme toggle */}
+        <div
+          className={cn(
+            'flex items-center px-2 py-2',
+            collapsed ? 'justify-center' : 'gap-2',
+          )}
+        >
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={cycleTheme}
+            title={themeLabel + ' theme — click to switch'}
+            className="h-8 w-8 text-sidebar-foreground/60 hover:text-sidebar-foreground hover:bg-sidebar-accent shrink-0"
+          >
+            <ThemeIcon className="h-4 w-4" />
+          </Button>
+          {!collapsed && (
+            <span className="text-xs text-sidebar-foreground/50 select-none">
+              {themeLabel} theme
+            </span>
+          )}
+        </div>
+
+        <Separator className="mx-2 bg-sidebar-border" />
+
+        {/* User section */}
+        <div
+          className={cn(
+            'flex items-center p-2',
+            collapsed ? 'flex-col gap-1.5 py-3' : 'gap-2',
+          )}
+        >
+          <Avatar className={cn('shrink-0', collapsed ? 'h-8 w-8' : 'h-7 w-7')}>
+            <AvatarFallback className="bg-primary/15 text-primary text-xs font-semibold">
+              {initials}
+            </AvatarFallback>
+          </Avatar>
+          {!collapsed && (
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-xs font-medium">{user?.name}</p>
+              <p className="truncate text-xs text-sidebar-foreground/50 capitalize">{user?.role}</p>
+            </div>
+          )}
+          {!collapsed ? (
+            <div className="flex shrink-0 gap-0.5">
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7 text-sidebar-foreground/60 hover:text-sidebar-foreground hover:bg-sidebar-accent"
+                onClick={() => navigate('/settings')}
+                title="Settings"
+              >
+                <Settings className="h-3.5 w-3.5" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7 text-sidebar-foreground/60 hover:text-sidebar-foreground hover:bg-sidebar-accent"
+                onClick={handleLogout}
+                title="Log out"
+              >
+                <LogOut className="h-3.5 w-3.5" />
+              </Button>
+            </div>
+          ) : (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7 text-sidebar-foreground/60 hover:text-sidebar-foreground hover:bg-sidebar-accent"
+              onClick={handleLogout}
+              title="Log out"
+            >
+              <LogOut className="h-3.5 w-3.5" />
+            </Button>
+          )}
+        </div>
+      </div>
+    </aside>
+  )
+}
