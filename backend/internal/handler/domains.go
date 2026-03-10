@@ -3,7 +3,9 @@ package handler
 import (
 	"database/sql"
 	"log/slog"
+	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 
@@ -95,4 +97,46 @@ func (h *DomainHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	}
 	h.db.ExecContext(r.Context(), `DELETE FROM domains WHERE id=?`, domainID)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// POST /api/projects/{projectID}/services/{serviceID}/domains/{domainID}/verify
+// Performs a DNS lookup to check that the domain resolves to this server's IP.
+// Set the SERVER_IP environment variable to the expected IP; if unset any resolved IP marks verified.
+func (h *DomainHandler) Verify(w http.ResponseWriter, r *http.Request) {
+	domainID, err := strconv.ParseInt(r.PathValue("domainID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errMap("invalid domainID"))
+		return
+	}
+
+	var domainName string
+	err = h.db.QueryRowContext(r.Context(),
+		`SELECT domain FROM domains WHERE id=?`, domainID).Scan(&domainName)
+	if err == sql.ErrNoRows {
+		writeJSON(w, http.StatusNotFound, errMap("domain not found"))
+		return
+	} else if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errMap("internal error"))
+		return
+	}
+
+	serverIP := os.Getenv("SERVER_IP")
+
+	addrs, dnsErr := net.LookupHost(domainName)
+	resolvedIP := ""
+	if dnsErr == nil && len(addrs) > 0 {
+		resolvedIP = addrs[0]
+	}
+
+	verified := resolvedIP != "" && (serverIP == "" || resolvedIP == serverIP)
+	if verified {
+		h.db.ExecContext(r.Context(),
+			`UPDATE domains SET verified=1, updated_at=datetime('now') WHERE id=?`, domainID)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"verified":    verified,
+		"resolved_ip": resolvedIP,
+		"server_ip":   serverIP,
+	})
 }

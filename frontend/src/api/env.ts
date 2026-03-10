@@ -1,7 +1,8 @@
-import { delay, uid, envVars as store } from './_mock'
+import client from './client'
 
 export interface EnvVariable {
-  id: string
+  id: number
+  service_id?: number
   key: string
   value: string
   is_secret: boolean
@@ -15,43 +16,22 @@ export interface UpsertEnvPayload {
 }
 
 export const envApi = {
-  list: async (_projectId: string, serviceId: string): Promise<EnvVariable[]> => {
-    await delay()
-    return (store[serviceId] ?? []) as EnvVariable[]
-  },
+  list: (projectId: string | number, serviceId: string | number): Promise<EnvVariable[]> =>
+    client.get<EnvVariable[]>(`/projects/${projectId}/services/${serviceId}/env`).then((r) => r.data),
 
-  upsert: async (_projectId: string, serviceId: string, data: UpsertEnvPayload): Promise<EnvVariable> => {
-    await delay(400)
-    if (!store[serviceId]) store[serviceId] = []
-    const existing = (store[serviceId] as EnvVariable[]).find((e) => e.key === data.key)
-    if (existing) {
-      Object.assign(existing, { value: data.value, is_secret: data.is_secret ?? existing.is_secret, updated_at: new Date().toISOString() })
-      return existing
-    }
-    const entry: EnvVariable = {
-      id: `env-${uid()}`,
-      key: data.key,
-      value: data.value,
-      is_secret: data.is_secret ?? false,
-      updated_at: new Date().toISOString(),
-    }
-    store[serviceId].push(entry)
-    return entry
-  },
+  upsert: (projectId: string | number, serviceId: string | number, data: UpsertEnvPayload): Promise<void> =>
+    client.put(`/projects/${projectId}/services/${serviceId}/env`, data).then(() => undefined),
 
-  bulkUpsert: async (_projectId: string, serviceId: string, data: UpsertEnvPayload[]): Promise<{ upserted: number }> => {
-    await delay(500)
-    for (const item of data) {
-      await envApi.upsert(_projectId, serviceId, item)
-    }
+  bulkUpsert: async (
+    projectId: string | number,
+    serviceId: string | number,
+    data: UpsertEnvPayload[]
+  ): Promise<{ upserted: number }> => {
+    await Promise.all(data.map((item) => envApi.upsert(projectId, serviceId, item)))
     return { upserted: data.length }
   },
 
-  delete: async (_projectId: string, serviceId: string, envId: string): Promise<void> => {
-    await delay()
-    if (store[serviceId]) {
-      const i = (store[serviceId] as EnvVariable[]).findIndex((e) => e.id === envId)
-      if (i !== -1) store[serviceId].splice(i, 1)
-    }
-  },
+  // The backend deletes by key, not by ID
+  delete: (projectId: string | number, serviceId: string | number, key: string): Promise<void> =>
+    client.delete(`/projects/${projectId}/services/${serviceId}/env/${encodeURIComponent(key)}`).then(() => undefined),
 }

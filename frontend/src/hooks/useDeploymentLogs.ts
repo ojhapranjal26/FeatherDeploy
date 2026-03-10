@@ -1,5 +1,4 @@
 import { useEffect, useState } from 'react'
-import { MOCK_LOG_LINES } from '@/api/_mock'
 
 export interface LogLine {
   line?: string
@@ -9,34 +8,41 @@ export interface LogLine {
 }
 
 export function useDeploymentLogs(
-  _projectId: string,
-  _serviceId: string,
+  projectId: string,
+  serviceId: string,
   deploymentId: string
 ) {
   const [lines, setLines] = useState<LogLine[]>([])
   const [done, setDone] = useState(false)
 
   useEffect(() => {
-    if (!deploymentId) return
+    if (!projectId || !serviceId || !deploymentId) return
     setLines([])
     setDone(false)
 
-    let index = 0
-    const interval = setInterval(() => {
-      if (index < MOCK_LOG_LINES.length) {
-        setLines((prev) => [
-          ...prev,
-          { line: MOCK_LOG_LINES[index], ts: new Date().toISOString() },
-        ])
-        index++
-      } else {
-        setDone(true)
-        clearInterval(interval)
-      }
-    }, 180)
+    const token = localStorage.getItem('token')
+    const url = `/api/projects/${projectId}/services/${serviceId}/deployments/${deploymentId}/logs${token ? `?token=${encodeURIComponent(token)}` : ''}`
+    const es = new EventSource(url)
 
-    return () => clearInterval(interval)
-  }, [deploymentId])
+    es.onmessage = (e) => {
+      if (e.data) {
+        setLines((prev) => [...prev, { line: e.data, ts: new Date().toISOString() }])
+      }
+    }
+
+    es.addEventListener('done', () => {
+      setDone(true)
+      es.close()
+    })
+
+    es.onerror = () => {
+      setDone(true)
+      es.close()
+    }
+
+    return () => es.close()
+  }, [projectId, serviceId, deploymentId])
 
   return { lines, done }
 }
+

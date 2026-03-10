@@ -127,6 +127,7 @@ func serve() {
 	ghH := handler.NewGitHubHandler(db, *ghClientID, *ghClientSecret, *origin)
 	ghAppH := handler.NewGitHubAppHandler(db)
 	sshH := handler.NewSSHKeyHandler(db, *jwtSecret)
+	dashH := handler.NewDashboardHandler(db)
 
 	// ─── Router ──────────────────────────────────────────────────────────────
 	r := chi.NewRouter()
@@ -160,6 +161,9 @@ func serve() {
 
 		// Self
 		r.Get("/api/auth/me", authH.Me)
+
+		// ── Dashboard ──────────────────────────────────────────────────────
+		r.Get("/api/dashboard", dashH.Stats)
 
 		// ── Admin: user management ─────────────────────────────────────────
 		r.Group(func(r chi.Router) {
@@ -248,6 +252,7 @@ func serve() {
 				r.Get("/api/projects/{projectID}/services/{serviceID}/domains", domainH.List)
 				r.Post("/api/projects/{projectID}/services/{serviceID}/domains", domainH.Add)
 				r.Delete("/api/projects/{projectID}/services/{serviceID}/domains/{domainID}", domainH.Delete)
+				r.Post("/api/projects/{projectID}/services/{serviceID}/domains/{domainID}/verify", domainH.Verify)
 			})
 		})
 	})

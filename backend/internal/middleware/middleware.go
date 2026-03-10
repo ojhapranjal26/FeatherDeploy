@@ -20,15 +20,22 @@ const (
 )
 
 // Authenticate extracts and validates the Bearer JWT.
+// For SSE/EventSource clients that cannot set headers, also accepts a ?token= query param.
 func Authenticate(secret string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var token string
 			hdr := r.Header.Get("Authorization")
-			if !strings.HasPrefix(hdr, "Bearer ") {
+			if strings.HasPrefix(hdr, "Bearer ") {
+				token = strings.TrimPrefix(hdr, "Bearer ")
+			} else if q := r.URL.Query().Get("token"); q != "" {
+				// Fallback for EventSource / SSE clients that cannot set Authorization header
+				token = q
+			}
+			if token == "" {
 				writeErr(w, http.StatusUnauthorized, "missing or malformed Authorization header")
 				return
 			}
-			token := strings.TrimPrefix(hdr, "Bearer ")
 			claims, err := auth.ParseToken(secret, token)
 			if err != nil {
 				writeErr(w, http.StatusUnauthorized, "invalid or expired token")
@@ -143,5 +150,3 @@ func jsonEscape(s string) string {
 	s = strings.ReplaceAll(s, `"`, `\"`)
 	return s
 }
-
-

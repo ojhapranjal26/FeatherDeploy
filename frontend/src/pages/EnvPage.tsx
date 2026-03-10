@@ -193,7 +193,7 @@ export function EnvPage() {
                         size="icon"
                         className="h-7 w-7 text-destructive hover:text-destructive"
                         onClick={() => {
-                          if (confirm(`Remove "${v.key}"?`)) deleteMutation.mutate(v.id)
+                          if (confirm(`Remove "${v.key}"?`)) deleteMutation.mutate(v.key)
                         }}
                       >
                         <Trash2 className="h-3.5 w-3.5" />

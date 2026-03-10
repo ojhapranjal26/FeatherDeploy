@@ -1,55 +1,36 @@
-import { delay, MOCK_USER } from './_mock'
+import client from './client'
 
 export interface LoginPayload {
   email: string
   password: string
 }
 
-export interface RegisterPayload {
-  email: string
-  password: string
-  name: string
-}
-
 export interface User {
-  id: string
+  id: number
   email: string
   name: string
   role: 'user' | 'admin' | 'superadmin'
+  github_login?: string
   created_at: string
+  updated_at?: string
 }
 
 export interface AuthResponse {
   token: string
-  expires_at: string
   user: User
 }
 
 export const authApi = {
-  register: async (data: RegisterPayload): Promise<User> => {
-    await delay(600)
-    const user: User = { ...MOCK_USER, email: data.email, name: data.name }
-    localStorage.setItem('token', 'mock-token')
-    return user
-  },
-
-  login: async (_data: LoginPayload): Promise<AuthResponse> => {
-    await delay(700)
-    localStorage.setItem('token', 'mock-token')
-    return {
-      token: 'mock-token',
-      expires_at: new Date(Date.now() + 86_400_000).toISOString(),
-      user: MOCK_USER,
-    }
+  login: async (data: LoginPayload): Promise<AuthResponse> => {
+    const res = await client.post<AuthResponse>('/auth/login', data)
+    localStorage.setItem('token', res.data.token)
+    return res.data
   },
 
   logout: async (): Promise<void> => {
-    await delay(200)
     localStorage.removeItem('token')
   },
 
-  me: async (): Promise<User> => {
-    await delay(200)
-    return MOCK_USER
-  },
+  me: (): Promise<User> =>
+    client.get<User>('/auth/me').then((r) => r.data),
 }

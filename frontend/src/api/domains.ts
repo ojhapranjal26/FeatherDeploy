@@ -1,8 +1,8 @@
-import { delay, uid, domains as store } from './_mock'
+import client from './client'
 
 export interface Domain {
-  id: string
-  service_id: string
+  id: number
+  service_id: number
   domain: string
   tls: boolean
   verified: boolean
@@ -16,48 +16,23 @@ export interface AddDomainPayload {
 }
 
 export const domainsApi = {
-  list: async (_projectId: string, serviceId: string): Promise<Domain[]> => {
-    await delay()
-    return (store[serviceId] ?? []) as Domain[]
-  },
+  list: (projectId: string | number, serviceId: string | number): Promise<Domain[]> =>
+    client.get<Domain[]>(`/projects/${projectId}/services/${serviceId}/domains`).then((r) => r.data),
 
-  add: async (_projectId: string, serviceId: string, data: AddDomainPayload): Promise<Domain> => {
-    await delay(500)
-    const entry: Domain = {
-      id: `dom-${uid()}`,
-      service_id: serviceId,
-      domain: data.domain,
-      tls: data.tls ?? true,
-      verified: false,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    }
-    if (!store[serviceId]) store[serviceId] = []
-    store[serviceId].push(entry)
-    return entry
-  },
+  add: (projectId: string | number, serviceId: string | number, data: AddDomainPayload): Promise<Domain> =>
+    client.post<Domain>(`/projects/${projectId}/services/${serviceId}/domains`, data).then((r) => r.data),
 
-  delete: async (_projectId: string, serviceId: string, domainId: string): Promise<void> => {
-    await delay()
-    if (store[serviceId]) {
-      const i = (store[serviceId] as Domain[]).findIndex((d) => d.id === domainId)
-      if (i !== -1) store[serviceId].splice(i, 1)
-    }
-  },
+  delete: (projectId: string | number, serviceId: string | number, domainId: string | number): Promise<void> =>
+    client.delete(`/projects/${projectId}/services/${serviceId}/domains/${domainId}`).then(() => undefined),
 
-  verify: async (_projectId: string, serviceId: string, domainId: string): Promise<{ verified: boolean; resolved_ip: string; server_ip: string }> => {
-    await delay(1200)
-    const dom = (store[serviceId] ?? []).find((d) => (d as Domain).id === domainId) as Domain | undefined
-    // Simulate 50% chance of verification success for design purposes
-    const success = Math.random() > 0.4
-    if (dom && success) {
-      dom.verified = true
-      dom.updated_at = new Date().toISOString()
-    }
-    return {
-      verified: success,
-      resolved_ip: success ? '203.0.113.42' : '1.2.3.4',
-      server_ip: '203.0.113.42',
-    }
-  },
+  verify: (
+    projectId: string | number,
+    serviceId: string | number,
+    domainId: string | number
+  ): Promise<{ verified: boolean; resolved_ip: string; server_ip: string }> =>
+    client
+      .post<{ verified: boolean; resolved_ip: string; server_ip: string }>(
+        `/projects/${projectId}/services/${serviceId}/domains/${domainId}/verify`
+      )
+      .then((r) => r.data),
 }
