@@ -45,10 +45,12 @@ func applySchema(db *sql.DB) error {
 			continue
 		}
 		if _, err := db.Exec(s); err != nil {
-			// Ignore "table already exists" — schema.sql uses IF NOT EXISTS but
-			// rqlite may return a benign error for some PRAGMA statements.
 			msg := strings.ToLower(err.Error())
-			if strings.Contains(msg, "already exists") {
+			// Ignore benign schema errors:
+			// - "already exists"  — IF NOT EXISTS not supported for all statement types
+			// - "duplicate column" — ALTER TABLE ADD COLUMN on already-migrated DB
+			if strings.Contains(msg, "already exists") ||
+				strings.Contains(msg, "duplicate column") {
 				continue
 			}
 			return fmt.Errorf("schema exec (%q): %w", s[:min(40, len(s))], err)

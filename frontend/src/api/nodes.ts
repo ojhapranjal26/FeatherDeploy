@@ -11,6 +11,26 @@ export interface Node {
   rqlite_addr: string
   last_seen: string | null
   created_at: string
+  // Resource stats (populated by node heartbeat every 10s)
+  cpu_usage: number | null
+  ram_used: number | null
+  ram_total: number | null
+  disk_used: number | null
+  disk_total: number | null
+  last_stats_at: string | null
+  node_id: string | null
+}
+
+export interface ClusterBrain {
+  BrainID: string
+  BrainAddr: string
+  LastHeartbeat: string
+  Alive: boolean
+  CPU: number
+  RAMUsed: number
+  RAMTotal: number
+  DiskUsed: number
+  DiskTotal: number
 }
 
 export interface AddNodePayload {
@@ -32,4 +52,11 @@ export const nodesApi = {
     client.post<AddNodeResponse>('/nodes', data).then((r) => r.data),
 
   delete: (id: number) => client.delete(`/nodes/${id}`),
+
+  sshCommand: (id: number) =>
+    client.get<{ command: string; key_path: string; note: string }>(`/nodes/${id}/ssh-command`).then((r) => r.data),
+}
+
+export const clusterApi = {
+  getBrain: () => client.get<ClusterBrain>('/cluster/brain').then((r) => r.data),
 }

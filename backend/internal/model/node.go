@@ -40,6 +40,12 @@ type NodeSummary struct {
 	RqliteAddr string     `json:"rqlite_addr"`
 	LastSeen   *time.Time `json:"last_seen"`
 	CreatedAt  time.Time  `json:"created_at"`
+	// Resource stats (updated every 10s via node heartbeat)
+	CPUUsage  float64 `json:"cpu_usage"`
+	RAMUsed   int64   `json:"ram_used"`
+	RAMTotal  int64   `json:"ram_total"`
+	DiskUsed  int64   `json:"disk_used"`
+	DiskTotal int64   `json:"disk_total"`
 }
 
 // AddNodeRequest is the payload for POST /api/nodes.
@@ -49,8 +55,14 @@ type AddNodeRequest struct {
 	Port int    `json:"port"`
 }
 
-// NodePingRequest is sent by a node to update its status and last-seen time.
+// NodePingRequest is sent by a node to update its status, stats, and last-seen time.
 type NodePingRequest struct {
 	Status     NodeStatus `json:"status"`
 	RqliteAddr string     `json:"rqlite_addr"`
+	// Resource stats (collected on the node every heartbeat tick)
+	CPUUsage  float64 `json:"cpu_usage"`  // 0-100 percent
+	RAMUsed   int64   `json:"ram_used"`   // bytes
+	RAMTotal  int64   `json:"ram_total"`  // bytes
+	DiskUsed  int64   `json:"disk_used"`  // bytes
+	DiskTotal int64   `json:"disk_total"` // bytes
 }

@@ -15,11 +15,17 @@ import {
   CheckCircle2,
   XCircle,
   Clock,
+  Crown,
+  Cpu,
+  MemoryStick,
+  HardDrive,
+  Server,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { projectsApi } from '@/api/projects'
 import type { Project } from '@/api/projects'
 import client from '@/api/client'
+import { clusterApi } from '@/api/nodes'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -233,6 +239,13 @@ export function DashboardPage() {
     refetchInterval: 30_000,
   })
 
+  const { data: brain } = useQuery({
+    queryKey: ['cluster-brain'],
+    queryFn: clusterApi.getBrain,
+    refetchInterval: 10_000,
+    retry: false, // brain endpoint may 404 on fresh installs
+  })
+
   const createMutation = useMutation({
     mutationFn: projectsApi.create,
     onSuccess: () => {
@@ -408,6 +421,84 @@ export function DashboardPage() {
 
         {/* Right panel */}
         <div className="space-y-4">
+
+          {/* Cluster Health */}
+          {brain && (
+            <Card className="border-border/60">
+              <CardHeader className="pb-2">
+                <div className="flex items-center justify-between">
+                  <CardTitle className="text-sm font-semibold flex items-center gap-1.5">
+                    <Server className="h-4 w-4" />
+                    Cluster Health
+                  </CardTitle>
+                  <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium border ${
+                    brain.Alive
+                      ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border-emerald-300/30'
+                      : 'bg-red-500/15 text-red-600 dark:text-red-400 border-red-300/30'
+                  }`}>
+                    {brain.Alive ? <CheckCircle2 className="h-3 w-3" /> : <XCircle className="h-3 w-3" />}
+                    {brain.Alive ? 'Healthy' : 'Degraded'}
+                  </span>
+                </div>
+                <CardDescription className="text-xs flex items-center gap-1">
+                  <Crown className="h-3 w-3 text-amber-500" />
+                  Brain: <span className="font-mono">{brain.BrainID || 'main'}</span>
+                  {brain.LastHeartbeat && (
+                    <span className="ml-1 text-muted-foreground">
+                      · last beat {relativeTime(brain.LastHeartbeat)}
+                    </span>
+                  )}
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="pb-4 space-y-2">
+                {/* CPU */}
+                <div className="flex items-center gap-2">
+                  <Cpu className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                  <div className="flex-1">
+                    <div className="flex justify-between mb-0.5">
+                      <span className="text-xs text-muted-foreground">CPU</span>
+                      <span className="text-xs tabular-nums">{Math.round(brain.CPU ?? 0)}%</span>
+                    </div>
+                    <Progress value={brain.CPU ?? 0} className="h-1" />
+                  </div>
+                </div>
+                {/* RAM */}
+                {brain.RAMTotal > 0 && (
+                  <div className="flex items-center gap-2">
+                    <MemoryStick className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                    <div className="flex-1">
+                      <div className="flex justify-between mb-0.5">
+                        <span className="text-xs text-muted-foreground">RAM</span>
+                        <span className="text-xs tabular-nums">
+                          {(brain.RAMUsed / 1024 / 1024 / 1024).toFixed(1)}
+                          {' / '}
+                          {(brain.RAMTotal / 1024 / 1024 / 1024).toFixed(1)} GB
+                        </span>
+                      </div>
+                      <Progress value={Math.round((brain.RAMUsed / brain.RAMTotal) * 100)} className="h-1" />
+                    </div>
+                  </div>
+                )}
+                {/* Disk */}
+                {brain.DiskTotal > 0 && (
+                  <div className="flex items-center gap-2">
+                    <HardDrive className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                    <div className="flex-1">
+                      <div className="flex justify-between mb-0.5">
+                        <span className="text-xs text-muted-foreground">Disk</span>
+                        <span className="text-xs tabular-nums">
+                          {(brain.DiskUsed / 1024 / 1024 / 1024).toFixed(1)}
+                          {' / '}
+                          {(brain.DiskTotal / 1024 / 1024 / 1024).toFixed(1)} GB
+                        </span>
+                      </div>
+                      <Progress value={Math.round((brain.DiskUsed / brain.DiskTotal) * 100)} className="h-1" />
+                    </div>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          )}
 
           {/* Service health */}
           <Card className="border-border/60">

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"flag"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -19,6 +21,7 @@ import (
 	"github.com/deploy-paas/backend/internal/auth"
 	appDb "github.com/deploy-paas/backend/internal/db"
 	"github.com/deploy-paas/backend/internal/handler"
+	"github.com/deploy-paas/backend/internal/heartbeat"
 	"github.com/deploy-paas/backend/internal/installer"
 	"github.com/deploy-paas/backend/internal/mailer"
 	mw "github.com/deploy-paas/backend/internal/middleware"
@@ -110,6 +113,24 @@ func serve() {
 	// Seed default superadmin on first run (no users in DB yet)
 	seedSuperAdmin(db)
 
+	// ─── Brain heartbeat + SSH key ──────────────────────────────────────
+	// Generate / load cluster SSH keypair (for passwordless node access)
+	if err := ensureSSHKey(db); err != nil {
+		slog.Warn("SSH key setup", "err", err)
+	}
+
+	// Start brain heartbeat: writes cluster_state every 10s so nodes know we're alive
+	brainAddr := *addr
+	if strings.HasPrefix(brainAddr, ":") {
+		brainAddr = "http://127.0.0.1" + brainAddr
+	} else {
+		brainAddr = "http://" + brainAddr
+	}
+	heartbeat.StartBrain(context.Background(), db, "main", brainAddr, func() heartbeat.BrainStats {
+		return collectServerStats()
+	})
+	slog.Info("brain heartbeat started")
+
 	// ─── Handlers ─────────────────────────────────────────────────────────────
 	smtpPortInt, _ := strconv.Atoi(*smtpPort)
 	m := mailer.New(mailer.Config{
@@ -168,7 +189,10 @@ func serve() {
 	r.Get("/api/nodes/{token}/join-script", nodeH.JoinScript)
 	r.Post("/api/nodes/{token}/complete-join", nodeH.CompleteJoin)
 	r.Get("/api/nodes/binary", nodeH.BinaryDownload)
+	r.Get("/api/nodes/server-binary", nodeH.ServerBinaryDownload)
 	r.Get("/api/nodes/ca-cert", nodeH.CACert)
+	// Cluster brain info (no auth — nodes also read this)
+	r.Get("/api/cluster/brain", nodeH.ClusterBrain)
 
 	// ─── Authenticated routes ─────────────────────────────────────────────────
 	r.Group(func(r chi.Router) {
@@ -219,6 +243,7 @@ func serve() {
 			r.Post("/api/nodes", nodeH.Add)
 			r.Delete("/api/nodes/{nodeID}", nodeH.Delete)
 			r.Post("/api/nodes/{nodeID}/ping", nodeH.Ping)
+			r.Get("/api/nodes/{nodeID}/ssh-command", nodeH.SSHCommand)
 		})
 
 		// ── SSH Keys ──────────────────────────────────────────────────────
@@ -390,4 +415,79 @@ func seedSuperAdmin(db *sql.DB) {
 		"email", "admin@deploypaaas.local",
 		"password", "Admin@123456",
 	)
+}
+
+// ensureSSHKey generates an SSH keypair at /etc/featherdeploy/ssh_id (ed25519)
+// if one doesn't exist, then stores the public key in cluster_state for
+// distribution to worker nodes.
+func ensureSSHKey(db *sql.DB) error {
+	keyPath := "/etc/featherdeploy/ssh_id"
+	pubPath := keyPath + ".pub"
+
+	// Generate keypair if not present
+	if _, err := os.Stat(keyPath); os.IsNotExist(err) {
+		if err := os.MkdirAll("/etc/featherdeploy", 0700); err != nil {
+			return err
+		}
+		if out, err := exec.Command("ssh-keygen",
+			"-t", "ed25519",
+			"-f", keyPath,
+			"-N", "",
+			"-C", "featherdeploy-cluster",
+		).CombinedOutput(); err != nil {
+			slog.Warn("ssh-keygen failed (SSH passwordless access will be unavailable)",
+				"err", err, "out", string(out))
+			return nil // non-fatal
+		}
+		slog.Info("generated cluster SSH keypair", "path", keyPath)
+	}
+
+	// Read public key and store in DB
+	pubKey, err := os.ReadFile(pubPath)
+	if err != nil {
+		return nil // non-fatal
+	}
+	if err := heartbeat.SetSSHPublicKey(db, strings.TrimSpace(string(pubKey))); err != nil {
+		slog.Warn("store SSH public key in DB", "err", err)
+	}
+	return nil
+}
+
+// collectServerStats reads /proc/meminfo and statvfs for the main server's
+// current resource usage.  Returns empty stats on non-Linux systems.
+func collectServerStats() heartbeat.BrainStats {
+	var s heartbeat.BrainStats
+	// RAM from /proc/meminfo
+	if data, err := os.ReadFile("/proc/meminfo"); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			var key string
+			var val uint64
+			fmt.Sscanf(line, "%s %d", &key, &val)
+			switch key {
+			case "MemTotal:":
+				s.RAMTotal = int64(val * 1024)
+			case "MemAvailable:":
+				s.RAMUsed = s.RAMTotal - int64(val*1024)
+			}
+		}
+	}
+	// CPU: simple 1-second sample via /proc/stat
+	s.CPU = 0 // lightweight: leave as 0 from main server side; nodes calculate their own
+	// Disk: root filesystem
+	s.DiskUsed, s.DiskTotal = diskUsage("/")
+	return s
+}
+
+func diskUsage(path string) (used, total int64) {
+	if out, err := exec.Command("df", "-B1", "--output=used,size", path).Output(); err == nil {
+		lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+		if len(lines) >= 2 {
+			parts := strings.Fields(lines[1])
+			if len(parts) >= 2 {
+				fmt.Sscanf(parts[0], "%d", &used)
+				fmt.Sscanf(parts[1], "%d", &total)
+			}
+		}
+	}
+	return
 }

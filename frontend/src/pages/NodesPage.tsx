@@ -2,7 +2,8 @@ import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   Server, Plus, Trash2, Copy, Check, Loader2, RefreshCw,
-  CheckCircle2, Clock, WifiOff, AlertCircle,
+  CheckCircle2, Clock, WifiOff, AlertCircle, Crown, Terminal,
+  Cpu, MemoryStick, HardDrive,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -19,7 +20,7 @@ import {
 import { Skeleton } from '@/components/ui/skeleton'
 import { toast } from 'sonner'
 import { useAuth } from '@/context/AuthContext'
-import { nodesApi, type Node, type AddNodeResponse } from '@/api/nodes'
+import { nodesApi, clusterApi, type Node, type AddNodeResponse } from '@/api/nodes'
 
 // ── Status badge ─────────────────────────────────────────────────────────────
 
@@ -58,6 +59,109 @@ function CopyButton({ text, label = 'Copy' }: { text: string; label?: string }) 
   )
 }
 
+// ── Resource bar ─────────────────────────────────────────────────────────────
+
+function pct(used: number | null, total: number | null): number {
+  if (!used || !total || total === 0) return 0
+  return Math.round((used / total) * 100)
+}
+
+function fmtBytes(bytes: number | null): string {
+  if (bytes === null || bytes === 0) return '—'
+  if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(0) + ' MB'
+  return (bytes / (1024 * 1024 * 1024)).toFixed(1) + ' GB'
+}
+
+function MiniBar({ value, color = 'bg-blue-500' }: { value: number; color?: string }) {
+  return (
+    <div className="w-16 h-1.5 rounded-full bg-muted overflow-hidden">
+      <div className={`h-full rounded-full ${color}`} style={{ width: `${Math.min(value, 100)}%` }} />
+    </div>
+  )
+}
+
+function NodeStats({ node }: { node: Node }) {
+  if (!node.last_stats_at) return <span className="text-xs text-muted-foreground italic">no stats</span>
+  const cpuPct = Math.round(node.cpu_usage ?? 0)
+  const ramPct = pct(node.ram_used, node.ram_total)
+  const diskPct = pct(node.disk_used, node.disk_total)
+  return (
+    <div className="flex flex-col gap-1 min-w-[130px]">
+      <div className="flex items-center gap-1.5">
+        <Cpu className="h-3 w-3 text-muted-foreground" />
+        <MiniBar value={cpuPct} color={cpuPct > 85 ? 'bg-red-500' : 'bg-blue-500'} />
+        <span className="text-xs text-muted-foreground w-8 tabular-nums">{cpuPct}%</span>
+      </div>
+      <div className="flex items-center gap-1.5">
+        <MemoryStick className="h-3 w-3 text-muted-foreground" />
+        <MiniBar value={ramPct} color={ramPct > 85 ? 'bg-red-500' : 'bg-violet-500'} />
+        <span className="text-xs text-muted-foreground w-8 tabular-nums">{fmtBytes(node.ram_used)}</span>
+      </div>
+      <div className="flex items-center gap-1.5">
+        <HardDrive className="h-3 w-3 text-muted-foreground" />
+        <MiniBar value={diskPct} color={diskPct > 90 ? 'bg-red-500' : 'bg-emerald-500'} />
+        <span className="text-xs text-muted-foreground w-8 tabular-nums">{fmtBytes(node.disk_used)}</span>
+      </div>
+    </div>
+  )
+}
+
+// ── SSH Command dialog ────────────────────────────────────────────────────────
+
+function SSHCommandDialog({ node }: { node: Node }) {
+  const [open, setOpen] = useState(false)
+  const [cmd, setCmd] = useState('')
+  const [note, setNote] = useState('')
+  const [loading, setLoading] = useState(false)
+
+  const fetchCmd = async () => {
+    setLoading(true)
+    try {
+      const res = await nodesApi.sshCommand(node.id)
+      setCmd(res.command)
+      setNote(res.note)
+    } catch {
+      toast.error('Could not fetch SSH command. Are you authenticated?')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={(v) => { setOpen(v); if (v) fetchCmd() }}>
+      <DialogTrigger render={
+        <Button variant="ghost" size="icon" className="h-8 w-8" title="SSH into node">
+          <Terminal className="h-4 w-4" />
+        </Button>
+      } />
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>SSH into {node.name}</DialogTitle>
+          <DialogDescription>
+            Run this command from the main server terminal to connect without a password.
+          </DialogDescription>
+        </DialogHeader>
+        {loading ? (
+          <div className="py-6 flex justify-center"><Loader2 className="h-5 w-5 animate-spin" /></div>
+        ) : cmd ? (
+          <div className="space-y-3 py-2">
+            <div className="rounded-md bg-muted px-3 py-2 font-mono text-sm break-all">{cmd}</div>
+            {note && <p className="text-xs text-muted-foreground">{note}</p>}
+            <div className="flex justify-end">
+              <CopyButton text={cmd} label="Copy Command" />
+            </div>
+          </div>
+        ) : (
+          <p className="py-4 text-sm text-muted-foreground">No SSH command available.</p>
+        )}
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setOpen(false)}>Close</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 export function NodesPage() {
@@ -70,7 +174,14 @@ export function NodesPage() {
     queryKey: ['nodes'],
     queryFn: nodesApi.list,
     enabled: canManage,
-    refetchInterval: 30_000, // auto-refresh every 30s
+    refetchInterval: 10_000, // match heartbeat interval
+  })
+
+  const { data: brain } = useQuery({
+    queryKey: ['cluster-brain'],
+    queryFn: clusterApi.getBrain,
+    enabled: canManage,
+    refetchInterval: 10_000,
   })
 
   // ── Add node dialog ────────────────────────────────────────────────────────
@@ -239,43 +350,61 @@ export function NodesPage() {
                 <th className="px-4 py-3 text-left font-medium text-muted-foreground">Name</th>
                 <th className="px-4 py-3 text-left font-medium text-muted-foreground">Address</th>
                 <th className="px-4 py-3 text-left font-medium text-muted-foreground">Status</th>
+                <th className="px-4 py-3 text-left font-medium text-muted-foreground">Resources</th>
                 <th className="px-4 py-3 text-left font-medium text-muted-foreground">Last Seen</th>
                 <th className="px-4 py-3 text-left font-medium text-muted-foreground">rqlite</th>
-                <th className="w-12" />
+                <th className="w-20" />
               </tr>
             </thead>
             <tbody>
-              {nodes.map((node, idx) => (
-                <tr key={node.id} className={idx !== nodes.length - 1 ? 'border-b' : ''}>
-                  <td className="px-4 py-3 font-medium">{node.name}</td>
-                  <td className="px-4 py-3 font-mono text-muted-foreground">
-                    {node.ip}:{node.port}
-                  </td>
-                  <td className="px-4 py-3">
-                    <StatusBadge status={node.status} />
-                  </td>
-                  <td className="px-4 py-3 text-muted-foreground">
-                    {node.last_seen
-                      ? new Date(node.last_seen).toLocaleString()
-                      : <span className="italic opacity-50">never</span>}
-                  </td>
-                  <td className="px-4 py-3 font-mono text-xs text-muted-foreground">
-                    {node.rqlite_addr || <span className="italic opacity-50">—</span>}
-                  </td>
-                  <td className="px-4 py-3">
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-8 w-8 text-destructive hover:text-destructive hover:bg-destructive/10"
-                      onClick={() => {
-                        if (confirm(`Remove node "${node.name}"?`)) deleteMutation.mutate(node.id)
-                      }}
-                    >
-                      <Trash2 className="h-4 w-4" />
-                    </Button>
-                  </td>
-                </tr>
-              ))}
+              {nodes.map((node, idx) => {
+                const isBrain = brain?.BrainID && (node.node_id === brain.BrainID || node.name === brain.BrainID)
+                return (
+                  <tr key={node.id} className={idx !== nodes.length - 1 ? 'border-b' : ''}>
+                    <td className="px-4 py-3">
+                      <div className="flex items-center gap-2">
+                        <span className="font-medium">{node.name}</span>
+                        {isBrain && (
+                          <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 border border-amber-300/30 px-2 py-0.5 text-xs font-medium text-amber-600 dark:text-amber-400">
+                            <Crown className="h-3 w-3" />
+                            Brain
+                          </span>
+                        )}
+                      </div>
+                    </td>
+                    <td className="px-4 py-3 font-mono text-muted-foreground">
+                      {node.ip}:{node.port}
+                    </td>
+                    <td className="px-4 py-3">
+                      <StatusBadge status={node.status} />
+                    </td>
+                    <td className="px-4 py-3">
+                      <NodeStats node={node} />
+                    </td>
+                    <td className="px-4 py-3 text-muted-foreground">
+                      {node.last_seen
+                        ? new Date(node.last_seen).toLocaleString()
+                        : <span className="italic opacity-50">never</span>}
+                    </td>
+                    <td className="px-4 py-3 font-mono text-xs text-muted-foreground">
+                      {node.rqlite_addr || <span className="italic opacity-50">—</span>}
+                    </td>
+                    <td className="px-4 py-3 flex items-center gap-1">
+                      <SSHCommandDialog node={node} />
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-8 w-8 text-destructive hover:text-destructive hover:bg-destructive/10"
+                        onClick={() => {
+                          if (confirm(`Remove node "${node.name}"?`)) deleteMutation.mutate(node.id)
+                        }}
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </td>
+                  </tr>
+                )
+              })}
             </tbody>
           </table>
         </div>

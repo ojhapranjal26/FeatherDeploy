@@ -18,6 +18,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/deploy-paas/backend/internal/crypto"
+	"github.com/deploy-paas/backend/internal/heartbeat"
 	"github.com/deploy-paas/backend/internal/middleware"
 	"github.com/deploy-paas/backend/internal/model"
 	"github.com/deploy-paas/backend/internal/pki"
@@ -82,7 +83,8 @@ func (h *NodeHandler) loadCA() (*pki.CA, error) {
 // GET /api/nodes — list all nodes (superadmin/admin only)
 func (h *NodeHandler) List(w http.ResponseWriter, r *http.Request) {
 	rows, err := h.db.QueryContext(r.Context(),
-		`SELECT id, name, ip, port, status, rqlite_addr, last_seen, created_at
+		`SELECT id, name, ip, port, status, rqlite_addr, last_seen, created_at,
+		        cpu_usage, ram_used, ram_total, disk_used, disk_total
 		 FROM nodes ORDER BY created_at DESC`)
 	if err != nil {
 		slog.Error("list nodes", "err", err)
@@ -97,7 +99,8 @@ func (h *NodeHandler) List(w http.ResponseWriter, r *http.Request) {
 		var status, createdAt string
 		var rqliteAddr, lastSeen sql.NullString
 		if err := rows.Scan(&n.ID, &n.Name, &n.IP, &n.Port, &status,
-			&rqliteAddr, &lastSeen, &createdAt); err != nil {
+			&rqliteAddr, &lastSeen, &createdAt,
+			&n.CPUUsage, &n.RAMUsed, &n.RAMTotal, &n.DiskUsed, &n.DiskTotal); err != nil {
 			continue
 		}
 		n.Status = model.NodeStatus(status)
@@ -195,7 +198,9 @@ func (h *NodeHandler) JoinScript(w http.ResponseWriter, r *http.Request) {
 	}
 	mainURL := fmt.Sprintf("%s://%s", scheme, h.domain)
 
-	script, err := renderJoinScript(mainURL, token, ca.CertPEM)
+	sshPubKey := heartbeat.GetSSHPublicKey(h.db)
+
+	script, err := renderJoinScript(mainURL, token, ca.CertPEM, sshPubKey)
 	if err != nil {
 		slog.Error("render join script", "err", err)
 		writeJSON(w, http.StatusInternalServerError, errMap("internal error"))
@@ -307,16 +312,20 @@ func (h *NodeHandler) CompleteJoin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Fetch SSH public key so the node can add it to authorized_keys
+	sshPubKey := heartbeat.GetSSHPublicKey(h.db)
+
 	writeJSON(w, http.StatusOK, map[string]string{
-		"ca_cert_pem":   ca.CertPEM,
-		"node_cert_pem": nodeCert.CertPEM,
-		"node_key_pem":  nodeCert.KeyPEM,  // node key sent only once
-		"encrypted_env": encryptedEnv,     // decrypt with join token
-		"rqlite_main":   "127.0.0.1:4002", // main Raft addr to join
+		"ca_cert_pem":    ca.CertPEM,
+		"node_cert_pem":  nodeCert.CertPEM,
+		"node_key_pem":   nodeCert.KeyPEM,  // node key sent only once
+		"encrypted_env":  encryptedEnv,     // decrypt with join token
+		"rqlite_main":    "127.0.0.1:4002", // main Raft addr to join
+		"ssh_public_key": sshPubKey,        // add to /root/.ssh/authorized_keys
 	})
 }
 
-// POST /api/nodes/{nodeID}/ping — node heartbeat
+// POST /api/nodes/{nodeID}/ping — node heartbeat + stats
 func (h *NodeHandler) Ping(w http.ResponseWriter, r *http.Request) {
 	nodeID, err := strconv.ParseInt(chi.URLParam(r, "nodeID"), 10, 64)
 	if err != nil {
@@ -334,10 +343,79 @@ func (h *NodeHandler) Ping(w http.ResponseWriter, r *http.Request) {
 
 	h.db.ExecContext(r.Context(),
 		`UPDATE nodes SET status=?, rqlite_addr=?, last_seen=datetime('now'),
+		 cpu_usage=?, ram_used=?, ram_total=?,
+		 disk_used=?, disk_total=?, last_stats_at=datetime('now'),
 		 updated_at=datetime('now') WHERE id=?`,
-		status, req.RqliteAddr, nodeID,
+		status, req.RqliteAddr,
+		req.CPUUsage, req.RAMUsed, req.RAMTotal,
+		req.DiskUsed, req.DiskTotal,
+		nodeID,
 	)
 	writeJSON(w, http.StatusOK, map[string]string{"ok": "1"})
+}
+
+// GET /api/cluster/brain — returns current brain info + stats
+func (h *NodeHandler) ClusterBrain(w http.ResponseWriter, r *http.Request) {
+	brain, err := heartbeat.ReadBrain(h.db)
+	if err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, errMap("cluster state not available"))
+		return
+	}
+	writeJSON(w, http.StatusOK, brain)
+}
+
+// GET /api/nodes/{nodeID}/ssh-command — returns the SSH command to connect to this node
+// without a password (key-based, using the cluster SSH key)
+func (h *NodeHandler) SSHCommand(w http.ResponseWriter, r *http.Request) {
+	nodeID, err := strconv.ParseInt(chi.URLParam(r, "nodeID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errMap("invalid node ID"))
+		return
+	}
+
+	var ip string
+	err = h.db.QueryRowContext(r.Context(), `SELECT ip FROM nodes WHERE id=?`, nodeID).Scan(&ip)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, errMap("node not found"))
+		return
+	}
+
+	keyPath := "/etc/featherdeploy/ssh_id"
+	cmd := fmt.Sprintf("ssh -i %s -o StrictHostKeyChecking=no root@%s", keyPath, ip)
+	writeJSON(w, http.StatusOK, map[string]string{
+		"command":  cmd,
+		"key_path": keyPath,
+		"note":     "Run this command from the main server terminal (or from any host that has the private key). Key is passwordless.",
+	})
+}
+
+// GET /api/nodes/server-binary?token=TOKEN — serve the main featherdeploy server binary
+// Nodes download this during join so they can promote to brain.
+func (h *NodeHandler) ServerBinaryDownload(w http.ResponseWriter, r *http.Request) {
+	token := r.URL.Query().Get("token")
+	if token != "" {
+		if !h.tokenValid(r, token) {
+			writeJSON(w, http.StatusUnauthorized, errMap("invalid token"))
+			return
+		}
+	} else {
+		claims := middleware.GetClaims(r.Context())
+		if claims.Role != model.RoleSuperAdmin && claims.Role != model.RoleAdmin {
+			writeJSON(w, http.StatusForbidden, errMap("forbidden"))
+			return
+		}
+	}
+
+	path := "/usr/local/bin/featherdeploy"
+	f, err := os.Open(path)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, errMap("server binary not found — ensure featherdeploy is installed"))
+		return
+	}
+	defer f.Close()
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", `attachment; filename="featherdeploy"`)
+	io.Copy(w, f)
 }
 
 // GET /api/nodes/{nodeID}/ca-cert — returns the CA cert (public info, no auth needed for nodes)
@@ -405,8 +483,10 @@ set -euo pipefail
 MAIN_URL="{{.MainURL}}"
 JOIN_TOKEN="{{.Token}}"
 NODE_BINARY="/usr/local/bin/featherdeploy-node"
+SERVER_BINARY="/usr/local/bin/featherdeploy"
 RQLITE_VER="8.36.5"
 CA_CERT='{{.CACert}}'
+SSH_PUB_KEY='{{.SSHPubKey}}'
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "ERROR: run as root (sudo)." >&2; exit 1
@@ -442,23 +522,42 @@ configure_crun() {
 if command -v apt-get >/dev/null 2>&1; then
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -y -q
-  apt-get install -y -q curl podman crun caddy 2>/dev/null || apt-get install -y -q curl podman caddy
+  apt-get install -y -q curl podman crun caddy openssh-server 2>/dev/null || apt-get install -y -q curl podman caddy openssh-server
 elif command -v dnf >/dev/null 2>&1; then
-  dnf install -y -q curl podman crun caddy 2>/dev/null || dnf install -y -q curl podman caddy
+  dnf install -y -q curl podman crun caddy openssh-server 2>/dev/null || dnf install -y -q curl podman caddy openssh-server
 elif command -v yum >/dev/null 2>&1; then
-  yum install -y -q curl podman crun 2>/dev/null || yum install -y -q curl podman
+  yum install -y -q curl podman openssh-server 2>/dev/null || yum install -y -q curl podman openssh-server
 elif command -v apk >/dev/null 2>&1; then
-  apk add --no-cache curl podman caddy crun 2>/dev/null || apk add --no-cache curl podman caddy
+  apk add --no-cache curl podman caddy crun openssh 2>/dev/null || apk add --no-cache curl podman caddy openssh
 fi
 
 install_rqlite
 configure_crun
 
+# -- Passwordless SSH: install brain's public key -----------------------------
+if [ -n "$SSH_PUB_KEY" ]; then
+  mkdir -p /root/.ssh
+  chmod 700 /root/.ssh
+  # Add only if not already present
+  grep -qxF "$SSH_PUB_KEY" /root/.ssh/authorized_keys 2>/dev/null || \
+    echo "$SSH_PUB_KEY" >> /root/.ssh/authorized_keys
+  chmod 600 /root/.ssh/authorized_keys
+  systemctl enable --now ssh sshd 2>/dev/null || true
+  echo "  SSH public key installed (passwordless access configured)"
+fi
+
 # -- Download featherdeploy-node binary ---------------------------------------
 echo "==> Downloading featherdeploy-node..."
 curl -fsSL "${MAIN_URL}/api/nodes/binary?token=${JOIN_TOKEN}" -o "$NODE_BINARY"
 chmod +x "$NODE_BINARY"
-echo "  Binary installed: $NODE_BINARY"
+echo "  Node binary installed: $NODE_BINARY"
+
+# -- Download featherdeploy server binary (needed for brain failover) ---------
+echo "==> Downloading featherdeploy server binary (for failover)..."
+curl -fsSL "${MAIN_URL}/api/nodes/server-binary?token=${JOIN_TOKEN}" -o "$SERVER_BINARY" || \
+  echo "  (server binary not available yet — will retry on next update)"
+chmod +x "$SERVER_BINARY" 2>/dev/null || true
+echo "  Server binary cached: $SERVER_BINARY"
 
 # -- Save CA certificate ------------------------------------------------------
 mkdir -p /etc/featherdeploy
@@ -472,16 +571,17 @@ echo "==> Running node join wizard..."
 exec "$NODE_BINARY" join --main="$MAIN_URL" --token="$JOIN_TOKEN"
 `
 
-func renderJoinScript(mainURL, token, caCert string) (string, error) {
+func renderJoinScript(mainURL, token, caCert, sshPubKey string) (string, error) {
 	tmpl, err := template.New("join").Parse(joinScriptTmpl)
 	if err != nil {
 		return "", err
 	}
 	var buf strings.Builder
 	err = tmpl.Execute(&buf, struct {
-		MainURL string
-		Token   string
-		CACert  string
-	}{mainURL, token, caCert})
+		MainURL   string
+		Token     string
+		CACert    string
+		SSHPubKey string
+	}{mainURL, token, caCert, sshPubKey})
 	return buf.String(), err
 }

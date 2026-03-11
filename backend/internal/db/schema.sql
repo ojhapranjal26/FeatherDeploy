@@ -162,3 +162,32 @@ CREATE TABLE IF NOT EXISTS pki_ca (
 );
 
 CREATE INDEX IF NOT EXISTS idx_nodes_join_token ON nodes(join_token);
+
+-- 013: cluster_state — singleton row tracking which server is the brain (leader)
+CREATE TABLE IF NOT EXISTS cluster_state (
+    id              INTEGER PRIMARY KEY CHECK(id = 1),
+    brain_id        TEXT    NOT NULL DEFAULT 'main',  -- hostname/id of current brain
+    brain_addr      TEXT    NOT NULL DEFAULT '',       -- HTTP URL of brain e.g. http://IP:8080
+    last_heartbeat  DATETIME,                          -- brain updates this every 10s
+    -- brain resource stats (written by brain alongside heartbeat)
+    brain_cpu       REAL    NOT NULL DEFAULT 0,        -- percent 0-100
+    brain_ram_used  INTEGER NOT NULL DEFAULT 0,        -- bytes
+    brain_ram_total INTEGER NOT NULL DEFAULT 0,        -- bytes
+    brain_disk_used  INTEGER NOT NULL DEFAULT 0,       -- bytes
+    brain_disk_total INTEGER NOT NULL DEFAULT 0,       -- bytes
+    -- cluster SSH public key (installed on nodes during join for passwordless access)
+    ssh_public_key  TEXT    NOT NULL DEFAULT '',
+    updated_at      DATETIME NOT NULL DEFAULT (datetime('now'))
+);
+-- Ensure the singleton row always exists
+INSERT OR IGNORE INTO cluster_state (id, brain_id, brain_addr) VALUES (1, 'main', '');
+
+-- 014: node stats / SSH columns (ALTER TABLE for existing installs)
+-- rqlite/SQLite ALTER TABLE ADD COLUMN is idempotent via error suppression in applySchema
+ALTER TABLE nodes ADD COLUMN cpu_usage    REAL    NOT NULL DEFAULT 0;
+ALTER TABLE nodes ADD COLUMN ram_used     INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE nodes ADD COLUMN ram_total    INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE nodes ADD COLUMN disk_used    INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE nodes ADD COLUMN disk_total   INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE nodes ADD COLUMN last_stats_at DATETIME;
+ALTER TABLE nodes ADD COLUMN node_id      TEXT    NOT NULL DEFAULT '';  -- hostname used as election ID
