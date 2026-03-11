@@ -17,7 +17,9 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -118,11 +120,14 @@ func Run() {
 	if err := installPackages(); err != nil {
 		die("package installation failed: %v", err)
 	}
+	installRqlite()
+	configureCrun()
 
 	// ── Step 4: Create service OS user + directories ─────────────────────────
 	fmt.Println("\n── Preparing service user and directories ──────────────────────")
 	createServiceUser(svcUser, svcPassword)
 	mustMkdir(dataDir)
+	mustMkdir(filepath.Join(dataDir, "rqlite-data"))
 	mustMkdir(configDir)
 	mustRun("chown", "-R", svcUser+":"+svcUser, dataDir)
 
@@ -148,35 +153,46 @@ func Run() {
 		fmt.Printf("  ✓ installed %s\n", binDest)
 	}
 
+	// ── Step 5a: Write + start rqlite service ───────────────────────────────
+	fmt.Println("\n── Configuring rqlite ──────────────────────────────────────────")
+	writeRqliteService(svcUser)
+	mustRun("systemctl", "daemon-reload")
+	mustRun("systemctl", "enable", "rqlite")
+	mustRun("systemctl", "start", "rqlite")
+	fmt.Println("  Waiting for rqlite to be ready...")
+	if err := waitForRqlite(30 * time.Second); err != nil {
+		die("rqlite did not start: %v", err)
+	}
+	fmt.Println("  ✓ rqlite is ready")
+
 	// ── Step 6: Generate secrets and write env file ───────────────────────────
 	fmt.Println("\n── Writing configuration ───────────────────────────────────────")
 	jwtSecret := randomHex(32)
-	dbPath := filepath.Join(dataDir, "deploy.db")
 	frontendOrigin := "https://" + domain
+	rqliteURL := "http://127.0.0.1:4001"
 
 	envContent := fmt.Sprintf(`# FeatherDeploy — generated %s
-DB_PATH=%s
+RQLITE_URL=%s
 JWT_SECRET=%s
 ADDR=127.0.0.1:%s
 ORIGIN=%s
-`, time.Now().Format(time.RFC3339), dbPath, jwtSecret, backendPort, frontendOrigin)
+`, time.Now().Format(time.RFC3339), rqliteURL, jwtSecret, backendPort, frontendOrigin)
 
 	writeFile(envFile, envContent, 0600)
 	mustRun("chown", "root:"+svcUser, envFile)
 	mustRun("chmod", "640", envFile)
 	fmt.Printf("  ✓ wrote %s\n", envFile)
 
-	// ── Step 7: Seed the database ─────────────────────────────────────────────
+	// ── Step 7: Seed the database via rqlite ──────────────────────────────────
 	fmt.Println("\n── Seeding database ────────────────────────────────────────────")
-	db, err := appDb.Open(dbPath)
+	db, err := appDb.OpenRqlite(rqliteURL)
 	if err != nil {
-		die("cannot open database: %v", err)
+		die("cannot connect to rqlite: %v", err)
 	}
 	if err := createSuperAdmin(db, adminEmail, adminName, adminPassword); err != nil {
 		die("failed to create superadmin: %v", err)
 	}
 	db.Close()
-	mustRun("chown", svcUser+":"+svcUser, dbPath)
 	fmt.Printf("  ✓ superadmin created (%s)\n", adminEmail)
 
 	// ── Step 8: Write Caddyfile ───────────────────────────────────────────────
@@ -357,24 +373,142 @@ type pkgCmd struct {
 var pkgManagers = map[string]pkgCmd{
 	"apt-get": {
 		update:  []string{"apt-get", "update", "-y"},
-		install: []string{"apt-get", "install", "-y", "podman", "caddy"},
+		install: []string{"apt-get", "install", "-y", "podman", "crun", "caddy"},
 	},
 	"dnf": {
 		update:  []string{"dnf", "check-update"},
-		install: []string{"dnf", "install", "-y", "podman", "caddy"},
+		install: []string{"dnf", "install", "-y", "podman", "crun", "caddy"},
 	},
 	"yum": {
 		update:  nil,
-		install: []string{"yum", "install", "-y", "podman"},
+		install: []string{"yum", "install", "-y", "podman", "crun"},
 	},
 	"pacman": {
 		update:  []string{"pacman", "-Sy"},
-		install: []string{"pacman", "-S", "--noconfirm", "podman", "caddy"},
+		install: []string{"pacman", "-S", "--noconfirm", "podman", "crun", "caddy"},
 	},
 	"apk": {
 		update:  []string{"apk", "update"},
-		install: []string{"apk", "add", "--no-cache", "podman", "caddy"},
+		install: []string{"apk", "add", "--no-cache", "podman", "crun", "caddy"},
 	},
+}
+
+const rqliteVer = "8.36.5"
+const rqliteSystemdUnit = "/etc/systemd/system/rqlite.service"
+
+// configureCrun sets up crun as the default Podman OCI runtime.
+func configureCrun() {
+	if _, err := exec.LookPath("crun"); err != nil {
+		fmt.Println("  WARNING: crun not found — skipping Podman runtime config")
+		return
+	}
+	confDir := "/etc/containers"
+	confFile := filepath.Join(confDir, "containers.conf")
+	mustMkdir(confDir)
+	engineSection := "[engine]\nruntime = \"crun\"\n"
+	if data, err := os.ReadFile(confFile); err == nil {
+		s := string(data)
+		if strings.Contains(s, "runtime") {
+			fmt.Println("  crun: containers.conf already configures a runtime")
+			return
+		}
+		writeFile(confFile, s+"\n"+engineSection, 0644)
+	} else {
+		writeFile(confFile, engineSection, 0644)
+	}
+	fmt.Println("  ✓ crun configured as Podman OCI runtime")
+}
+
+// installRqlite downloads and installs the rqlite binary if not already present.
+func installRqlite() {
+	if _, err := exec.LookPath("rqlited"); err == nil {
+		fmt.Println("  rqlited already installed — skipping")
+		return
+	}
+	fmt.Printf("  Downloading rqlite %s...\n", rqliteVer)
+	tarName := fmt.Sprintf("rqlite-v%s-linux-amd64.tar.gz", rqliteVer)
+	dlURL := fmt.Sprintf("https://github.com/rqlite/rqlite/releases/download/v%s/%s", rqliteVer, tarName)
+	tmpTar := filepath.Join("/tmp", tarName)
+	if err := downloadHTTP(dlURL, tmpTar); err != nil {
+		fmt.Printf("  WARNING: cannot download rqlite: %v — install manually\n", err)
+		return
+	}
+	dirName := fmt.Sprintf("rqlite-v%s-linux-amd64", rqliteVer)
+	mustRun("tar", "-xzf", tmpTar, "-C", "/tmp/")
+	for _, bin := range []string{"rqlited", "rqlite"} {
+		src := filepath.Join("/tmp", dirName, bin)
+		if _, err := os.Stat(src); err == nil {
+			copyFile(src, "/usr/local/bin/"+bin)
+			mustRun("chmod", "+x", "/usr/local/bin/"+bin)
+		}
+	}
+	os.RemoveAll(filepath.Join("/tmp", dirName))
+	os.Remove(tmpTar)
+	fmt.Println("  ✓ rqlited installed")
+}
+
+// downloadHTTP downloads url to destPath.
+func downloadHTTP(url, destPath string) error {
+	resp, err := http.Get(url) //nolint:gosec — URL is constructed from a constant version
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("HTTP %d for %s", resp.StatusCode, url)
+	}
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(destPath, data, 0644)
+}
+
+// waitForRqlite polls the rqlite HTTP status endpoint until it responds or times out.
+func waitForRqlite(maxWait time.Duration) error {
+	deadline := time.Now().Add(maxWait)
+	for time.Now().Before(deadline) {
+		resp, err := http.Get("http://127.0.0.1:4001/status") //nolint:gosec
+		if err == nil {
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				return nil
+			}
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	return fmt.Errorf("rqlite not ready after %s", maxWait)
+}
+
+const rqliteServiceTmpl = `[Unit]
+Description=rqlite Distributed SQLite
+After=network.target
+Before=featherdeploy.service
+
+[Service]
+Type=simple
+User={{.User}}
+Group={{.User}}
+ExecStart=/usr/local/bin/rqlited \\
+  -node-id=main \\
+  -http-addr=127.0.0.1:4001 \\
+  -raft-addr=0.0.0.0:4002 \\
+  {{.DataDir}}/rqlite-data
+Restart=always
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+`
+
+func writeRqliteService(svcUser string) {
+	tmpl := template.Must(template.New("rqlite").Parse(rqliteServiceTmpl))
+	var buf strings.Builder
+	tmpl.Execute(&buf, struct{ User, DataDir string }{svcUser, dataDir})
+	writeFile(rqliteSystemdUnit, buf.String(), 0644)
+	fmt.Printf("  ✓ wrote %s\n", rqliteSystemdUnit)
 }
 
 func installPackages() error {
@@ -509,28 +643,35 @@ func RunUpdate() {
 	fmt.Println("  Updating existing FeatherDeploy installation...")
 	fmt.Println()
 
-	// Determine DB path from the existing env file
-	dbPath := readEnvVar(envFile, "DB_PATH")
-	if dbPath == "" {
-		dbPath = filepath.Join(dataDir, "deploy.db")
-	}
+	// Determine rqlite URL from the existing env file (legacy DB_PATH no longer used)
+	_ = readEnvVar(envFile, "DB_PATH") // kept for graceful forward-compat reads
 
 	// ── Run database migrations ───────────────────────────────────────────────
 	fmt.Println("── Applying database migrations ────────────────────────────────")
-	if _, err := os.Stat(dbPath); err == nil {
-		db, err := appDb.Open(dbPath)
-		if err != nil {
-			die("cannot open database for migration: %v", err)
-		}
-		db.Close()
-		fmt.Printf("  ✓ migrations applied to %s\n", dbPath)
+	fmt.Println("  (migrations applied via rqlite after service restart below)")
+
+	// ── Restart rqlite + featherdeploy ───────────────────────────────────────
+	fmt.Println("\n── Restarting services ─────────────────────────────────────────")
+	mustRun("systemctl", "daemon-reload")
+	mustRun("systemctl", "restart", "rqlite")
+	if err := waitForRqlite(20 * time.Second); err != nil {
+		slog.Warn("rqlite did not respond after restart", "err", err)
 	} else {
-		fmt.Println("  (no existing database found — skipping migrations)")
+		fmt.Println("  ✓ rqlite ready")
 	}
 
-	// ── Restart service ───────────────────────────────────────────────────────
-	fmt.Println("\n── Restarting service ──────────────────────────────────────────")
-	mustRun("systemctl", "daemon-reload")
+	// Run schema migrations via rqlite
+	rqliteURL := readEnvVar(envFile, "RQLITE_URL")
+	if rqliteURL == "" {
+		rqliteURL = "http://127.0.0.1:4001"
+	}
+	if mdb, err := appDb.OpenRqlite(rqliteURL); err == nil {
+		mdb.Close()
+		fmt.Printf("  ✓ DB migrations applied to %s\n", rqliteURL)
+	} else {
+		slog.Warn("DB migration check failed", "err", err)
+	}
+
 	mustRun("systemctl", "restart", "featherdeploy")
 	fmt.Println("  ✓ featherdeploy service restarted")
 

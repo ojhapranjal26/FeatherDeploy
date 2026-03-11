@@ -4,37 +4,62 @@ import (
 	"database/sql"
 	"embed"
 	"fmt"
+	"strings"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "github.com/deploy-paas/backend/internal/rqlitedrv"
 )
 
 //go:embed schema.sql
 var schemaFS embed.FS
 
-// Open opens (or creates) the SQLite database, enables WAL + foreign keys, and
-// runs the embedded schema migration.
-func Open(path string) (*sql.DB, error) {
-	dsn := fmt.Sprintf(
-		"file:%s?_journal_mode=WAL&_foreign_keys=ON&_busy_timeout=5000&_synchronous=NORMAL",
-		path,
-	)
-	db, err := sql.Open("sqlite3", dsn)
+// OpenRqlite connects to a running rqlite server at the given URL
+// (e.g. "http://127.0.0.1:4001") and applies all schema migrations.
+func OpenRqlite(url string) (*sql.DB, error) {
+	db, err := sql.Open("rqlite", url)
 	if err != nil {
-		return nil, fmt.Errorf("open sqlite: %w", err)
+		return nil, fmt.Errorf("open rqlite: %w", err)
 	}
-	db.SetMaxOpenConns(1) // SQLite is single-writer
 
 	if err := db.Ping(); err != nil {
-		return nil, fmt.Errorf("ping sqlite: %w", err)
+		return nil, fmt.Errorf("ping rqlite: %w", err)
 	}
 
+	if err := applySchema(db); err != nil {
+		return nil, err
+	}
+	return db, nil
+}
+
+// applySchema runs each CREATE TABLE / CREATE INDEX statement from schema.sql.
+// Statements are split on ";" so they can be executed individually via rqlite.
+func applySchema(db *sql.DB) error {
 	schema, err := schemaFS.ReadFile("schema.sql")
 	if err != nil {
-		return nil, fmt.Errorf("read schema: %w", err)
-	}
-	if _, err := db.Exec(string(schema)); err != nil {
-		return nil, fmt.Errorf("run schema: %w", err)
+		return fmt.Errorf("read schema: %w", err)
 	}
 
-	return db, nil
+	stmts := strings.Split(string(schema), ";")
+	for _, s := range stmts {
+		s = strings.TrimSpace(s)
+		if s == "" || strings.HasPrefix(s, "--") {
+			continue
+		}
+		if _, err := db.Exec(s); err != nil {
+			// Ignore "table already exists" — schema.sql uses IF NOT EXISTS but
+			// rqlite may return a benign error for some PRAGMA statements.
+			msg := strings.ToLower(err.Error())
+			if strings.Contains(msg, "already exists") {
+				continue
+			}
+			return fmt.Errorf("schema exec (%q): %w", s[:min(40, len(s))], err)
+		}
+	}
+	return nil
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

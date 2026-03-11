@@ -11,6 +11,7 @@ import {
   Monitor,
   PanelLeftClose,
   Github,
+  Network,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useAuth } from '@/context/AuthContext'
@@ -35,6 +36,7 @@ const NAV_ITEMS: NavItem[] = [
   { to: '/projects',        label: 'Projects',       icon: FolderKanban },
   { to: '/settings/github', label: 'GitHub',         icon: Github },
   { to: '/admin/users',     label: 'User Management', icon: Users,       roles: ['admin', 'superadmin'] },
+  { to: '/admin/nodes',     label: 'Cluster Nodes',   icon: Network,     roles: ['admin', 'superadmin'] },
   { to: '/admin/settings',  label: 'System Settings', icon: ShieldCheck, roles: ['superadmin'] },
 ]
 

@@ -13,6 +13,7 @@ import { DomainsPage } from '@/pages/DomainsPage'
 import { AdminUsersPage } from '@/pages/AdminUsersPage'
 import { AdminSettingsPage } from '@/pages/AdminSettingsPage'
 import { GitHubSettingsPage } from '@/pages/GitHubSettingsPage'
+import { NodesPage } from '@/pages/NodesPage'
 
 export default function App() {
   return (
@@ -53,6 +54,7 @@ export default function App() {
           {/* Admin routes — visible only to admin and superadmin */}
           <Route element={<ProtectedRoute requiredRoles={['admin', 'superadmin']} />}>
             <Route path="admin/users" element={<AdminUsersPage />} />
+            <Route path="admin/nodes" element={<NodesPage />} />
           </Route>
 
           {/* Superadmin-only routes */}

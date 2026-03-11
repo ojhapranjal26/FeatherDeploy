@@ -36,7 +36,7 @@ Usage:
   deploypaaas --help             Show this help
 
 Flags (all overridable via environment variables):
-  --db-path       DB_PATH           SQLite file path        (default: deploy.db)
+  --rqlite-url    RQLITE_URL        rqlite HTTP URL         (default: http://127.0.0.1:4001)
   --jwt-secret    JWT_SECRET        Token signing secret
   --addr          ADDR              Listen address          (default: :8080)
   --origin        ORIGIN            Allowed CORS origins
@@ -74,7 +74,8 @@ func main() {
 
 func serve() {
 	// ─── Config via flags / env ───────────────────────────────────────────────
-	dbPath := envOrFlag("DB_PATH", "db-path", "deploy.db", "Path to SQLite database file")
+	rqliteURL := envOrFlag("RQLITE_URL", "rqlite-url", "http://127.0.0.1:4001", "rqlite HTTP URL")
+	envFilePath := envOrFlag("ENV_FILE", "env-file", "/etc/featherdeploy/featherdeploy.env", "Path to the env file shared with nodes")
 	jwtSecret := envOrFlag("JWT_SECRET", "jwt-secret", "change-me-in-prod!", "JWT signing secret")
 	addr := envOrFlag("ADDR", "addr", ":8080", "Listen address")
 	origin := envOrFlag("ORIGIN", "origin", "http://localhost:5173,http://localhost:5174", "Comma-separated allowed CORS origins")
@@ -98,13 +99,13 @@ func serve() {
 	}
 
 	// ─── Database ─────────────────────────────────────────────────────────────
-	db, err := appDb.Open(*dbPath)
+	db, err := appDb.OpenRqlite(*rqliteURL)
 	if err != nil {
 		slog.Error("open database", "err", err)
 		os.Exit(1)
 	}
 	defer db.Close()
-	slog.Info("database ready", "path", *dbPath)
+	slog.Info("database ready", "rqlite", *rqliteURL)
 
 	// Seed default superadmin on first run (no users in DB yet)
 	seedSuperAdmin(db)
@@ -132,6 +133,10 @@ func serve() {
 	ghAppH := handler.NewGitHubAppHandler(db)
 	sshH := handler.NewSSHKeyHandler(db, *jwtSecret)
 	dashH := handler.NewDashboardHandler(db)
+	nodeH := handler.NewNodeHandler(db, *jwtSecret, *envFilePath, "/usr/local/bin/featherdeploy-node", domainFromOrigin(*origin))
+	if err := nodeH.EnsureCA(); err != nil {
+		slog.Warn("CA init warning", "err", err)
+	}
 
 	// ─── Router ──────────────────────────────────────────────────────────────
 	r := chi.NewRouter()
@@ -158,6 +163,12 @@ func serve() {
 
 	// GitHub App status is public (frontend uses it to show connect button)
 	r.Get("/api/github-app/status", ghAppH.Status)
+
+	// Node join flow — the join token serves as the credential
+	r.Get("/api/nodes/{token}/join-script", nodeH.JoinScript)
+	r.Post("/api/nodes/{token}/complete-join", nodeH.CompleteJoin)
+	r.Get("/api/nodes/binary", nodeH.BinaryDownload)
+	r.Get("/api/nodes/ca-cert", nodeH.CACert)
 
 	// ─── Authenticated routes ─────────────────────────────────────────────────
 	r.Group(func(r chi.Router) {
@@ -199,6 +210,15 @@ func serve() {
 			r.Get("/api/github-app/config", ghAppH.GetConfig)
 			r.Post("/api/github-app/config", ghAppH.SetConfig)
 			r.Delete("/api/github-app/config", ghAppH.DeleteConfig)
+		})
+
+		// ── Nodes (superadmin only) ──────────────────────────────────────
+		r.Group(func(r chi.Router) {
+			r.Use(mw.RequireRole(model.RoleSuperAdmin, model.RoleAdmin))
+			r.Get("/api/nodes", nodeH.List)
+			r.Post("/api/nodes", nodeH.Add)
+			r.Delete("/api/nodes/{nodeID}", nodeH.Delete)
+			r.Post("/api/nodes/{nodeID}/ping", nodeH.Ping)
 		})
 
 		// ── SSH Keys ──────────────────────────────────────────────────────
@@ -320,6 +340,17 @@ func splitOrigins(s string) []string {
 		}
 	}
 	return parts
+}
+
+// domainFromOrigin extracts the host (no scheme) from the first CORS origin.
+// e.g. "http://example.com,http://localhost:5173" → "example.com"
+func domainFromOrigin(origins string) string {
+	if origins == "" {
+		return "localhost"
+	}
+	first := strings.SplitN(origins, ",", 2)[0]
+	first = strings.TrimPrefix(strings.TrimPrefix(first, "https://"), "http://")
+	return first
 }
 
 func splitComma(s string) []string {
