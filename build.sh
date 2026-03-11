@@ -18,9 +18,11 @@ ENV_FILE="/etc/featherdeploy/featherdeploy.env"
 SYSTEMD_UNIT="/etc/systemd/system/featherdeploy.service"
 RQLITE_UNIT="/etc/systemd/system/rqlite.service"
 DATA_DB="/var/lib/featherdeploy/deploy.db"
+RQLITE_DATA_DIR="/var/lib/featherdeploy/rqlite-data"
 RQLITE_VER="8.36.5"
+SVC_USER="featherdeploy"
 
-# -- 0. Must run as root ------------------------------------------------------
+# -- 0. Must run as root
 if [ "$(id -u)" -ne 0 ]; then
   echo "ERROR: This script must be run as root (use sudo)." >&2
   exit 1
@@ -59,14 +61,14 @@ if is_installed; then
 fi
 echo "  Mode: $MODE" ; echo ""
 
-# -- Helper: detect system architecture --------------------------------------
+# -- Helper: detect system architecture
 detect_arch() {
   local machine
   machine=$(uname -m)
   case "$machine" in
     x86_64)           echo "amd64" ;;
     aarch64|arm64)    echo "arm64" ;;
-    armv7l|armv6l)    echo "arm" ;;
+    armv7l|armv6l)    echo "arm"   ;;
     *)
       echo "ERROR: Unsupported architecture: $machine" >&2
       exit 1
@@ -74,7 +76,7 @@ detect_arch() {
   esac
 }
 
-# -- Helper: configure crun as Podman OCI runtime ----------------------------
+# -- Helper: configure crun as Podman OCI runtime
 configure_crun() {
   if ! command -v crun >/dev/null 2>&1; then
     echo "  WARNING: crun not found -- skipping Podman runtime config"
@@ -97,12 +99,10 @@ configure_crun() {
   echo "  crun configured as Podman OCI runtime"
 }
 
-# -- Helper: install rqlite binary -------------------------------------------
-# Pass --force as first arg to always remove any existing binary before installing.
+# -- Helper: install rqlite binary
+# Pass --force to always remove existing binary first.
 install_rqlite() {
   local force="${1:-}"
-
-  # FIX 1: Detect architecture dynamically instead of hardcoding amd64.
   local ARCH
   ARCH=$(detect_arch)
 
@@ -111,8 +111,6 @@ install_rqlite() {
     systemctl stop rqlite 2>/dev/null || true
     rm -f /usr/local/bin/rqlited /usr/local/bin/rqlite
   else
-    # FIX 2: Use a more reliable binary health-check.
-    # Some rqlite builds exit non-zero on --version; use --help as fallback.
     if [ -f /usr/local/bin/rqlited ]; then
       if /usr/local/bin/rqlited --version >/dev/null 2>&1 || \
          /usr/local/bin/rqlited --help   >/dev/null 2>&1; then
@@ -128,12 +126,9 @@ install_rqlite() {
   local TAR="rqlite-v${RQLITE_VER}-linux-${ARCH}.tar.gz"
   local URL="https://github.com/rqlite/rqlite/releases/download/v${RQLITE_VER}/${TAR}"
 
-  # FIX 3: Clean up any leftover /tmp artefacts from prior failed runs.
   rm -f "/tmp/${TAR}"
-  # Remove any directory that starts with the expected prefix to avoid stale state.
   rm -rf /tmp/rqlite-v*
 
-  # Retry download up to 3 times to handle transient timeouts/corruption.
   local attempt=0
   local downloaded=false
   while [ $attempt -lt 3 ]; do
@@ -149,13 +144,10 @@ install_rqlite() {
       continue
     fi
 
-    # FIX 4: Verify both archive integrity AND minimum file size.
-    # A truncated download can produce a valid-looking gzip header that passes
-    # `tar -tzf` but fails on extraction.
     local filesize
     filesize=$(stat -c%s "/tmp/${TAR}" 2>/dev/null || stat -f%z "/tmp/${TAR}" 2>/dev/null || echo 0)
-    if [ "$filesize" -lt 5242880 ]; then   # expect at least 5 MB
-      echo "  Downloaded file is suspiciously small (${filesize} bytes) -- retrying..."
+    if [ "$filesize" -lt 5242880 ]; then
+      echo "  Downloaded file too small (${filesize} bytes) -- retrying..."
       sleep 3
       continue
     fi
@@ -178,8 +170,6 @@ install_rqlite() {
     exit 1
   fi
 
-  # FIX 5: Robust directory-name extraction that works across tar versions.
-  # List archive, strip trailing slash, take first unique top-level entry.
   local EXTRACTED_DIR
   EXTRACTED_DIR=$(tar -tzf "/tmp/${TAR}" | sed 's|/.*||' | grep -v '^$' | sort -u | head -1)
   if [ -z "$EXTRACTED_DIR" ]; then
@@ -189,19 +179,15 @@ install_rqlite() {
   fi
 
   echo "  Extracting ${EXTRACTED_DIR}..."
-  # FIX 6: Remove any pre-existing extracted directory before extracting to
-  # prevent mixing files from different versions.
   rm -rf "/tmp/${EXTRACTED_DIR}"
   if ! tar -xzf "/tmp/${TAR}" -C /tmp/; then
-    echo "  ERROR: rqlite extraction failed -- archive may be corrupted."
+    echo "  ERROR: rqlite extraction failed."
     rm -f "/tmp/${TAR}"
     exit 1
   fi
 
-  # Verify the extracted binaries exist.
   if [ ! -f "/tmp/${EXTRACTED_DIR}/rqlited" ] || [ ! -f "/tmp/${EXTRACTED_DIR}/rqlite" ]; then
     echo "  ERROR: rqlited/rqlite binaries not found in extracted archive."
-    echo "  Expected: /tmp/${EXTRACTED_DIR}/rqlited and /tmp/${EXTRACTED_DIR}/rqlite"
     rm -rf "/tmp/${TAR}" "/tmp/${EXTRACTED_DIR}"
     exit 1
   fi
@@ -210,7 +196,6 @@ install_rqlite() {
   install -m 755 "/tmp/${EXTRACTED_DIR}/rqlite"  /usr/local/bin/rqlite
   rm -rf "/tmp/${TAR}" "/tmp/${EXTRACTED_DIR}"
 
-  # FIX 7: Validate installed binary with a two-stage health-check.
   if ! /usr/local/bin/rqlited --version >/dev/null 2>&1 && \
      ! /usr/local/bin/rqlited --help   >/dev/null 2>&1; then
     echo "  ERROR: installed rqlited binary does not work."
@@ -220,9 +205,8 @@ install_rqlite() {
   echo "  rqlited installed successfully (arch: ${ARCH})"
 }
 
-# -- Helper: write rqlite systemd service ------------------------------------
+# -- Helper: write rqlite systemd service
 write_rqlite_service() {
-  local svc_user="${1:-featherdeploy}"
   cat > "$RQLITE_UNIT" << RQEOF
 [Unit]
 Description=rqlite Distributed SQLite
@@ -231,15 +215,19 @@ Before=featherdeploy.service
 
 [Service]
 Type=simple
-User=${svc_user}
-Group=${svc_user}
+User=${SVC_USER}
+Group=${SVC_USER}
+NoNewPrivileges=true
+ProtectSystem=false
+ReadWritePaths=${RQLITE_DATA_DIR}
 ExecStart=/usr/local/bin/rqlited \
   -node-id=main \
   -http-addr=127.0.0.1:4001 \
   -raft-addr=0.0.0.0:4002 \
-  /var/lib/featherdeploy/rqlite-data
-Restart=always
+  ${RQLITE_DATA_DIR}
+Restart=on-failure
 RestartSec=5s
+TimeoutStartSec=30s
 StandardOutput=journal
 StandardError=journal
 
@@ -249,26 +237,76 @@ RQEOF
   echo "  rqlite systemd service written"
 }
 
-# -- 1. Install build deps ---------------------------------------------------
+# -- Helper: ensure rqlite is running; print real errors if it fails
+ensure_rqlite_running() {
+  systemctl daemon-reload
+  systemctl enable rqlite 2>/dev/null || true
+
+  if systemctl is-active --quiet rqlite; then
+    echo "  rqlite already running"
+    return
+  fi
+
+  # Always fix ownership right before starting
+  chown -R "${SVC_USER}:${SVC_USER}" "$RQLITE_DATA_DIR"
+  chmod 750 "$RQLITE_DATA_DIR"
+
+  echo "  Starting rqlite..."
+  if ! systemctl start rqlite 2>/dev/null; then
+    echo ""
+    echo "  ERROR: rqlite service failed to start immediately."
+    echo "  Journal output:"
+    echo "  -----------------------------------------------------------------------"
+    journalctl -u rqlite -n 30 --no-pager 2>/dev/null || true
+    echo "  -----------------------------------------------------------------------"
+    exit 1
+  fi
+
+  echo "  Waiting for rqlite HTTP to become ready..."
+  local deadline=$(( $(date +%s) + 20 ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    if curl -sf http://127.0.0.1:4001/status >/dev/null 2>&1; then
+      echo "  rqlite is ready"
+      return
+    fi
+    sleep 1
+  done
+
+  # Not responding after 20s -- show the actual journal so you can diagnose it
+  echo ""
+  echo "  ERROR: rqlite is not responding on :4001 after 20s"
+  echo "  Full journal output:"
+  echo "  -----------------------------------------------------------------------"
+  journalctl -u rqlite -n 50 --no-pager 2>/dev/null || true
+  echo "  -----------------------------------------------------------------------"
+  echo ""
+  echo "  Common causes:"
+  echo "    1) Port conflict     -- run: ss -tlnp | grep -E '4001|4002'"
+  echo "    2) Permission error  -- run: ls -la /var/lib/featherdeploy/"
+  echo "    3) Corrupt data dir  -- run: rm -rf ${RQLITE_DATA_DIR} then re-run script"
+  exit 1
+}
+
+# -- 1. Install build deps
+# NOTE: install_rqlite is intentionally NOT called here.
+# It is called in step 9, AFTER the service user is created.
+
 install_deps_apt() {
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -y
   apt-get install -y curl git gcc make ca-certificates build-essential
-  # Podman
   if ! command -v podman >/dev/null 2>&1; then
     echo "==> Installing Podman..."
     apt-get install -y podman 2>/dev/null || apt-get install -y podman-docker 2>/dev/null || echo "  WARNING: podman not in apt"
   else
     echo "  Podman already installed -- skipping"
   fi
-  # crun (lightweight OCI runtime for Podman)
   if ! command -v crun >/dev/null 2>&1; then
     echo "==> Installing crun..."
     apt-get install -y crun 2>/dev/null || echo "  WARNING: crun not available in apt"
   else
     echo "  crun already installed -- skipping"
   fi
-  # Caddy
   if ! command -v caddy >/dev/null 2>&1; then
     echo "==> Installing Caddy..."
     apt-get install -y debian-keyring debian-archive-keyring apt-transport-https 2>/dev/null || true
@@ -279,15 +317,13 @@ install_deps_apt() {
   else
     echo "  Caddy already installed -- skipping"
   fi
-  # Node.js 20
   if ! command -v node >/dev/null 2>&1 || [ "$(node --version | cut -d. -f1 | tr -d v)" -lt 18 ]; then
     echo "==> Installing Node.js 20..."
     curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
     apt-get install -y nodejs
   fi
-  # NOTE: install_rqlite is called later in step 8, AFTER the service user is
-  # created, so it is intentionally NOT called here.
-  install_go_tarball ; configure_crun
+  install_go_tarball
+  configure_crun
 }
 
 install_deps_dnf() {
@@ -356,7 +392,7 @@ else echo 'WARNING: no supported package manager. Install git/curl/gcc/crun/Node
 
 export PATH="/usr/local/go/bin:$PATH"
 
-# -- 2. Clone or update source -----------------------------------------------
+# -- 2. Clone or update source
 echo "" ; echo "==> Fetching FeatherDeploy source..."
 if [ -d "$INSTALL_DIR/.git" ]; then
   git -C "$INSTALL_DIR" fetch origin
@@ -366,137 +402,94 @@ else
 fi
 REPO="$INSTALL_DIR"
 
-# -- 3. Build frontend -------------------------------------------------------
+# -- 3. Build frontend
 echo "" ; echo "==> Building frontend..."
 cd "$REPO/frontend"
 npm ci --prefer-offline
 npm run build
 
-# -- 4. Embed frontend into Go -----------------------------------------------
+# -- 4. Embed frontend into Go
 echo "" ; echo "==> Embedding frontend into backend..."
 mkdir -p "$REPO/backend/web/dist"
 rm -rf "$REPO/backend/web/dist/"*
 cp -r "$REPO/frontend/dist/." "$REPO/backend/web/dist/"
 
-# -- 5. Build Go binaries (main server + node agent) -------------------------
+# -- 5. Build Go binaries
 echo "" ; echo "==> Building FeatherDeploy main binary (CGO_ENABLED=0)..."
 cd "$REPO/backend"
 mkdir -p "$REPO/dist"
-
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
   go build -ldflags="-s -w" -o "$REPO/dist/featherdeploy" ./cmd/server/
-
 echo "==> Building FeatherDeploy node agent..."
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
   go build -ldflags="-s -w" -o "$REPO/dist/featherdeploy-node" ./cmd/node/
 
-# -- 6. Stop service (update / reinstall only) --------------------------------
+# -- 6. Stop service (update / reinstall only)
 if [ "$MODE" != "install" ]; then
   echo "" ; echo "==> Stopping featherdeploy service..."
   systemctl stop featherdeploy 2>/dev/null || true
 fi
 
-# -- 7. Install binaries ------------------------------------------------------
+# -- 7. Install binaries
 cp "$REPO/dist/featherdeploy" "$BINARY" ; chmod +x "$BINARY"
 echo "  Binary installed: $BINARY"
 cp "$REPO/dist/featherdeploy-node" "$NODE_BINARY" ; chmod +x "$NODE_BINARY"
 echo "  Node agent installed: $NODE_BINARY"
 
-# -- Helper: ensure rqlite service is running (with data-dir recovery) -------
-ensure_rqlite_running() {
-  systemctl daemon-reload
-  systemctl enable rqlite 2>/dev/null || true
-
-  if systemctl is-active --quiet rqlite; then
-    echo "  rqlite already running"
-    return
-  fi
-
-  echo "  Starting rqlite..."
-  systemctl start rqlite 2>/dev/null || true
-
-  # Wait up to 15s for rqlite to answer
-  local deadline=$(( $(date +%s) + 15 ))
-  while [ "$(date +%s)" -lt "$deadline" ]; do
-    if curl -sf http://127.0.0.1:4001/status >/dev/null 2>&1; then
-      echo "  rqlite is ready"
-      return
-    fi
-    sleep 1
-  done
-
-  # Service started but rqlite not responding -- likely corrupt data directory
-  echo "  WARNING: rqlite did not respond -- data directory may be corrupt"
-  echo "  Wiping rqlite data directory and retrying..."
-  systemctl stop rqlite 2>/dev/null || true
-  rm -rf /var/lib/featherdeploy/rqlite-data
-  mkdir -p /var/lib/featherdeploy/rqlite-data
-  chown -R featherdeploy:featherdeploy /var/lib/featherdeploy/rqlite-data
-  chmod 750 /var/lib/featherdeploy/rqlite-data
-  systemctl start rqlite
-
-  local deadline2=$(( $(date +%s) + 30 ))
-  while [ "$(date +%s)" -lt "$deadline2" ]; do
-    if curl -sf http://127.0.0.1:4001/status >/dev/null 2>&1; then
-      echo "  rqlite is ready (fresh data directory)"
-      return
-    fi
-    sleep 1
-  done
-
-  echo "  ERROR: rqlite failed to start even after wiping data. Check: journalctl -u rqlite" >&2
-  exit 1
-}
-
-# -- 8. Create service user + data directory (must happen before rqlite starts)
+# -- 8. Create system user (MUST happen before rqlite service is written/started)
 echo "==> Ensuring featherdeploy system user exists..."
-if ! id -u featherdeploy >/dev/null 2>&1; then
-  useradd --system --no-create-home --shell /usr/sbin/nologin featherdeploy
-  echo "  Created system user: featherdeploy"
+if ! id -u "$SVC_USER" >/dev/null 2>&1; then
+  # --system        = low UID, no aging, no login
+  # --no-create-home = no /home/featherdeploy
+  # --shell          = no interactive shell
+  useradd --system --no-create-home --shell /usr/sbin/nologin "$SVC_USER"
+  echo "  Created system user: ${SVC_USER}  (no password -- service account only)"
 else
-  echo "  System user featherdeploy already exists -- skipping"
+  echo "  System user ${SVC_USER} already exists -- skipping"
 fi
 
+# -- 9. Set up data directory with correct ownership, then install + start rqlite
 echo "==> Setting up data directory..."
-mkdir -p /var/lib/featherdeploy/rqlite-data
-chown -R featherdeploy:featherdeploy /var/lib/featherdeploy
+mkdir -p "$RQLITE_DATA_DIR"
+chown -R "${SVC_USER}:${SVC_USER}" /var/lib/featherdeploy
 chmod 750 /var/lib/featherdeploy
+chmod 750 "$RQLITE_DATA_DIR"
+echo "  Data directory ready: ${RQLITE_DATA_DIR}"
 
-# -- 8b. Install rqlite binary + write + start service -----------------------
-# On first install: always force-reinstall for a clean start.
-# On update/reinstall: skip download if binary is already healthy.
 if [ "$MODE" = "install" ]; then
   echo "==> Cleaning up any previous rqlite installation..."
   systemctl stop rqlite 2>/dev/null || true
-  rm -rf /var/lib/featherdeploy/rqlite-data
-  mkdir -p /var/lib/featherdeploy/rqlite-data
-  chown -R featherdeploy:featherdeploy /var/lib/featherdeploy/rqlite-data
+  rm -rf "$RQLITE_DATA_DIR"
+  mkdir -p "$RQLITE_DATA_DIR"
+  chown -R "${SVC_USER}:${SVC_USER}" "$RQLITE_DATA_DIR"
+  chmod 750 "$RQLITE_DATA_DIR"
   install_rqlite --force
 else
   install_rqlite
 fi
 
-write_rqlite_service "featherdeploy"
+write_rqlite_service
 ensure_rqlite_running
 
-# -- 9. Reinstall: wipe DB + run wizard --------------------------------------
+# -- 10. Reinstall: wipe DB + run wizard
 if [ "$MODE" = "reinstall" ]; then
   echo "" ; echo "==> Removing existing database..."
   systemctl stop rqlite 2>/dev/null || true
-  rm -f "$DATA_DB" ; rm -rf /var/lib/featherdeploy/rqlite-data
-  mkdir -p /var/lib/featherdeploy/rqlite-data
-  chown -R featherdeploy:featherdeploy /var/lib/featherdeploy/rqlite-data
-  chmod 750 /var/lib/featherdeploy/rqlite-data
+  rm -f "$DATA_DB"
+  rm -rf "$RQLITE_DATA_DIR"
+  mkdir -p "$RQLITE_DATA_DIR"
+  chown -R "${SVC_USER}:${SVC_USER}" "$RQLITE_DATA_DIR"
+  chmod 750 "$RQLITE_DATA_DIR"
   ensure_rqlite_running
   echo "" ; echo "==> Launching FeatherDeploy setup wizard..." ; echo ""
   exec "$BINARY" install
 
-# -- 10. Update: migrate + restart -------------------------------------------
+# -- 11. Update: migrate + restart
 elif [ "$MODE" = "update" ]; then
   echo "" ; echo "==> Updating FeatherDeploy..."
   exec "$BINARY" update
 
-# -- 11. First install: run wizard -------------------------------------------
+# -- 12. First install: run wizard
 else
   echo "" ; echo "==> Launching FeatherDeploy setup wizard..." ; echo ""
   exec "$BINARY" install
