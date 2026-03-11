@@ -59,6 +59,21 @@ if is_installed; then
 fi
 echo "  Mode: $MODE" ; echo ""
 
+# -- Helper: detect system architecture --------------------------------------
+detect_arch() {
+  local machine
+  machine=$(uname -m)
+  case "$machine" in
+    x86_64)           echo "amd64" ;;
+    aarch64|arm64)    echo "arm64" ;;
+    armv7l|armv6l)    echo "arm" ;;
+    *)
+      echo "ERROR: Unsupported architecture: $machine" >&2
+      exit 1
+      ;;
+  esac
+}
+
 # -- Helper: configure crun as Podman OCI runtime ----------------------------
 configure_crun() {
   if ! command -v crun >/dev/null 2>&1; then
@@ -86,34 +101,46 @@ configure_crun() {
 # Pass --force as first arg to always remove any existing binary before installing.
 install_rqlite() {
   local force="${1:-}"
+
+  # FIX 1: Detect architecture dynamically instead of hardcoding amd64.
+  local ARCH
+  ARCH=$(detect_arch)
+
   if [ "$force" = "--force" ]; then
     echo "==> Removing any existing rqlite binaries..."
     systemctl stop rqlite 2>/dev/null || true
     rm -f /usr/local/bin/rqlited /usr/local/bin/rqlite
-  elif command -v rqlited >/dev/null 2>&1; then
-    # Verify the binary is not corrupt
-    if rqlited --version >/dev/null 2>&1; then
-      echo "  rqlited already installed -- skipping"
-      return
+  else
+    # FIX 2: Use a more reliable binary health-check.
+    # Some rqlite builds exit non-zero on --version; use --help as fallback.
+    if [ -f /usr/local/bin/rqlited ]; then
+      if /usr/local/bin/rqlited --version >/dev/null 2>&1 || \
+         /usr/local/bin/rqlited --help   >/dev/null 2>&1; then
+        echo "  rqlited already installed -- skipping"
+        return
+      fi
+      echo "  WARNING: existing rqlited binary is corrupt -- forcing reinstall"
+      rm -f /usr/local/bin/rqlited /usr/local/bin/rqlite
     fi
-    echo "  WARNING: existing rqlited binary is corrupt -- forcing reinstall"
-    rm -f /usr/local/bin/rqlited /usr/local/bin/rqlite
   fi
 
-  echo "==> Installing rqlite ${RQLITE_VER}..."
-  local ARCH="amd64"
+  echo "==> Installing rqlite ${RQLITE_VER} (${ARCH})..."
   local TAR="rqlite-v${RQLITE_VER}-linux-${ARCH}.tar.gz"
   local URL="https://github.com/rqlite/rqlite/releases/download/v${RQLITE_VER}/${TAR}"
 
-  # Retry download up to 3 times to handle transient timeouts/corruption
+  # FIX 3: Clean up any leftover /tmp artefacts from prior failed runs.
+  rm -f "/tmp/${TAR}"
+  # Remove any directory that starts with the expected prefix to avoid stale state.
+  rm -rf /tmp/rqlite-v*
+
+  # Retry download up to 3 times to handle transient timeouts/corruption.
   local attempt=0
   local downloaded=false
   while [ $attempt -lt 3 ]; do
     attempt=$(( attempt + 1 ))
     echo "  Downloading rqlite (attempt ${attempt}/3)..."
     rm -f "/tmp/${TAR}"
-    
-    # Download the tarball
+
     if ! curl --fail --show-error --location \
          --connect-timeout 30 --max-time 180 \
          "$URL" -o "/tmp/${TAR}" 2>&1; then
@@ -121,8 +148,18 @@ install_rqlite() {
       sleep 3
       continue
     fi
-    
-    # Verify the tar file can be read (catches incomplete/corrupt downloads)
+
+    # FIX 4: Verify both archive integrity AND minimum file size.
+    # A truncated download can produce a valid-looking gzip header that passes
+    # `tar -tzf` but fails on extraction.
+    local filesize
+    filesize=$(stat -c%s "/tmp/${TAR}" 2>/dev/null || stat -f%z "/tmp/${TAR}" 2>/dev/null || echo 0)
+    if [ "$filesize" -lt 5242880 ]; then   # expect at least 5 MB
+      echo "  Downloaded file is suspiciously small (${filesize} bytes) -- retrying..."
+      sleep 3
+      continue
+    fi
+
     echo "  Verifying archive integrity..."
     if tar -tzf "/tmp/${TAR}" >/dev/null 2>&1; then
       downloaded=true
@@ -135,15 +172,16 @@ install_rqlite() {
   done
 
   if [ "$downloaded" = false ]; then
-    echo "  ERROR: rqlite download failed after 3 attempts (download or integrity error)."
+    echo "  ERROR: rqlite download failed after 3 attempts."
     echo "  Install manually: https://github.com/rqlite/rqlite/releases/tag/v${RQLITE_VER}"
     rm -f "/tmp/${TAR}"
     exit 1
   fi
 
+  # FIX 5: Robust directory-name extraction that works across tar versions.
+  # List archive, strip trailing slash, take first unique top-level entry.
   local EXTRACTED_DIR
-  # Extract directory name from archive contents
-  EXTRACTED_DIR=$(tar -tzf "/tmp/${TAR}" 2>/dev/null | head -1 | sed 's|/.*||' | grep -v '^$' | head -1)
+  EXTRACTED_DIR=$(tar -tzf "/tmp/${TAR}" | sed 's|/.*||' | grep -v '^$' | sort -u | head -1)
   if [ -z "$EXTRACTED_DIR" ]; then
     echo "  ERROR: could not determine rqlite directory name from archive."
     rm -f "/tmp/${TAR}"
@@ -151,31 +189,35 @@ install_rqlite() {
   fi
 
   echo "  Extracting ${EXTRACTED_DIR}..."
+  # FIX 6: Remove any pre-existing extracted directory before extracting to
+  # prevent mixing files from different versions.
+  rm -rf "/tmp/${EXTRACTED_DIR}"
   if ! tar -xzf "/tmp/${TAR}" -C /tmp/; then
     echo "  ERROR: rqlite extraction failed -- archive may be corrupted."
     rm -f "/tmp/${TAR}"
     exit 1
   fi
 
-  # Verify the extracted binaries exist
+  # Verify the extracted binaries exist.
   if [ ! -f "/tmp/${EXTRACTED_DIR}/rqlited" ] || [ ! -f "/tmp/${EXTRACTED_DIR}/rqlite" ]; then
     echo "  ERROR: rqlited/rqlite binaries not found in extracted archive."
     echo "  Expected: /tmp/${EXTRACTED_DIR}/rqlited and /tmp/${EXTRACTED_DIR}/rqlite"
-    rm -f "/tmp/${TAR}" "/tmp/${EXTRACTED_DIR}"
+    rm -rf "/tmp/${TAR}" "/tmp/${EXTRACTED_DIR}"
     exit 1
   fi
 
   install -m 755 "/tmp/${EXTRACTED_DIR}/rqlited" /usr/local/bin/rqlited
   install -m 755 "/tmp/${EXTRACTED_DIR}/rqlite"  /usr/local/bin/rqlite
   rm -rf "/tmp/${TAR}" "/tmp/${EXTRACTED_DIR}"
-  
-  # Verify the installed binary works
-  if ! /usr/local/bin/rqlited --version >/dev/null 2>&1; then
+
+  # FIX 7: Validate installed binary with a two-stage health-check.
+  if ! /usr/local/bin/rqlited --version >/dev/null 2>&1 && \
+     ! /usr/local/bin/rqlited --help   >/dev/null 2>&1; then
     echo "  ERROR: installed rqlited binary does not work."
     rm -f /usr/local/bin/rqlited /usr/local/bin/rqlite
     exit 1
   fi
-  echo "  rqlited installed"
+  echo "  rqlited installed successfully (arch: ${ARCH})"
 }
 
 # -- Helper: write rqlite systemd service ------------------------------------
@@ -436,4 +478,3 @@ else
   echo "" ; echo "==> Launching FeatherDeploy setup wizard..." ; echo ""
   exec "$BINARY" install
 fi
-
