@@ -20,12 +20,13 @@ import {
   MemoryStick,
   HardDrive,
   Server,
+  Wifi,
+  WifiOff,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { projectsApi } from '@/api/projects'
 import type { Project } from '@/api/projects'
 import client from '@/api/client'
-import { clusterApi } from '@/api/nodes'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -34,6 +35,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Badge } from '@/components/ui/badge'
 import { Progress } from '@/components/ui/progress'
 import { Separator } from '@/components/ui/separator'
+import { useStatsSSE } from '@/hooks/useStatsSSE'
 import {
   Card,
   CardContent,
@@ -166,6 +168,78 @@ function StatCard({
   )
 }
 
+function NodeCard({ node }: { node: import('@/hooks/useStatsSSE').NodeStats }) {
+  const isConn = node.status === 'connected'
+  const stale = node.last_stats_at
+    ? Date.now() - new Date(node.last_stats_at).getTime() > 30_000
+    : true
+  const gb = (v: number) => (v / 1024 / 1024 / 1024).toFixed(1)
+  const pct = (u: number, t: number) => t > 0 ? Math.round((u / t) * 100) : 0
+  const barCls = (p: number) =>
+    p > 85 ? '[&>div]:bg-red-500' : p > 65 ? '[&>div]:bg-amber-500' : '[&>div]:bg-emerald-500'
+  return (
+    <div className="rounded-lg border border-border/60 bg-card/50 p-3 space-y-2">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-1.5 min-w-0">
+          <Server className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+          <span className="text-xs font-medium truncate">{node.name}</span>
+        </div>
+        <span className={cn(
+          'inline-flex items-center gap-0.5 rounded-full px-1.5 py-0.5 text-[10px] font-medium border shrink-0',
+          isConn
+            ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border-emerald-300/20'
+            : 'bg-muted text-muted-foreground border-border',
+        )}>
+          <span className={cn('h-1.5 w-1.5 rounded-full', isConn ? 'bg-emerald-500' : 'bg-muted-foreground/40')} />
+          {node.status}
+        </span>
+      </div>
+      {!stale && isConn ? (
+        <div className="space-y-1.5">
+          <div className="flex items-center gap-2">
+            <Cpu className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+            <div className="flex-1">
+              <div className="flex justify-between mb-0.5">
+                <span className="text-xs text-muted-foreground">CPU</span>
+                <span className="text-xs tabular-nums">{Math.round(node.cpu_usage)}%</span>
+              </div>
+              <Progress value={node.cpu_usage} className={cn('h-1', barCls(node.cpu_usage))} />
+            </div>
+          </div>
+          {node.ram_total > 0 && (
+            <div className="flex items-center gap-2">
+              <MemoryStick className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+              <div className="flex-1">
+                <div className="flex justify-between mb-0.5">
+                  <span className="text-xs text-muted-foreground">RAM</span>
+                  <span className="text-xs tabular-nums">{gb(node.ram_used)} / {gb(node.ram_total)} GB</span>
+                </div>
+                <Progress value={pct(node.ram_used, node.ram_total)} className={cn('h-1', barCls(pct(node.ram_used, node.ram_total)))} />
+              </div>
+            </div>
+          )}
+          {node.disk_total > 0 && (
+            <div className="flex items-center gap-2">
+              <HardDrive className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+              <div className="flex-1">
+                <div className="flex justify-between mb-0.5">
+                  <span className="text-xs text-muted-foreground">Disk</span>
+                  <span className="text-xs tabular-nums">{gb(node.disk_used)} / {gb(node.disk_total)} GB</span>
+                </div>
+                <Progress value={pct(node.disk_used, node.disk_total)} className={cn('h-1', barCls(pct(node.disk_used, node.disk_total)))} />
+              </div>
+            </div>
+          )}
+        </div>
+      ) : (
+        <p className="text-xs text-muted-foreground">
+          {isConn ? 'Collecting stats…' : 'No stats available'}
+        </p>
+      )}
+    </div>
+  )
+}
+
 function ProjectCard({
   project,
   svcList,
@@ -239,12 +313,7 @@ export function DashboardPage() {
     refetchInterval: 30_000,
   })
 
-  const { data: brain } = useQuery({
-    queryKey: ['cluster-brain'],
-    queryFn: clusterApi.getBrain,
-    refetchInterval: 10_000,
-    retry: false, // brain endpoint may 404 on fresh installs
-  })
+  const { brain, nodes: liveNodes, connected } = useStatsSSE()
 
   const createMutation = useMutation({
     mutationFn: projectsApi.create,
@@ -430,6 +499,10 @@ export function DashboardPage() {
                   <CardTitle className="text-sm font-semibold flex items-center gap-1.5">
                     <Server className="h-4 w-4" />
                     Cluster Health
+                    {connected
+                      ? <Wifi className="h-3 w-3 text-emerald-500 ml-1" title="Live" />
+                      : <WifiOff className="h-3 w-3 text-muted-foreground ml-1" title="Reconnecting…" />
+                    }
                   </CardTitle>
                   <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium border ${
                     brain.Alive
@@ -496,6 +569,24 @@ export function DashboardPage() {
                     </div>
                   </div>
                 )}
+              </CardContent>
+            </Card>
+          )}
+
+          {/* Worker Nodes */}
+          {liveNodes.length > 0 && (
+            <Card className="border-border/60">
+              <CardHeader className="pb-2">
+                <CardTitle className="text-sm font-semibold flex items-center gap-1.5">
+                  <Server className="h-4 w-4" />
+                  Worker Nodes
+                </CardTitle>
+                <CardDescription className="text-xs">
+                  {liveNodes.filter(n => n.status === 'connected').length} of {liveNodes.length} connected
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="pb-4 space-y-2">
+                {liveNodes.map(n => <NodeCard key={n.id} node={n} />)}
               </CardContent>
             </Card>
           )}

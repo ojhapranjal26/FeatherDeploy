@@ -160,6 +160,7 @@ func serve() {
 		slog.Warn("CA init warning", "err", err)
 	}
 	settingsH := handler.NewSettingsHandler(db)
+	statsH := handler.NewStatsHandler(db)
 
 	// ─── Router ──────────────────────────────────────────────────────────────
 	r := chi.NewRouter()
@@ -247,6 +248,15 @@ func serve() {
 			// Branding write requires superadmin
 			r.Put("/api/settings/branding", settingsH.SetBranding)
 		})
+
+		// ── Live stats SSE stream (no 30s timeout — long-lived connection) ──
+		// Use a dedicated sub-router so we can remove the Timeout middleware.
+		r.With(func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				// Strip request context deadline set by chi Timeout middleware
+				next.ServeHTTP(w, req)
+			})
+		}).Get("/api/stats/stream", statsH.Stream)
 
 		// ── Cluster brain info (any authenticated user) ───────────────────
 		r.Get("/api/cluster/brain", nodeH.ClusterBrain)
