@@ -147,13 +147,14 @@ func serve() {
 	projH := handler.NewProjectHandler(db)
 	svcH := handler.NewServiceHandler(db)
 	depH := handler.NewDeploymentHandler(db)
-	envH := handler.NewEnvHandler(db)
+	envH := handler.NewEnvHandler(db, *jwtSecret)
 	domainH := handler.NewDomainHandler(db)
 	inviteH := handler.NewInvitationHandler(db, m, *jwtSecret, 24*time.Hour, *origin)
 	ghH := handler.NewGitHubHandler(db, *ghClientID, *ghClientSecret, *origin)
 	ghAppH := handler.NewGitHubAppHandler(db)
 	sshH := handler.NewSSHKeyHandler(db, *jwtSecret)
 	dashH := handler.NewDashboardHandler(db)
+	detectH := handler.NewDetectHandler(db)
 	nodeH := handler.NewNodeHandler(db, *jwtSecret, *envFilePath, "/usr/local/bin/featherdeploy-node", domainFromOrigin(*origin))
 	if err := nodeH.EnsureCA(); err != nil {
 		slog.Warn("CA init warning", "err", err)
@@ -219,11 +220,18 @@ func serve() {
 		})
 
 		// ── GitHub OAuth ───────────────────────────────────────────────────
+		// Status is visible to all authenticated users (shows whether their
+		// account is connected; users without the role will see "not configured").
 		r.Get("/api/github/status", ghH.Status)
-		r.Get("/api/github/auth", ghH.AuthURL)
-		r.Get("/api/github/callback", ghH.Callback)
-		r.Delete("/api/github/disconnect", ghH.Disconnect)
-		r.Get("/api/github/repos", ghH.ListRepos)
+		// Connecting/disconnecting GitHub and listing repos requires at least
+		// the admin role — regular users cannot integrate their own GitHub.
+		r.Group(func(r chi.Router) {
+			r.Use(mw.RequireRole(model.RoleSuperAdmin, model.RoleAdmin))
+			r.Get("/api/github/auth", ghH.AuthURL)
+			r.Get("/api/github/callback", ghH.Callback)
+			r.Delete("/api/github/disconnect", ghH.Disconnect)
+			r.Get("/api/github/repos", ghH.ListRepos)
+		})
 
 		// ── GitHub App ────────────────────────────────────────────────────
 		r.Get("/api/github-app/repos", ghAppH.ListRepos)
@@ -286,6 +294,9 @@ func serve() {
 				r.Get("/api/projects/{projectID}/services/{serviceID}", svcH.Get)
 				r.Patch("/api/projects/{projectID}/services/{serviceID}", svcH.Update)
 				r.Delete("/api/projects/{projectID}/services/{serviceID}", svcH.Delete)
+
+				// ── Stack detection ──────────────────────────────────────
+				r.Post("/api/projects/{projectID}/services/{serviceID}/detect", detectH.Detect)
 
 				// ── Deployments ─────────────────────────────────────────
 				r.Get("/api/projects/{projectID}/services/{serviceID}/deployments", depH.List)

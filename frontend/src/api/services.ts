@@ -33,6 +33,16 @@ export interface CreateServicePayload {
   start_command?: string
 }
 
+export interface DetectionResult {
+  language: string     // "nodejs" | "python" | "php" | "static" | "unknown"
+  framework: string    // e.g. "nextjs", "flask", "laravel"
+  version: string      // runtime version, e.g. "20", "3.12"
+  build_command: string
+  start_command: string
+  app_port: number
+  base_image: string
+}
+
 export const servicesApi = {
   list: (projectId: string | number): Promise<Service[]> =>
     client.get<Service[]>(`/projects/${projectId}/services`).then((r) => r.data),
@@ -48,4 +58,7 @@ export const servicesApi = {
 
   delete: (projectId: string | number, serviceId: string | number): Promise<void> =>
     client.delete(`/projects/${projectId}/services/${serviceId}`).then(() => undefined),
+
+  detect: (projectId: string | number, serviceId: string | number): Promise<DetectionResult> =>
+    client.post<DetectionResult>(`/projects/${projectId}/services/${serviceId}/detect`).then((r) => r.data),
 }

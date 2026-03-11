@@ -75,6 +75,9 @@ function OAuthTab() {
   const [loading, setLoading] = useState(true)
   const [disconnecting, setDisconnecting] = useState(false)
   const [connecting, setConnecting] = useState(false)
+  const { user } = useAuth()
+
+  const canConnect = user?.role === 'superadmin' || user?.role === 'admin'
 
   const load = () => {
     setLoading(true)
@@ -118,6 +121,12 @@ function OAuthTab() {
 
   return (
     <div className="space-y-4">
+      {!canConnect && (
+        <div className="flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200">
+          <AlertCircle className="h-4 w-4 shrink-0" />
+          GitHub integration is restricted to admins and super-admins. Contact your administrator to connect GitHub for deployments.
+        </div>
+      )}
       <p className="text-sm text-muted-foreground">
         Connect your personal GitHub account via OAuth to browse and deploy your repositories.
       </p>
@@ -155,7 +164,7 @@ function OAuthTab() {
           </div>
 
           <div className="shrink-0">
-            {!loading && status?.configured && (
+            {!loading && status?.configured && canConnect && (
               status.connected ? (
                 <Button variant="outline" size="sm" onClick={handleDisconnect} disabled={disconnecting}>
                   {disconnecting
