@@ -205,8 +205,32 @@ install_rqlite() {
   echo "  rqlited installed successfully (arch: ${ARCH})"
 }
 
+# -- Helper: detect the server's primary non-loopback IPv4 address
+detect_server_ip() {
+  # Try ip route first (most reliable), then hostname, then ifconfig fallback
+  local ip
+  ip=$(ip route get 1.1.1.1 2>/dev/null | awk '/src/ { print $7; exit }')
+  if [ -z "$ip" ] || [ "$ip" = "0.0.0.0" ]; then
+    ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+  fi
+  if [ -z "$ip" ] || [ "$ip" = "0.0.0.0" ]; then
+    ip=$(ip addr show 2>/dev/null | awk '/inet / && !/127\.0\.0\.1/ { gsub(/\/.*/, "", $2); print $2; exit }')
+  fi
+  if [ -z "$ip" ] || [ "$ip" = "0.0.0.0" ]; then
+    echo "ERROR: Could not detect server IP address. Set it manually via FEATHERDEPLOY_HOST env var." >&2
+    exit 1
+  fi
+  echo "$ip"
+}
+
 # -- Helper: write rqlite systemd service
 write_rqlite_service() {
+  # rqlite 8.x requires an explicit routable advertise address when binding
+  # raft on 0.0.0.0 -- detect the real IP and pass it via -raft-adv-addr.
+  local SERVER_IP
+  SERVER_IP=$(detect_server_ip)
+  echo "  Detected server IP for rqlite Raft advertise: ${SERVER_IP}"
+
   cat > "$RQLITE_UNIT" << RQEOF
 [Unit]
 Description=rqlite Distributed SQLite
@@ -224,6 +248,7 @@ ExecStart=/usr/local/bin/rqlited \
   -node-id=main \
   -http-addr=127.0.0.1:4001 \
   -raft-addr=0.0.0.0:4002 \
+  -raft-adv-addr=${SERVER_IP}:4002 \
   ${RQLITE_DATA_DIR}
 Restart=on-failure
 RestartSec=5s
