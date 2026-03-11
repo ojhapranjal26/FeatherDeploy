@@ -103,7 +103,9 @@ install_rqlite() {
   echo "==> Installing rqlite ${RQLITE_VER}..."
   local ARCH="amd64"
   local TAR="rqlite-v${RQLITE_VER}-linux-${ARCH}.tar.gz"
+  local CHECKSUMS="rqlite-v${RQLITE_VER}-checksums.txt"
   local URL="https://github.com/rqlite/rqlite/releases/download/v${RQLITE_VER}/${TAR}"
+  local CHECKSUMS_URL="https://github.com/rqlite/rqlite/releases/download/v${RQLITE_VER}/${CHECKSUMS}"
 
   # Retry download up to 3 times to handle transient timeouts
   local attempt=0
@@ -111,40 +113,60 @@ install_rqlite() {
   while [ $attempt -lt 3 ]; do
     attempt=$(( attempt + 1 ))
     echo "  Downloading rqlite (attempt ${attempt}/3)..."
-    rm -f "/tmp/${TAR}"
-    if curl --fail --show-error --location \
+    rm -f "/tmp/${TAR}" "/tmp/${CHECKSUMS}"
+    
+    # Download the tarball
+    if ! curl --fail --show-error --location \
          --connect-timeout 30 --max-time 180 \
          "$URL" -o "/tmp/${TAR}" 2>&1; then
-      downloaded=true
-      break
+      echo "  Download attempt ${attempt} failed -- retrying..."
+      sleep 3
+      continue
     fi
-    echo "  Download attempt ${attempt} failed -- retrying..."
-    sleep 3
+    
+    # Download checksums file for validation
+    if ! curl --fail --show-error --location \
+         --connect-timeout 30 --max-time 60 \
+         "$CHECKSUMS_URL" -o "/tmp/${CHECKSUMS}" 2>&1; then
+      echo "  Could not download checksums (attempt ${attempt}) -- retrying..."
+      sleep 3
+      continue
+    fi
+    
+    # Verify the downloaded tarball against checksum
+    if ! (cd /tmp && grep "${TAR}" "${CHECKSUMS}" | sha256sum -c - >/dev/null 2>&1); then
+      echo "  Checksum verification failed (attempt ${attempt}) -- retrying..."
+      sleep 3
+      continue
+    fi
+    
+    downloaded=true
+    break
   done
 
   if [ "$downloaded" = false ]; then
-    echo "  ERROR: rqlite download failed after 3 attempts."
+    echo "  ERROR: rqlite download failed after 3 attempts (checksum mismatch or network error)."
     echo "  Install manually: https://github.com/rqlite/rqlite/releases/tag/v${RQLITE_VER}"
-    rm -f "/tmp/${TAR}"
+    rm -f "/tmp/${TAR}" "/tmp/${CHECKSUMS}"
     exit 1
   fi
 
   local EXTRACTED_DIR
   if ! EXTRACTED_DIR=$(tar -tzf "/tmp/${TAR}" 2>/dev/null | head -1 | cut -f1 -d"/") || [ -z "$EXTRACTED_DIR" ]; then
-    echo "  ERROR: downloaded rqlite archive is corrupt. Try running the script again."
-    rm -f "/tmp/${TAR}"
+    echo "  ERROR: rqlite archive is corrupted. Try running the script again."
+    rm -f "/tmp/${TAR}" "/tmp/${CHECKSUMS}"
     exit 1
   fi
 
   if ! tar -xzf "/tmp/${TAR}" -C /tmp/ 2>/dev/null; then
     echo "  ERROR: rqlite extraction failed."
-    rm -f "/tmp/${TAR}"
+    rm -f "/tmp/${TAR}" "/tmp/${CHECKSUMS}"
     exit 1
   fi
 
   install -m 755 "/tmp/${EXTRACTED_DIR}/rqlited" /usr/local/bin/rqlited
   install -m 755 "/tmp/${EXTRACTED_DIR}/rqlite"  /usr/local/bin/rqlite
-  rm -rf "/tmp/${TAR}" "/tmp/${EXTRACTED_DIR}"
+  rm -rf "/tmp/${TAR}" "/tmp/${CHECKSUMS}" "/tmp/${EXTRACTED_DIR}"
   echo "  rqlited installed"
 }
 
