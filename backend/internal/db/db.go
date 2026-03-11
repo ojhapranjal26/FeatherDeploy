@@ -40,8 +40,20 @@ func applySchema(db *sql.DB) error {
 
 	stmts := strings.Split(string(schema), ";")
 	for _, s := range stmts {
-		s = strings.TrimSpace(s)
-		if s == "" || strings.HasPrefix(s, "--") {
+		// Strip comment lines line-by-line, then trim surrounding whitespace.
+		// This is required because splitting on ";" produces fragments like:
+		//   "-- 004: services\nCREATE TABLE services (...)"
+		// A whole-statement HasPrefix("--") check would silently skip the CREATE TABLE.
+		var sqlLines []string
+		for _, line := range strings.Split(s, "\n") {
+			trimmed := strings.TrimSpace(line)
+			if trimmed == "" || strings.HasPrefix(trimmed, "--") {
+				continue
+			}
+			sqlLines = append(sqlLines, line)
+		}
+		s = strings.TrimSpace(strings.Join(sqlLines, "\n"))
+		if s == "" {
 			continue
 		}
 		if _, err := db.Exec(s); err != nil {
@@ -65,4 +77,3 @@ func min(a, b int) int {
 	}
 	return b
 }
-
