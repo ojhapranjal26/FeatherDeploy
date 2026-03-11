@@ -85,8 +85,13 @@ configure_crun() {
 # -- Helper: install rqlite binary -------------------------------------------
 install_rqlite() {
   if command -v rqlited >/dev/null 2>&1; then
-    echo "  rqlited already installed -- skipping"
-    return
+    # Verify the binary is not corrupt by running --version
+    if rqlited --version >/dev/null 2>&1; then
+      echo "  rqlited already installed -- skipping"
+      return
+    fi
+    echo "  WARNING: existing rqlited binary is corrupt -- removing and reinstalling"
+    rm -f "$(command -v rqlited)" "$(command -v rqlite 2>/dev/null)" || true
   fi
   echo "==> Installing rqlite ${RQLITE_VER}..."
   local ARCH="amd64"
@@ -303,13 +308,57 @@ echo "  Binary installed: $BINARY"
 cp "$REPO/dist/featherdeploy-node" "$NODE_BINARY" ; chmod +x "$NODE_BINARY"
 echo "  Node agent installed: $NODE_BINARY"
 
+# -- Helper: ensure rqlite service is running (with data-dir recovery) -------
+ensure_rqlite_running() {
+  systemctl daemon-reload
+  systemctl enable rqlite 2>/dev/null || true
+
+  if systemctl is-active --quiet rqlite; then
+    echo "  rqlite already running"
+    return
+  fi
+
+  echo "  Starting rqlite..."
+  systemctl start rqlite 2>/dev/null || true
+
+  # Wait up to 15s for rqlite to answer
+  local deadline=$(( $(date +%s) + 15 ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    if curl -sf http://127.0.0.1:4001/status >/dev/null 2>&1; then
+      echo "  rqlite is ready"
+      return
+    fi
+    sleep 1
+  done
+
+  # Service started but rqlite not responding -- likely corrupt data directory
+  echo "  WARNING: rqlite did not respond -- data directory may be corrupt"
+  echo "  Wiping rqlite data directory and retrying..."
+  systemctl stop rqlite 2>/dev/null || true
+  rm -rf /var/lib/featherdeploy/rqlite-data
+  mkdir -p /var/lib/featherdeploy/rqlite-data
+  chown -R featherdeploy:featherdeploy /var/lib/featherdeploy/rqlite-data 2>/dev/null || true
+  systemctl start rqlite
+
+  local deadline2=$(( $(date +%s) + 30 ))
+  while [ "$(date +%s)" -lt "$deadline2" ]; do
+    if curl -sf http://127.0.0.1:4001/status >/dev/null 2>&1; then
+      echo "  rqlite is ready (fresh data directory)"
+      return
+    fi
+    sleep 1
+  done
+
+  echo "  ERROR: rqlite failed to start even after wiping data. Check: journalctl -u rqlite" >&2
+  exit 1
+}
+
 # -- 8. Ensure rqlite data dir + service are in place ------------------------
 mkdir -p /var/lib/featherdeploy/rqlite-data
 if [ ! -f "$RQLITE_UNIT" ]; then
   write_rqlite_service "featherdeploy"
-  systemctl daemon-reload
-  systemctl enable rqlite
 fi
+ensure_rqlite_running
 
 # -- 9. Reinstall: wipe DB + run wizard --------------------------------------
 if [ "$MODE" = "reinstall" ]; then

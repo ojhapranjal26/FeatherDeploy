@@ -500,8 +500,8 @@ export function DashboardPage() {
                     <Server className="h-4 w-4" />
                     Cluster Health
                     {connected
-                      ? <Wifi className="h-3 w-3 text-emerald-500 ml-1" title="Live" />
-                      : <WifiOff className="h-3 w-3 text-muted-foreground ml-1" title="Reconnecting…" />
+                      ? <Wifi className="h-3 w-3 text-emerald-500 ml-1" aria-label="Live" />
+                      : <WifiOff className="h-3 w-3 text-muted-foreground ml-1" aria-label="Reconnecting…" />
                     }
                   </CardTitle>
                   <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium border ${

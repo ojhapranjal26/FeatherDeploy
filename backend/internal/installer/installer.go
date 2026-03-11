@@ -433,10 +433,18 @@ func configureCrun() {
 }
 
 // installRqlite downloads and installs the rqlite binary if not already present.
+// If an existing binary is found but is corrupt (fails --version), it is removed
+// and re-downloaded.
 func installRqlite() {
-	if _, err := exec.LookPath("rqlited"); err == nil {
-		fmt.Println("  rqlited already installed — skipping")
-		return
+	if path, err := exec.LookPath("rqlited"); err == nil {
+		// Verify the binary is not corrupt by running --version
+		if out, verErr := exec.Command(path, "--version").CombinedOutput(); verErr == nil && len(out) > 0 {
+			fmt.Println("  rqlited already installed — skipping")
+			return
+		}
+		fmt.Println("  WARNING: existing rqlited binary appears corrupt — removing and reinstalling")
+		os.Remove(path)
+		os.Remove("/usr/local/bin/rqlite")
 	}
 	fmt.Printf("  Downloading rqlite %s...\n", rqliteVer)
 	tarName := fmt.Sprintf("rqlite-v%s-linux-amd64.tar.gz", rqliteVer)
