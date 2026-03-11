@@ -83,43 +83,63 @@ configure_crun() {
 }
 
 # -- Helper: install rqlite binary -------------------------------------------
+# Pass --force as first arg to always remove any existing binary before installing.
 install_rqlite() {
-  if command -v rqlited >/dev/null 2>&1; then
-    # Verify the binary is not corrupt by running --version
+  local force="${1:-}"
+  if [ "$force" = "--force" ]; then
+    echo "==> Removing any existing rqlite binaries..."
+    systemctl stop rqlite 2>/dev/null || true
+    rm -f /usr/local/bin/rqlited /usr/local/bin/rqlite
+  elif command -v rqlited >/dev/null 2>&1; then
+    # Verify the binary is not corrupt
     if rqlited --version >/dev/null 2>&1; then
       echo "  rqlited already installed -- skipping"
       return
     fi
-    echo "  WARNING: existing rqlited binary is corrupt -- removing and reinstalling"
-    rm -f "$(command -v rqlited)" "$(command -v rqlite 2>/dev/null)" || true
+    echo "  WARNING: existing rqlited binary is corrupt -- forcing reinstall"
+    rm -f /usr/local/bin/rqlited /usr/local/bin/rqlite
   fi
+
   echo "==> Installing rqlite ${RQLITE_VER}..."
   local ARCH="amd64"
   local TAR="rqlite-v${RQLITE_VER}-linux-${ARCH}.tar.gz"
   local URL="https://github.com/rqlite/rqlite/releases/download/v${RQLITE_VER}/${TAR}"
 
-  # Use a subshell so a failed download does not kill the whole script
-  # (build.sh uses set -euo pipefail at the top level).
-  if ! curl --fail --silent --show-error --location \
-       --connect-timeout 30 --max-time 180 \
-       "$URL" -o "/tmp/${TAR}" 2>&1; then
-    echo "  WARNING: rqlite download failed -- skipping."
+  # Retry download up to 3 times to handle transient timeouts
+  local attempt=0
+  local downloaded=false
+  while [ $attempt -lt 3 ]; do
+    attempt=$(( attempt + 1 ))
+    echo "  Downloading rqlite (attempt ${attempt}/3)..."
+    rm -f "/tmp/${TAR}"
+    if curl --fail --show-error --location \
+         --connect-timeout 30 --max-time 180 \
+         "$URL" -o "/tmp/${TAR}" 2>&1; then
+      downloaded=true
+      break
+    fi
+    echo "  Download attempt ${attempt} failed -- retrying..."
+    sleep 3
+  done
+
+  if [ "$downloaded" = false ]; then
+    echo "  ERROR: rqlite download failed after 3 attempts."
     echo "  Install manually: https://github.com/rqlite/rqlite/releases/tag/v${RQLITE_VER}"
     rm -f "/tmp/${TAR}"
-    return
+    exit 1
   fi
 
   local EXTRACTED_DIR
-  if ! EXTRACTED_DIR=$(tar -tzf "/tmp/${TAR}" 2>/dev/null | head -1 | cut -f1 -d"/"); then
-    echo "  WARNING: rqlite archive is corrupt -- skipping."
+  if ! EXTRACTED_DIR=$(tar -tzf "/tmp/${TAR}" 2>/dev/null | head -1 | cut -f1 -d"/") || [ -z "$EXTRACTED_DIR" ]; then
+    echo "  ERROR: downloaded rqlite archive is corrupt. Try running the script again."
     rm -f "/tmp/${TAR}"
-    return
+    exit 1
   fi
 
   if ! tar -xzf "/tmp/${TAR}" -C /tmp/ 2>/dev/null; then
-    echo "  WARNING: rqlite extraction failed -- skipping."
+    echo "  ERROR: rqlite extraction failed."
     rm -f "/tmp/${TAR}"
-    return
+    exit 1
   fi
 
   install -m 755 "/tmp/${EXTRACTED_DIR}/rqlited" /usr/local/bin/rqlited
@@ -354,17 +374,25 @@ ensure_rqlite_running() {
 }
 
 # -- 8. Ensure rqlite data dir + service are in place ------------------------
-mkdir -p /var/lib/featherdeploy/rqlite-data
-if [ ! -f "$RQLITE_UNIT" ]; then
-  write_rqlite_service "featherdeploy"
+# On first install: always wipe any old rqlite binary + data for a clean start.
+if [ "$MODE" = "install" ]; then
+  echo "==> Cleaning up any previous rqlite installation..."
+  systemctl stop rqlite 2>/dev/null || true
+  rm -rf /var/lib/featherdeploy/rqlite-data
+  install_rqlite --force
 fi
+
+mkdir -p /var/lib/featherdeploy/rqlite-data
+write_rqlite_service "featherdeploy"
 ensure_rqlite_running
 
 # -- 9. Reinstall: wipe DB + run wizard --------------------------------------
 if [ "$MODE" = "reinstall" ]; then
   echo "" ; echo "==> Removing existing database..."
+  systemctl stop rqlite 2>/dev/null || true
   rm -f "$DATA_DB" ; rm -rf /var/lib/featherdeploy/rqlite-data
   mkdir -p /var/lib/featherdeploy/rqlite-data
+  ensure_rqlite_running
   echo "" ; echo "==> Launching FeatherDeploy setup wizard..." ; echo ""
   exec "$BINARY" install
 
