@@ -8,8 +8,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/deploy-paas/backend/internal/auth"
-	"github.com/deploy-paas/backend/internal/model"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/auth"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/model"
 )
 
 type contextKey string
@@ -150,3 +150,4 @@ func jsonEscape(s string) string {
 	s = strings.ReplaceAll(s, `"`, `\"`)
 	return s
 }
+

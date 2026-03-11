@@ -14,8 +14,8 @@ import (
 	"strings"
 	"time"
 
-	mw "github.com/deploy-paas/backend/internal/middleware"
-	"github.com/deploy-paas/backend/internal/model"
+	mw "github.com/ojhapranjal26/featherdeploy/backend/internal/middleware"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/model"
 )
 
 // GitHubHandler manages GitHub OAuth integration.
@@ -287,3 +287,4 @@ func randomState() (string, error) {
 	}
 	return base64.URLEncoding.WithPadding(base64.NoPadding).EncodeToString(b), nil
 }
+

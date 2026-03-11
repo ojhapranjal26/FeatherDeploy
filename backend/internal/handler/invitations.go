@@ -9,11 +9,11 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/deploy-paas/backend/internal/auth"
-	"github.com/deploy-paas/backend/internal/mailer"
-	mw "github.com/deploy-paas/backend/internal/middleware"
-	"github.com/deploy-paas/backend/internal/model"
-	v "github.com/deploy-paas/backend/internal/validator"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/auth"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/mailer"
+	mw "github.com/ojhapranjal26/featherdeploy/backend/internal/middleware"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/model"
+	v "github.com/ojhapranjal26/featherdeploy/backend/internal/validator"
 )
 
 const inviteTTL = 15 * time.Minute
@@ -319,3 +319,4 @@ func generateToken(n int) (string, error) {
 	}
 	return base64.URLEncoding.WithPadding(base64.NoPadding).EncodeToString(b), nil
 }
+

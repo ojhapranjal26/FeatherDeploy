@@ -1,4 +1,4 @@
-module github.com/deploy-paas/backend
+module github.com/ojhapranjal26/featherdeploy/backend
 
 go 1.26.1
 

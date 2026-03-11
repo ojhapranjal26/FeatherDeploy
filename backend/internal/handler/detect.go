@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/deploy-paas/backend/internal/detect"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/detect"
 )
 
 // DetectHandler handles automatic app-stack detection by cloning a service's
@@ -78,3 +78,4 @@ func (h *DetectHandler) Detect(w http.ResponseWriter, r *http.Request) {
 	result := detect.Detect(tmpDir)
 	writeJSON(w, http.StatusOK, result)
 }
+

@@ -7,9 +7,9 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/deploy-paas/backend/internal/crypto"
-	"github.com/deploy-paas/backend/internal/model"
-	v "github.com/deploy-paas/backend/internal/validator"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/crypto"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/model"
+	v "github.com/ojhapranjal26/featherdeploy/backend/internal/validator"
 )
 
 // encryptedPrefix is prepended to values that have been AES-256-GCM encrypted.
@@ -155,3 +155,4 @@ func (h *EnvHandler) GetDecryptedEnv(ctx context.Context, serviceID int64) ([]mo
 	}
 	return vars, nil
 }
+

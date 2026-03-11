@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/deploy-paas/backend/internal/heartbeat"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/heartbeat"
 )
 
 func collectStats() heartbeat.BrainStats {
@@ -89,3 +89,4 @@ func readCPUPercent() float64 {
 	}
 	return 100.0 * float64(total2-idle2-(total1-idle1)) / float64(total2-total1)
 }
+

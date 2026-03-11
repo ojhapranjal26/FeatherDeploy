@@ -14,9 +14,9 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
-	appCrypto "github.com/deploy-paas/backend/internal/crypto"
-	mw "github.com/deploy-paas/backend/internal/middleware"
-	"github.com/deploy-paas/backend/internal/model"
+	appCrypto "github.com/ojhapranjal26/featherdeploy/backend/internal/crypto"
+	mw "github.com/ojhapranjal26/featherdeploy/backend/internal/middleware"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/model"
 )
 
 // SSHKeyHandler manages per-user SSH key pairs used for git clone operations.
@@ -241,3 +241,4 @@ func (h *SSHKeyHandler) ExportPrivate(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"private_key": privPEM})
 }
+

@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	_ "github.com/deploy-paas/backend/internal/rqlitedrv"
+	_ "github.com/ojhapranjal26/featherdeploy/backend/internal/rqlitedrv"
 )
 
 //go:embed schema.sql
@@ -65,3 +65,4 @@ func min(a, b int) int {
 	}
 	return b
 }
+

@@ -2,7 +2,7 @@
 // SQLite database.  Import this package for its side effect of registering the
 // "rqlite" driver name with database/sql:
 //
-//	import _ "github.com/deploy-paas/backend/internal/rqlitedrv"
+//	import _ "github.com/ojhapranjal26/featherdeploy/backend/internal/rqlitedrv"
 //
 // The DSN is an rqlite HTTP base URL, e.g. "http://127.0.0.1:4001".
 package rqlitedrv
@@ -279,3 +279,4 @@ func (c *conn) query(query string, args []driver.Value) (driver.Rows, error) {
 		values:  r.Values,
 	}, nil
 }
+

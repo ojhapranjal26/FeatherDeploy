@@ -9,8 +9,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/deploy-paas/backend/internal/model"
-	v "github.com/deploy-paas/backend/internal/validator"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/model"
+	v "github.com/ojhapranjal26/featherdeploy/backend/internal/validator"
 )
 
 type DomainHandler struct{ db *sql.DB }
@@ -140,3 +140,4 @@ func (h *DomainHandler) Verify(w http.ResponseWriter, r *http.Request) {
 		"server_ip":   serverIP,
 	})
 }
+

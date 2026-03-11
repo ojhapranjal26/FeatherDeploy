@@ -7,10 +7,10 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/deploy-paas/backend/internal/auth"
-	"github.com/deploy-paas/backend/internal/middleware"
-	"github.com/deploy-paas/backend/internal/model"
-	v "github.com/deploy-paas/backend/internal/validator"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/auth"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/middleware"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/model"
+	v "github.com/ojhapranjal26/featherdeploy/backend/internal/validator"
 )
 
 type AuthHandler struct {
@@ -82,3 +82,4 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(v)
 }
+

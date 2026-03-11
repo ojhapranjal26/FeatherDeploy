@@ -191,3 +191,13 @@ ALTER TABLE nodes ADD COLUMN disk_used    INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE nodes ADD COLUMN disk_total   INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE nodes ADD COLUMN last_stats_at DATETIME;
 ALTER TABLE nodes ADD COLUMN node_id      TEXT    NOT NULL DEFAULT '';  -- hostname used as election ID
+
+-- 015: system_settings — key/value store for platform-wide configuration
+CREATE TABLE IF NOT EXISTS system_settings (
+    key        TEXT     PRIMARY KEY,
+    value      TEXT     NOT NULL DEFAULT '',
+    updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
+);
+-- Seed default branding keys so callers can always UPDATE instead of INSERT
+INSERT OR IGNORE INTO system_settings (key, value) VALUES ('company_name', '');
+INSERT OR IGNORE INTO system_settings (key, value) VALUES ('logo_url', '');

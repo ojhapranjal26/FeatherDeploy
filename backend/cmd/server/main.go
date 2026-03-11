@@ -18,15 +18,15 @@ import (
 	chiMiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
 
-	"github.com/deploy-paas/backend/internal/auth"
-	appDb "github.com/deploy-paas/backend/internal/db"
-	"github.com/deploy-paas/backend/internal/handler"
-	"github.com/deploy-paas/backend/internal/heartbeat"
-	"github.com/deploy-paas/backend/internal/installer"
-	"github.com/deploy-paas/backend/internal/mailer"
-	mw "github.com/deploy-paas/backend/internal/middleware"
-	"github.com/deploy-paas/backend/internal/model"
-	"github.com/deploy-paas/backend/web"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/auth"
+	appDb "github.com/ojhapranjal26/featherdeploy/backend/internal/db"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/handler"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/heartbeat"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/installer"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/mailer"
+	mw "github.com/ojhapranjal26/featherdeploy/backend/internal/middleware"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/model"
+	"github.com/ojhapranjal26/featherdeploy/backend/web"
 )
 
 const usage = `deploypaaas — self-hosted PaaS panel
@@ -159,6 +159,7 @@ func serve() {
 	if err := nodeH.EnsureCA(); err != nil {
 		slog.Warn("CA init warning", "err", err)
 	}
+	settingsH := handler.NewSettingsHandler(db)
 
 	// ─── Router ──────────────────────────────────────────────────────────────
 	r := chi.NewRouter()
@@ -178,6 +179,9 @@ func serve() {
 
 	// ─── Public routes ────────────────────────────────────────────────────────
 	r.Post("/api/auth/login", authH.Login)
+
+	// Branding is public so the login page can show it before authentication
+	r.Get("/api/settings/branding", settingsH.GetBranding)
 
 	// Invitation accept flow (public — token acts as credential)
 	r.Get("/api/invitations/{token}", inviteH.Verify)
@@ -240,6 +244,8 @@ func serve() {
 			r.Get("/api/github-app/config", ghAppH.GetConfig)
 			r.Post("/api/github-app/config", ghAppH.SetConfig)
 			r.Delete("/api/github-app/config", ghAppH.DeleteConfig)
+			// Branding write requires superadmin
+			r.Put("/api/settings/branding", settingsH.SetBranding)
 		})
 
 		// ── Cluster brain info (any authenticated user) ───────────────────

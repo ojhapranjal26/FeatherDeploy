@@ -6,9 +6,9 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/deploy-paas/backend/internal/middleware"
-	"github.com/deploy-paas/backend/internal/model"
-	v "github.com/deploy-paas/backend/internal/validator"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/middleware"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/model"
+	v "github.com/ojhapranjal26/featherdeploy/backend/internal/validator"
 )
 
 type ProjectHandler struct{ db *sql.DB }
@@ -244,3 +244,4 @@ func (h *ProjectHandler) RemoveMember(w http.ResponseWriter, r *http.Request) {
 		`DELETE FROM project_members WHERE project_id=? AND user_id=?`, projectID, userID)
 	w.WriteHeader(http.StatusNoContent)
 }
+

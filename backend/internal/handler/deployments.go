@@ -7,9 +7,9 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/deploy-paas/backend/internal/middleware"
-	"github.com/deploy-paas/backend/internal/model"
-	v "github.com/deploy-paas/backend/internal/validator"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/middleware"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/model"
+	v "github.com/ojhapranjal26/featherdeploy/backend/internal/validator"
 )
 
 type DeploymentHandler struct{ db *sql.DB }
@@ -193,3 +193,4 @@ func scanDeploymentRow(row *sql.Row, d *model.Deployment) error {
 		&d.RepoURL, &d.CommitSHA, &d.ArtifactPath, &d.Status,
 		&d.ErrorMessage, &d.StartedAt, &d.FinishedAt, &d.CreatedAt)
 }
+

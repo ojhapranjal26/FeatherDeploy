@@ -2,12 +2,14 @@ import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import { useNavigate } from 'react-router-dom'
+import { useEffect, useState } from 'react'
 import { useAuth } from '@/context/AuthContext'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { toast } from 'sonner'
-import { Rocket, GitBranch, Globe, Zap } from 'lucide-react'
+import { Rocket, GitBranch, Globe, Zap, Feather } from 'lucide-react'
+import { settingsApi, type Branding } from '@/api/settings'
 
 const schema = z.object({
   email:    z.string().email('Invalid email address'),
@@ -25,6 +27,12 @@ const FEATURES = [
 export function LoginPage() {
   const { login } = useAuth()
   const navigate = useNavigate()
+  const [branding, setBranding] = useState<Branding>({ company_name: '', logo_url: '' })
+
+  useEffect(() => {
+    settingsApi.getBranding().then(setBranding).catch(() => {})
+  }, [])
+
   const {
     register,
     handleSubmit,
@@ -40,6 +48,8 @@ export function LoginPage() {
     }
   }
 
+  const platformName = branding.company_name || 'FeatherDeploy'
+
   return (
     <div className="flex min-h-screen">
       {/* ── Left panel ─────────────────────────────────────────────────── */}
@@ -50,10 +60,20 @@ export function LoginPage() {
 
         {/* Logo */}
         <div className="relative flex items-center gap-3">
-          <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-primary text-primary-foreground text-base font-bold shadow-lg shadow-primary/30">
-            D
-          </div>
-          <span className="text-lg font-semibold text-white tracking-tight">DeployPaaS</span>
+          {branding.logo_url ? (
+            <img
+              src={branding.logo_url}
+              alt={platformName}
+              className="h-9 w-auto max-w-[160px] object-contain"
+            />
+          ) : (
+            <>
+              <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-primary text-primary-foreground shadow-lg shadow-primary/30">
+                <Feather className="h-5 w-5" />
+              </div>
+              <span className="text-lg font-semibold text-white tracking-tight">{platformName}</span>
+            </>
+          )}
         </div>
 
         {/* Headline */}
@@ -83,7 +103,7 @@ export function LoginPage() {
         {/* Testimonial */}
         <div className="relative rounded-xl border border-white/10 bg-white/5 p-5 backdrop-blur-sm">
           <p className="text-sm text-white/70 leading-relaxed">
-            "DeployPaaS cut our release cycle from 2 weeks to a single afternoon. The RBAC model means every team has exactly the access they need."
+            "{platformName} cut our release cycle from 2 weeks to a single afternoon. The RBAC model means every team has exactly the access they need."
           </p>
           <div className="mt-3 flex items-center gap-2.5">
             <div className="h-7 w-7 rounded-full bg-primary/30 flex items-center justify-center text-xs font-semibold text-primary">
@@ -101,10 +121,20 @@ export function LoginPage() {
       <div className="flex flex-1 flex-col items-center justify-center p-6 sm:p-10">
         {/* Mobile logo */}
         <div className="mb-8 flex items-center gap-2.5 lg:hidden">
-          <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-primary text-primary-foreground text-sm font-bold">
-            D
-          </div>
-          <span className="font-semibold tracking-tight">DeployPaaS</span>
+          {branding.logo_url ? (
+            <img
+              src={branding.logo_url}
+              alt={platformName}
+              className="h-8 w-auto max-w-[140px] object-contain"
+            />
+          ) : (
+            <>
+              <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-primary text-primary-foreground">
+                <Feather className="h-4 w-4" />
+              </div>
+              <span className="font-semibold tracking-tight">{platformName}</span>
+            </>
+          )}
         </div>
 
         <div className="w-full max-w-sm space-y-6">

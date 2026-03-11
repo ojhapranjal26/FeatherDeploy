@@ -14,9 +14,9 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 
-	mw "github.com/deploy-paas/backend/internal/middleware"
-	"github.com/deploy-paas/backend/internal/model"
-	v "github.com/deploy-paas/backend/internal/validator"
+	mw "github.com/ojhapranjal26/featherdeploy/backend/internal/middleware"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/model"
+	v "github.com/ojhapranjal26/featherdeploy/backend/internal/validator"
 )
 
 // GitHubAppHandler manages the GitHub App integration.
@@ -278,3 +278,4 @@ func (h *GitHubAppHandler) InjectAppClaims(w http.ResponseWriter, r *http.Reques
 
 // keep compiler happy — exported for use in main.go
 var _ = bytes.NewReader
+

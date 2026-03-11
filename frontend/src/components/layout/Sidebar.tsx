@@ -12,13 +12,16 @@ import {
   PanelLeftClose,
   Github,
   Network,
+  Feather,
 } from 'lucide-react'
+import { useQuery } from '@tanstack/react-query'
 import { cn } from '@/lib/utils'
 import { useAuth } from '@/context/AuthContext'
 import { useTheme } from '@/context/ThemeContext'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Button } from '@/components/ui/button'
 import { Separator } from '@/components/ui/separator'
+import { settingsApi } from '@/api/settings'
 import type { User } from '@/api/auth'
 
 type Role = User['role']
@@ -49,6 +52,14 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
   const { user, logout } = useAuth()
   const { theme, setTheme } = useTheme()
   const navigate = useNavigate()
+
+  const { data: branding } = useQuery({
+    queryKey: ['branding'],
+    queryFn: settingsApi.getBranding,
+    staleTime: 5 * 60 * 1000,
+  })
+
+  const platformName = branding?.company_name || 'FeatherDeploy'
 
   const handleLogout = () => {
     logout()
@@ -89,17 +100,33 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
             title="Expand sidebar"
             className="flex h-9 w-9 items-center justify-center rounded-md hover:bg-sidebar-accent transition-colors"
           >
-            <div className="flex h-7 w-7 items-center justify-center rounded-md bg-primary text-primary-foreground text-sm font-bold">
-              P
-            </div>
+            {branding?.logo_url ? (
+              <img
+                src={branding.logo_url}
+                alt={platformName}
+                className="h-7 w-7 rounded-md object-cover"
+              />
+            ) : (
+              <div className="flex h-7 w-7 items-center justify-center rounded-md bg-primary text-primary-foreground">
+                <Feather className="h-4 w-4" />
+              </div>
+            )}
           </button>
         ) : (
           <>
             <div className="flex items-center gap-2.5">
-              <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-primary text-primary-foreground text-sm font-bold">
-                P
-              </div>
-              <span className="font-semibold tracking-tight">DeployPaaS</span>
+              {branding?.logo_url ? (
+                <img
+                  src={branding.logo_url}
+                  alt={platformName}
+                  className="h-7 w-auto max-w-[100px] rounded-md object-contain"
+                />
+              ) : (
+                <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-primary text-primary-foreground">
+                  <Feather className="h-4 w-4" />
+                </div>
+              )}
+              <span className="font-semibold tracking-tight">{platformName}</span>
             </div>
             <Button
               variant="ghost"

@@ -30,8 +30,8 @@ import (
 
 	"golang.org/x/term"
 
-	"github.com/deploy-paas/backend/internal/auth"
-	appDb "github.com/deploy-paas/backend/internal/db"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/auth"
+	appDb "github.com/ojhapranjal26/featherdeploy/backend/internal/db"
 )
 
 const (
@@ -316,6 +316,19 @@ func createServiceUser(username, password string) {
 	} else {
 		fmt.Printf("  ✓ password set for OS user: %s\n", username)
 	}
+
+	// Explicitly unlock the account. On Ubuntu/Debian, useradd leaves the
+	// account in a locked state (password field starts with '!') until a
+	// password is set. chpasswd sets the hash but some PAM configurations
+	// still treat the account as locked. `passwd -u` removes that lock so
+	// `su - <username>` works correctly even from root.
+	mustRun("passwd", "-u", username)
+
+	// Ensure the account never expires (chage -E -1 clears the expiry date).
+	// Without this, some distros default to an expiry that causes PAM to deny
+	// interactive login with "Permission denied" immediately after creation.
+	mustRun("chage", "-E", "-1", username)
+	mustRun("chage", "-M", "-1", username)
 }
 
 func mustRun(name string, args ...string) {
@@ -708,3 +721,4 @@ func readEnvVar(file, key string) string {
 	}
 	return ""
 }
+

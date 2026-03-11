@@ -92,10 +92,31 @@ install_rqlite() {
   local ARCH="amd64"
   local TAR="rqlite-v${RQLITE_VER}-linux-${ARCH}.tar.gz"
   local URL="https://github.com/rqlite/rqlite/releases/download/v${RQLITE_VER}/${TAR}"
-  curl -fsSL "$URL" -o "/tmp/${TAR}"
+
+  # Use a subshell so a failed download does not kill the whole script
+  # (build.sh uses set -euo pipefail at the top level).
+  if ! curl --fail --silent --show-error --location \
+       --connect-timeout 30 --max-time 180 \
+       "$URL" -o "/tmp/${TAR}" 2>&1; then
+    echo "  WARNING: rqlite download failed -- skipping."
+    echo "  Install manually: https://github.com/rqlite/rqlite/releases/tag/v${RQLITE_VER}"
+    rm -f "/tmp/${TAR}"
+    return
+  fi
+
   local EXTRACTED_DIR
-  EXTRACTED_DIR=$(tar -tzf "/tmp/${TAR}" | head -1 | cut -f1 -d"/")
-  tar -xzf "/tmp/${TAR}" -C /tmp/
+  if ! EXTRACTED_DIR=$(tar -tzf "/tmp/${TAR}" 2>/dev/null | head -1 | cut -f1 -d"/"); then
+    echo "  WARNING: rqlite archive is corrupt -- skipping."
+    rm -f "/tmp/${TAR}"
+    return
+  fi
+
+  if ! tar -xzf "/tmp/${TAR}" -C /tmp/ 2>/dev/null; then
+    echo "  WARNING: rqlite extraction failed -- skipping."
+    rm -f "/tmp/${TAR}"
+    return
+  fi
+
   install -m 755 "/tmp/${EXTRACTED_DIR}/rqlited" /usr/local/bin/rqlited
   install -m 755 "/tmp/${EXTRACTED_DIR}/rqlite"  /usr/local/bin/rqlite
   rm -rf "/tmp/${TAR}" "/tmp/${EXTRACTED_DIR}"

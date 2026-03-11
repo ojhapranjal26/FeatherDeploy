@@ -2,6 +2,7 @@
 
 package main
 
-import "github.com/deploy-paas/backend/internal/heartbeat"
+import "github.com/ojhapranjal26/featherdeploy/backend/internal/heartbeat"
 
 func collectStats() heartbeat.BrainStats { return heartbeat.BrainStats{} }
+

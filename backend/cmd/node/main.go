@@ -18,10 +18,10 @@ import (
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
 
-	"github.com/deploy-paas/backend/internal/crypto"
-	appDb "github.com/deploy-paas/backend/internal/db"
-	"github.com/deploy-paas/backend/internal/heartbeat"
-	"github.com/deploy-paas/backend/internal/pki"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/crypto"
+	appDb "github.com/ojhapranjal26/featherdeploy/backend/internal/db"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/heartbeat"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/pki"
 )
 
 const (
@@ -507,3 +507,4 @@ func readEnvFileVar(path, key string) string {
 	}
 	return ""
 }
+

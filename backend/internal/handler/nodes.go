@@ -17,12 +17,12 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"github.com/deploy-paas/backend/internal/crypto"
-	"github.com/deploy-paas/backend/internal/heartbeat"
-	"github.com/deploy-paas/backend/internal/middleware"
-	"github.com/deploy-paas/backend/internal/model"
-	"github.com/deploy-paas/backend/internal/pki"
-	v "github.com/deploy-paas/backend/internal/validator"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/crypto"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/heartbeat"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/middleware"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/model"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/pki"
+	v "github.com/ojhapranjal26/featherdeploy/backend/internal/validator"
 )
 
 // NodeHandler manages worker node registration, status, and the join flow.
@@ -585,3 +585,4 @@ func renderJoinScript(mainURL, token, caCert, sshPubKey string) (string, error) 
 	}{mainURL, token, caCert, sshPubKey})
 	return buf.String(), err
 }
+
