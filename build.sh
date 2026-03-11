@@ -285,7 +285,9 @@ install_deps_apt() {
     curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
     apt-get install -y nodejs
   fi
-  install_go_tarball ; install_rqlite ; configure_crun
+  # NOTE: install_rqlite is called later in step 8, AFTER the service user is
+  # created, so it is intentionally NOT called here.
+  install_go_tarball ; configure_crun
 }
 
 install_deps_dnf() {
@@ -295,7 +297,7 @@ install_deps_dnf() {
   command -v caddy  >/dev/null 2>&1 || dnf install -y caddy 2>/dev/null || \
     (dnf copr enable -y @caddy/caddy 2>/dev/null && dnf install -y caddy) || echo '  WARNING: caddy not via dnf'
   command -v node >/dev/null 2>&1 || { dnf module enable -y nodejs:20 2>/dev/null || true; dnf install -y nodejs npm; }
-  install_go_tarball ; install_rqlite ; configure_crun
+  install_go_tarball ; configure_crun
 }
 
 install_deps_yum() {
@@ -304,20 +306,20 @@ install_deps_yum() {
   command -v crun   >/dev/null 2>&1 || yum install -y crun 2>/dev/null || echo '  WARNING: crun not available via yum'
   command -v caddy  >/dev/null 2>&1 || (yum install -y yum-plugin-copr && yum copr enable -y @caddy/caddy && yum install -y caddy) || echo '  WARNING: caddy not via yum'
   command -v node >/dev/null 2>&1 || { curl -fsSL https://rpm.nodesource.com/setup_20.x | bash -; yum install -y nodejs; }
-  install_go_tarball ; install_rqlite ; configure_crun
+  install_go_tarball ; configure_crun
 }
 
 install_deps_apk() {
   apk update
   apk add --no-cache curl git gcc musl-dev make nodejs npm podman caddy
   apk add --no-cache crun 2>/dev/null || echo '  WARNING: crun not available via apk'
-  install_go_tarball ; install_rqlite ; configure_crun
+  install_go_tarball ; configure_crun
 }
 
 install_deps_pacman() {
   pacman -Sy --noconfirm curl git gcc make nodejs npm go podman caddy
   command -v crun >/dev/null 2>&1 || pacman -S --noconfirm crun 2>/dev/null || echo '  WARNING: crun not available via pacman'
-  install_rqlite ; configure_crun
+  configure_crun
 }
 
 install_go_tarball() {
@@ -429,7 +431,8 @@ ensure_rqlite_running() {
   systemctl stop rqlite 2>/dev/null || true
   rm -rf /var/lib/featherdeploy/rqlite-data
   mkdir -p /var/lib/featherdeploy/rqlite-data
-  chown -R featherdeploy:featherdeploy /var/lib/featherdeploy/rqlite-data 2>/dev/null || true
+  chown -R featherdeploy:featherdeploy /var/lib/featherdeploy/rqlite-data
+  chmod 750 /var/lib/featherdeploy/rqlite-data
   systemctl start rqlite
 
   local deadline2=$(( $(date +%s) + 30 ))
@@ -445,16 +448,34 @@ ensure_rqlite_running() {
   exit 1
 }
 
-# -- 8. Ensure rqlite data dir + service are in place ------------------------
-# On first install: always wipe any old rqlite binary + data for a clean start.
+# -- 8. Create service user + data directory (must happen before rqlite starts)
+echo "==> Ensuring featherdeploy system user exists..."
+if ! id -u featherdeploy >/dev/null 2>&1; then
+  useradd --system --no-create-home --shell /usr/sbin/nologin featherdeploy
+  echo "  Created system user: featherdeploy"
+else
+  echo "  System user featherdeploy already exists -- skipping"
+fi
+
+echo "==> Setting up data directory..."
+mkdir -p /var/lib/featherdeploy/rqlite-data
+chown -R featherdeploy:featherdeploy /var/lib/featherdeploy
+chmod 750 /var/lib/featherdeploy
+
+# -- 8b. Install rqlite binary + write + start service -----------------------
+# On first install: always force-reinstall for a clean start.
+# On update/reinstall: skip download if binary is already healthy.
 if [ "$MODE" = "install" ]; then
   echo "==> Cleaning up any previous rqlite installation..."
   systemctl stop rqlite 2>/dev/null || true
   rm -rf /var/lib/featherdeploy/rqlite-data
+  mkdir -p /var/lib/featherdeploy/rqlite-data
+  chown -R featherdeploy:featherdeploy /var/lib/featherdeploy/rqlite-data
   install_rqlite --force
+else
+  install_rqlite
 fi
 
-mkdir -p /var/lib/featherdeploy/rqlite-data
 write_rqlite_service "featherdeploy"
 ensure_rqlite_running
 
@@ -464,6 +485,8 @@ if [ "$MODE" = "reinstall" ]; then
   systemctl stop rqlite 2>/dev/null || true
   rm -f "$DATA_DB" ; rm -rf /var/lib/featherdeploy/rqlite-data
   mkdir -p /var/lib/featherdeploy/rqlite-data
+  chown -R featherdeploy:featherdeploy /var/lib/featherdeploy/rqlite-data
+  chmod 750 /var/lib/featherdeploy/rqlite-data
   ensure_rqlite_running
   echo "" ; echo "==> Launching FeatherDeploy setup wizard..." ; echo ""
   exec "$BINARY" install
