@@ -191,8 +191,6 @@ func serve() {
 	r.Get("/api/nodes/binary", nodeH.BinaryDownload)
 	r.Get("/api/nodes/server-binary", nodeH.ServerBinaryDownload)
 	r.Get("/api/nodes/ca-cert", nodeH.CACert)
-	// Cluster brain info (no auth — nodes also read this)
-	r.Get("/api/cluster/brain", nodeH.ClusterBrain)
 
 	// ─── Authenticated routes ─────────────────────────────────────────────────
 	r.Group(func(r chi.Router) {
@@ -236,7 +234,10 @@ func serve() {
 			r.Delete("/api/github-app/config", ghAppH.DeleteConfig)
 		})
 
-		// ── Nodes (superadmin only) ──────────────────────────────────────
+		// ── Cluster brain info (any authenticated user) ───────────────────
+		r.Get("/api/cluster/brain", nodeH.ClusterBrain)
+
+		// ── Nodes (superadmin / admin only) ──────────────────────────────
 		r.Group(func(r chi.Router) {
 			r.Use(mw.RequireRole(model.RoleSuperAdmin, model.RoleAdmin))
 			r.Get("/api/nodes", nodeH.List)

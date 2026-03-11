@@ -144,10 +144,10 @@ func runJoin(args []string) {
 	runCmd("systemctl", "enable", "--now", "rqlite-node")
 	waitForRqlite(60)
 
-	// Connect to local rqlite to update our node record with the node_id
+	// Connect to local rqlite to update our node record with the node_id.
+	// We identify the row by join_token — that is the credential this node used to join.
 	if db, err := appDb.OpenRqlite("http://" + rqliteHTTP); err == nil {
-		db.Exec(`UPDATE nodes SET node_id=? WHERE join_token IS NULL AND ip=(
-			SELECT ip FROM nodes LIMIT 1)`, nodeID)
+		db.Exec(`UPDATE nodes SET node_id=? WHERE join_token=?`, nodeID, token)
 		db.Close()
 	}
 
@@ -193,12 +193,6 @@ func runServe() {
 	r.Get("/api/node/health", func(w http.ResponseWriter, req *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"status":"ok"}`))
-	})
-
-	r.Get("/api/node/stats", func(w http.ResponseWriter, req *http.Request) {
-		s := collectStats()
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(s)
 	})
 
 	// Serve frontend bundle if present (fallback when main server is down)
@@ -351,6 +345,11 @@ func runNodeHeartbeat(db *sql.DB, myID string) {
 	ticker := time.NewTicker(heartbeat.HeartbeatInterval)
 	defer ticker.Stop()
 
+	// promoted is set to true once this node wins an election and starts the
+	// brain service.  We stop attempting further elections after that — the
+	// brain's own StartBrain goroutine will keep cluster_state up to date.
+	promoted := false
+
 	for range ticker.C {
 		st := collectStats()
 
@@ -362,6 +361,11 @@ func runNodeHeartbeat(db *sql.DB, myID string) {
 				disk_used=?, disk_total=?, last_stats_at=datetime('now')
 				WHERE id=?`,
 				st.CPU, st.RAMUsed, st.RAMTotal, st.DiskUsed, st.DiskTotal, nodeDBID)
+		}
+
+		// Skip election checks once we have already promoted to brain.
+		if promoted {
+			continue
 		}
 
 		// Check brain health
@@ -378,7 +382,8 @@ func runNodeHeartbeat(db *sql.DB, myID string) {
 
 			if heartbeat.TryClaimBrain(db, myID, myAddr) {
 				slog.Info("WON brain election — promoting to brain", "addr", myAddr)
-				go promoteAsBrain(db, myID, myAddr)
+				promoted = true
+				go promoteAsBrain(myID)
 			} else {
 				slog.Info("lost brain election — another node won")
 			}
@@ -387,7 +392,7 @@ func runNodeHeartbeat(db *sql.DB, myID string) {
 }
 
 // promoteAsBrain starts the featherdeploy server binary on this node via systemd.
-func promoteAsBrain(_ *sql.DB, myID, _ string) {
+func promoteAsBrain(myID string) {
 	slog.Info("promoting node to brain", "id", myID)
 
 	binaryPath := "/usr/local/bin/featherdeploy"
