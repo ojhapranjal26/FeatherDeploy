@@ -152,21 +152,47 @@ install_rqlite() {
   fi
 
   local EXTRACTED_DIR
-  if ! EXTRACTED_DIR=$(tar -tzf "/tmp/${TAR}" 2>/dev/null | head -1 | cut -f1 -d"/") || [ -z "$EXTRACTED_DIR" ]; then
-    echo "  ERROR: rqlite archive is corrupted. Try running the script again."
+  echo "  Verifying archive integrity..."
+  if ! tar -tzf "/tmp/${TAR}" >/dev/null 2>&1; then
+    echo "  ERROR: rqlite archive cannot be read by tar. File may be corrupted."
+    echo "  Run: tar -tzf /tmp/${TAR} (for details)"
     rm -f "/tmp/${TAR}" "/tmp/${CHECKSUMS}"
     exit 1
   fi
 
-  if ! tar -xzf "/tmp/${TAR}" -C /tmp/ 2>/dev/null; then
-    echo "  ERROR: rqlite extraction failed."
+  # Extract directory name from archive contents
+  EXTRACTED_DIR=$(tar -tzf "/tmp/${TAR}" 2>/dev/null | head -1 | sed 's|/.*||' | grep -v '^$' | head -1)
+  if [ -z "$EXTRACTED_DIR" ]; then
+    echo "  ERROR: could not determine rqlite directory name from archive."
     rm -f "/tmp/${TAR}" "/tmp/${CHECKSUMS}"
+    exit 1
+  fi
+
+  echo "  Extracting ${EXTRACTED_DIR}..."
+  if ! tar -xzf "/tmp/${TAR}" -C /tmp/; then
+    echo "  ERROR: rqlite extraction failed -- archive may be corrupted."
+    rm -f "/tmp/${TAR}" "/tmp/${CHECKSUMS}"
+    exit 1
+  fi
+
+  # Verify the extracted binaries exist
+  if [ ! -f "/tmp/${EXTRACTED_DIR}/rqlited" ] || [ ! -f "/tmp/${EXTRACTED_DIR}/rqlite" ]; then
+    echo "  ERROR: rqlited/rqlite binaries not found in extracted archive."
+    echo "  Expected: /tmp/${EXTRACTED_DIR}/rqlited and /tmp/${EXTRACTED_DIR}/rqlite"
+    rm -f "/tmp/${TAR}" "/tmp/${CHECKSUMS}" "/tmp/${EXTRACTED_DIR}"
     exit 1
   fi
 
   install -m 755 "/tmp/${EXTRACTED_DIR}/rqlited" /usr/local/bin/rqlited
   install -m 755 "/tmp/${EXTRACTED_DIR}/rqlite"  /usr/local/bin/rqlite
   rm -rf "/tmp/${TAR}" "/tmp/${CHECKSUMS}" "/tmp/${EXTRACTED_DIR}"
+  
+  # Verify the installed binary works
+  if ! /usr/local/bin/rqlited --version >/dev/null 2>&1; then
+    echo "  ERROR: installed rqlited binary does not work."
+    rm -f /usr/local/bin/rqlited /usr/local/bin/rqlite
+    exit 1
+  fi
   echo "  rqlited installed"
 }
 
