@@ -78,7 +78,8 @@ func (h *StatsHandler) Stream(w http.ResponseWriter, r *http.Request) {
 			payload.Brain = b
 		}
 
-		// Node stats
+		// Node stats — initialise as empty slice so JSON marshals to [] not null.
+		payload.Nodes = make([]NodeStatsSummary, 0)
 		rows, err := h.db.QueryContext(r.Context(), `
 			SELECT id, name, status,
 			       COALESCE(cpu_usage,0), COALESCE(ram_used,0), COALESCE(ram_total,0),

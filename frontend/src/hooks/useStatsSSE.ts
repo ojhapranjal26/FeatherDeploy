@@ -41,7 +41,8 @@ export function useStatsSSE(): LiveStats & { connected: boolean } {
     es.addEventListener('stats', (e: MessageEvent) => {
       try {
         const data = JSON.parse(e.data) as LiveStats
-        setStats(data)
+        // Guard: Go serialises nil slices as JSON null; ensure nodes is always an array.
+        setStats({ brain: data.brain ?? null, nodes: Array.isArray(data.nodes) ? data.nodes : [] })
         setConnected(true)
       } catch {
         // ignore malformed frames

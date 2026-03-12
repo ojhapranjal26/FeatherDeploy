@@ -68,8 +68,13 @@ func (h *AuthHandler) Me(w http.ResponseWriter, r *http.Request) {
 	err := h.db.QueryRowContext(r.Context(),
 		`SELECT id, email, name, role, github_login, created_at, updated_at FROM users WHERE id=?`, claims.UserID,
 	).Scan(&user.ID, &user.Email, &user.Name, &user.Role, &user.GitHubLogin, &user.CreatedAt, &user.UpdatedAt)
-	if err != nil {
+	if err == sql.ErrNoRows {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "user not found"})
+		return
+	}
+	if err != nil {
+		slog.Error("Me: scan user", "err", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
 	writeJSON(w, http.StatusOK, user)

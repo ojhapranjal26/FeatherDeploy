@@ -346,11 +346,11 @@ export function DashboardPage() {
       : 0
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-5 md:space-y-6">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex items-start justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Dashboard</h1>
+          <h1 className="text-xl font-semibold tracking-tight md:text-2xl">Dashboard</h1>
           <p className="text-sm text-muted-foreground">
             Monitor your projects, services, and deployments.
           </p>
@@ -639,8 +639,8 @@ export function DashboardPage() {
             <CardHeader className="pb-2">
               <CardTitle className="text-sm font-semibold">Recent Deployments</CardTitle>
             </CardHeader>
-            <CardContent className="p-0 pb-1">
-              <Table>
+            <CardContent className="p-0 pb-1 overflow-x-auto">
+              <Table className="min-w-[340px]">
                 <TableHeader>
                   <TableRow className="hover:bg-transparent">
                     <TableHead className="pl-4 text-[11px]">Service</TableHead>

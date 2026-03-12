@@ -190,6 +190,16 @@ type rows struct {
 func (r *rows) Columns() []string { return r.columns }
 func (r *rows) Close() error      { return nil }
 
+// datetimeLayouts are the text formats SQLite/rqlite uses for DATETIME columns.
+var datetimeLayouts = []string{
+	"2006-01-02 15:04:05",
+	"2006-01-02T15:04:05Z",
+	"2006-01-02T15:04:05-07:00",
+	"2006-01-02T15:04:05.999999999Z",
+	"2006-01-02T15:04:05.999999999-07:00",
+	"2006-01-02",
+}
+
 func (r *rows) Next(dest []driver.Value) error {
 	if r.pos >= len(r.values) {
 		return io.EOF
@@ -200,14 +210,20 @@ func (r *rows) Next(dest []driver.Value) error {
 		if i >= len(dest) {
 			break
 		}
-		dest[i] = convertValue(v)
+		colType := ""
+		if i < len(r.types) {
+			colType = strings.ToLower(r.types[i])
+		}
+		dest[i] = convertValue(v, colType)
 	}
 	return nil
 }
 
 // convertValue maps JSON-decoded values (float64, string, bool, nil) to
 // driver.Value types compatible with database/sql's Scan machinery.
-func convertValue(v interface{}) driver.Value {
+// When colType is "datetime", "date", or "timestamp" the string is parsed into
+// a time.Time so that Scan into time.Time fields works without errors.
+func convertValue(v interface{}, colType string) driver.Value {
 	if v == nil {
 		return nil
 	}
@@ -220,6 +236,16 @@ func convertValue(v interface{}) driver.Value {
 		}
 		return t
 	case string:
+		// Parse datetime strings into time.Time when the column type hints it.
+		// Without this, Scan into time.Time fails because database/sql cannot
+		// automatically convert a plain string driver value to time.Time.
+		if colType == "datetime" || colType == "date" || colType == "timestamp" {
+			for _, layout := range datetimeLayouts {
+				if ts, err := time.Parse(layout, t); err == nil {
+					return ts
+				}
+			}
+		}
 		return t
 	case bool:
 		if t {
