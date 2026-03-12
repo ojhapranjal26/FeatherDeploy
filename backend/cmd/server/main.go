@@ -102,10 +102,21 @@ func serve() {
 	}
 
 	// ─── Database ─────────────────────────────────────────────────────────────
-	db, err := appDb.OpenRqlite(*rqliteURL)
-	if err != nil {
-		slog.Error("open database", "err", err)
-		os.Exit(1)
+	// Retry connecting to rqlite for up to 60s — rqlite may still be starting
+	// after a system reboot even with After=rqlite.service in the unit file.
+	var db *sql.DB
+	for attempt := 1; attempt <= 12; attempt++ {
+		var err error
+		db, err = appDb.OpenRqlite(*rqliteURL)
+		if err == nil {
+			break
+		}
+		if attempt == 12 {
+			slog.Error("open database: giving up after 12 attempts", "err", err)
+			os.Exit(1)
+		}
+		slog.Warn("rqlite not ready, retrying", "attempt", attempt, "err", err)
+		time.Sleep(5 * time.Second)
 	}
 	defer db.Close()
 	slog.Info("database ready", "rqlite", *rqliteURL)

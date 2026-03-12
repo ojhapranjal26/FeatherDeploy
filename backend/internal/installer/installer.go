@@ -613,7 +613,8 @@ func writeCaddyfile(domain string) {
 const systemdTmpl = `[Unit]
 Description=FeatherDeploy Panel
 Documentation=https://github.com/ojhapranjal26/FeatherDeploy
-After=network.target
+After=network.target rqlite.service
+Requires=rqlite.service
 
 [Service]
 Type=simple
@@ -623,6 +624,8 @@ EnvironmentFile={{.EnvFile}}
 ExecStart={{.Bin}} serve
 Restart=always
 RestartSec=5s
+StartLimitIntervalSec=120
+StartLimitBurst=5
 StandardOutput=journal
 StandardError=journal
 
