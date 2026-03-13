@@ -61,6 +61,23 @@ func (l *logBuf) text() string {
 func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 	log := &logBuf{}
 
+	// Flush log buffer to DB every 2 s so the SSE log stream shows real-time
+	// progress even while the deployment is still running.
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				db.Exec(`UPDATE deployments SET deploy_log=? WHERE id=?`, log.text(), depID) //nolint
+			case <-done:
+				return
+			}
+		}
+	}()
+
 	// ── 1. Fetch service config ───────────────────────────────────────────────
 	var repoURL, repoBranch, framework, buildCmd, startCmd string
 	var appPort int

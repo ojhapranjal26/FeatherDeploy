@@ -51,6 +51,7 @@ const serviceSchema = z.object({
   ).optional().or(z.literal('')),
   repo_branch: z.string().optional(),
   app_port:    z.number().int().min(1).max(65535).optional(),
+  domain:      z.string().max(253).optional().or(z.literal('')),
 })
 type ServiceFormData = z.infer<typeof serviceSchema>
 
@@ -209,7 +210,7 @@ export function ProjectPage() {
     formState: { errors, isSubmitting },
   } = useForm<ServiceFormData>({
     resolver: zodResolver(serviceSchema),
-    defaultValues: { deploy_type: 'git', repo_branch: 'main', app_port: 3000 },
+    defaultValues: { deploy_type: 'git', repo_branch: 'main' },
   })
 
   const deployType = watch('deploy_type')
@@ -219,12 +220,14 @@ export function ProjectPage() {
       servicesApi.create(projectId!, {
         ...data,
         repo_url: data.repo_url || undefined,
+        domain: data.domain || undefined,
       }),
-    onSuccess: () => {
+    onSuccess: (service) => {
       qc.invalidateQueries({ queryKey: ['services', projectId] })
       setNewServiceOpen(false)
       reset()
-      toast.success('Service created.')
+      toast.success('Service created — click Deploy to start your first deployment.')
+      navigate(`/projects/${projectId}/services/${service.id}`)
     },
     onError: (err: unknown) => toast.error((err as any)?.response?.data?.error ?? 'Failed to create service.'),
   })
@@ -434,15 +437,30 @@ export function ProjectPage() {
             <div className="rounded-lg border bg-muted/30 p-3.5 space-y-3.5">
               <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Container</p>
               <div className="space-y-1.5">
-                <Label htmlFor="svc-port">App port</Label>
+                <Label htmlFor="svc-port">
+                  App port <span className="text-muted-foreground font-normal">(optional)</span>
+                </Label>
                 <Input
                   id="svc-port"
                   type="number"
-                  placeholder="3000"
+                  placeholder="e.g. 3000 — auto-detected if left blank"
                   {...register('app_port', { valueAsNumber: true })}
                 />
                 <p className="text-xs text-muted-foreground">
-                  The port your app listens on inside the container.
+                  The port your app listens on inside the container. Leave blank to auto-detect.
+                </p>
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="svc-domain">
+                  Domain <span className="text-muted-foreground font-normal">(optional)</span>
+                </Label>
+                <Input
+                  id="svc-domain"
+                  placeholder="e.g. api.featherdeploy.in"
+                  {...register('domain')}
+                />
+                <p className="text-xs text-muted-foreground">
+                  Custom domain for this service. Must point to this server&apos;s IP.
                 </p>
               </div>
             </div>

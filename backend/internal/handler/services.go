@@ -23,7 +23,7 @@ func (h *ServiceHandler) List(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, err := h.db.QueryContext(r.Context(),
 		`SELECT id, project_id, name, description, deploy_type, repo_url, repo_branch,
-		        framework, build_command, start_command, app_port, host_port,
+		        framework, build_command, start_command, app_port, COALESCE(host_port, 0),
 		        status, container_id, created_at, updated_at
 		 FROM services WHERE project_id=? ORDER BY created_at DESC`, projectID)
 	if err != nil {
@@ -53,6 +53,12 @@ func (h *ServiceHandler) Create(w http.ResponseWriter, r *http.Request) {
 	if !v.DecodeAndValidate(w, r, &req) {
 		return
 	}
+	if req.AppPort == 0 {
+		req.AppPort = 8080
+	}
+	if req.RepoBranch == "" {
+		req.RepoBranch = "main"
+	}
 	res, err := h.db.ExecContext(r.Context(),
 		`INSERT INTO services
 		  (project_id, name, description, deploy_type, repo_url, repo_branch,
@@ -71,6 +77,12 @@ func (h *ServiceHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id, _ := res.LastInsertId()
+	// If a domain was provided, register it immediately
+	if req.Domain != "" {
+		h.db.ExecContext(r.Context(),
+			`INSERT OR IGNORE INTO domains (service_id, domain, tls) VALUES (?, ?, 1)`,
+			id, req.Domain)
+	}
 	h.getByID(w, r, id)
 }
 
@@ -151,7 +163,7 @@ func (h *ServiceHandler) Delete(w http.ResponseWriter, r *http.Request) {
 func (h *ServiceHandler) getByID(w http.ResponseWriter, r *http.Request, id int64) {
 	row := h.db.QueryRowContext(r.Context(),
 		`SELECT id, project_id, name, description, deploy_type, repo_url, repo_branch,
-		        framework, build_command, start_command, app_port, host_port,
+		        framework, build_command, start_command, app_port, COALESCE(host_port, 0),
 		        status, container_id, created_at, updated_at
 		 FROM services WHERE id=?`, id)
 	var s model.Service
@@ -193,4 +205,3 @@ func nullInt(v int) any {
 	}
 	return v
 }
-

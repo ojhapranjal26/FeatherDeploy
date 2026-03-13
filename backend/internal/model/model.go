@@ -63,18 +63,18 @@ type Service struct {
 
 // Deployment represents the deployments table
 type Deployment struct {
-	ID           int64     `json:"id"`
-	ServiceID    int64     `json:"service_id"`
-	TriggeredBy  int64     `json:"triggered_by"`
-	DeployType   string    `json:"deploy_type"`
-	RepoURL      string    `json:"repo_url,omitempty"`
-	CommitSHA    string    `json:"commit_sha,omitempty"`
-	ArtifactPath string    `json:"artifact_path,omitempty"`
-	Status       string    `json:"status"` // pending | running | success | failed
-	ErrorMessage string    `json:"error_message,omitempty"`
-	StartedAt    time.Time `json:"started_at"`
-	FinishedAt   time.Time `json:"finished_at,omitempty"`
-	CreatedAt    time.Time `json:"created_at"`
+	ID           int64      `json:"id"`
+	ServiceID    int64      `json:"service_id"`
+	TriggeredBy  int64      `json:"triggered_by"`
+	DeployType   string     `json:"deploy_type"`
+	RepoURL      string     `json:"repo_url,omitempty"`
+	CommitSHA    string     `json:"commit_sha,omitempty"`
+	ArtifactPath string     `json:"artifact_path,omitempty"`
+	Status       string     `json:"status"` // pending | running | success | failed
+	ErrorMessage string     `json:"error_message,omitempty"`
+	StartedAt    time.Time  `json:"started_at"`
+	FinishedAt   *time.Time `json:"finished_at,omitempty"`
+	CreatedAt    time.Time  `json:"created_at"`
 }
 
 // EnvVar represents the env_variables table
@@ -131,12 +131,13 @@ type CreateServiceRequest struct {
 	Description  string `json:"description"   validate:"max=256"`
 	DeployType   string `json:"deploy_type"   validate:"required,oneof=git artifact dockerfile"`
 	RepoURL      string `json:"repo_url"      validate:"omitempty,giturl,max=512"`
-	RepoBranch   string `json:"repo_branch"   validate:"required,max=255"`
+	RepoBranch   string `json:"repo_branch"   validate:"omitempty,max=255"`
 	Framework    string `json:"framework"     validate:"max=64"`
 	BuildCommand string `json:"build_command" validate:"max=512"`
 	StartCommand string `json:"start_command" validate:"max=512"`
-	AppPort      int    `json:"app_port"      validate:"required,min=1,max=65535"`
+	AppPort      int    `json:"app_port"      validate:"omitempty,min=1,max=65535"`
 	HostPort     int    `json:"host_port"     validate:"omitempty,min=1,max=65535"`
+	Domain       string `json:"domain"        validate:"omitempty,max=253"`
 }
 
 type UpdateServiceRequest struct {
