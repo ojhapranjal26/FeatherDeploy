@@ -107,11 +107,11 @@ export function LoginPage() {
           </p>
           <div className="mt-3 flex items-center gap-2.5">
             <div className="h-7 w-7 rounded-full bg-primary/30 flex items-center justify-center text-xs font-semibold text-primary">
-              JL
+              PO
             </div>
             <div>
-              <p className="text-xs font-medium text-white/80">Jamie Lee</p>
-              <p className="text-xs text-white/40">CTO at Acme Corp.</p>
+              <p className="text-xs font-medium text-white/80">Pranjal Ojha</p>
+              <p className="text-xs text-white/40">Founder at FeatherDeploy</p>
             </div>
           </div>
         </div>

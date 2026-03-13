@@ -206,4 +206,3 @@ func scanDeploymentRow(row *sql.Row, d *model.Deployment) error {
 		&d.RepoURL, &d.CommitSHA, &d.ArtifactPath, &d.Status,
 		&d.ErrorMessage, &d.StartedAt, &d.FinishedAt, &d.CreatedAt)
 }
-

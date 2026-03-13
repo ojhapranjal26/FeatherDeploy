@@ -19,7 +19,7 @@ func NewSettingsHandler(db *sql.DB) *SettingsHandler {
 // GET /api/settings/branding — public endpoint, used by the login page before auth.
 func (h *SettingsHandler) GetBranding(w http.ResponseWriter, r *http.Request) {
 	rows, err := h.db.QueryContext(r.Context(),
-		`SELECT key, value FROM system_settings WHERE key IN ('company_name','logo_url')`,
+		`SELECT setting_key, value FROM system_settings WHERE setting_key IN ('company_name','logo_url')`,
 	)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, errMap("internal error"))
@@ -55,8 +55,8 @@ func (h *SettingsHandler) SetBranding(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if _, err := h.db.ExecContext(r.Context(),
-			`INSERT INTO system_settings(key,value,updated_at) VALUES('company_name',?,datetime('now'))
-			 ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`,
+		`INSERT INTO system_settings(setting_key,value,updated_at) VALUES('company_name',?,datetime('now'))
+		 ON CONFLICT(setting_key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`,
 			name,
 		); err != nil {
 			writeJSON(w, http.StatusInternalServerError, errMap("internal error"))
@@ -76,8 +76,8 @@ func (h *SettingsHandler) SetBranding(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if _, err := h.db.ExecContext(r.Context(),
-			`INSERT INTO system_settings(key,value,updated_at) VALUES('logo_url',?,datetime('now'))
-			 ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`,
+		`INSERT INTO system_settings(setting_key,value,updated_at) VALUES('logo_url',?,datetime('now'))
+		 ON CONFLICT(setting_key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`,
 			u,
 		); err != nil {
 			writeJSON(w, http.StatusInternalServerError, errMap("internal error"))

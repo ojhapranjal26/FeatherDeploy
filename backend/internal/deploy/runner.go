@@ -46,7 +46,7 @@ func (l *logBuf) add(format string, args ...any) {
 	l.mu.Lock()
 	l.lines = append(l.lines, line)
 	l.mu.Unlock()
-	slog.Info("[deploy] "+line)
+	slog.Info("[deploy] " + line)
 }
 
 func (l *logBuf) text() string {

@@ -104,4 +104,3 @@ func (h *DetectHandler) Detect(w http.ResponseWriter, r *http.Request) {
 	result := detect.Detect(tmpDir)
 	writeJSON(w, http.StatusOK, result)
 }
-

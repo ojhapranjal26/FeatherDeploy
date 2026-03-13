@@ -6,7 +6,7 @@ import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import {
   Plus, ChevronLeft, Rocket, Settings2, Trash2,
-  ExternalLink, GitBranch, Terminal,
+  ExternalLink, GitBranch, Terminal, GitFork, Package, FileCode2, Info,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { projectsApi } from '@/api/projects'
@@ -20,6 +20,7 @@ import { Label } from '@/components/ui/label'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Badge } from '@/components/ui/badge'
 import { Separator } from '@/components/ui/separator'
+import { cn } from '@/lib/utils'
 import {
   Card,
   CardContent,
@@ -31,14 +32,8 @@ import {
   DialogContent,
   DialogHeader,
   DialogTitle,
+  DialogDescription,
 } from '@/components/ui/dialog'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -331,72 +326,134 @@ export function ProjectPage() {
       )}
 
       {/* New service dialog */}
-      <Dialog open={newServiceOpen} onOpenChange={setNewServiceOpen}>
-        <DialogContent>
+      <Dialog open={newServiceOpen} onOpenChange={(o) => { setNewServiceOpen(o); if (!o) reset() }}>
+        <DialogContent className="sm:max-w-lg">
           <DialogHeader>
-            <DialogTitle>Add service</DialogTitle>
+            <DialogTitle className="flex items-center gap-2">
+              <Rocket className="h-4 w-4 text-primary" />
+              New service
+            </DialogTitle>
+            <DialogDescription>
+              Configure your service and deploy it to a container.
+            </DialogDescription>
           </DialogHeader>
+
           <form
             onSubmit={handleSubmit((d) => createSvcMutation.mutate(d))}
-            className="space-y-4 pt-2"
+            className="space-y-5 pt-1"
           >
+            {/* Service name */}
             <div className="space-y-1.5">
-              <Label>Name</Label>
-              <Input placeholder="web" {...register('name')} />
+              <Label htmlFor="svc-name">
+                Service name <span className="text-destructive">*</span>
+              </Label>
+              <Input
+                id="svc-name"
+                placeholder="e.g. web, api, worker"
+                {...register('name')}
+              />
+              <p className="text-xs text-muted-foreground">
+                Lowercase letters, numbers and hyphens only. Used as the container name.
+              </p>
               {errors.name && (
                 <p className="text-xs text-destructive">{errors.name.message}</p>
               )}
             </div>
 
-            <div className="space-y-1.5">
-              <Label>Deploy type</Label>
-              <Select
-                defaultValue="git"
-                onValueChange={(v) =>
-                  setValue('deploy_type', v as ServiceFormData['deploy_type'])
-                }
-              >
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="git">Git repository</SelectItem>
-                  <SelectItem value="artifact">Artifact upload</SelectItem>
-                  <SelectItem value="dockerfile">Dockerfile</SelectItem>
-                </SelectContent>
-              </Select>
+            {/* Deploy type cards */}
+            <div className="space-y-2">
+              <Label>Deploy from</Label>
+              <div className="grid grid-cols-3 gap-2">
+                {([
+                  { value: 'git',        icon: GitFork,   label: 'Git repo',   desc: 'Clone & build' },
+                  { value: 'dockerfile', icon: FileCode2, label: 'Dockerfile', desc: 'Custom image' },
+                  { value: 'artifact',   icon: Package,   label: 'Artifact',   desc: 'Upload binary' },
+                ] as const).map(({ value, icon: Icon, label, desc }) => (
+                  <button
+                    key={value}
+                    type="button"
+                    onClick={() => setValue('deploy_type', value)}
+                    className={cn(
+                      'flex flex-col items-center gap-1.5 rounded-lg border p-3 text-center transition-all hover:border-primary/60',
+                      deployType === value
+                        ? 'border-primary bg-primary/5 ring-1 ring-primary/30'
+                        : 'border-border bg-background',
+                    )}
+                  >
+                    <Icon className={cn('h-5 w-5', deployType === value ? 'text-primary' : 'text-muted-foreground')} />
+                    <span className="text-xs font-medium leading-none">{label}</span>
+                    <span className="text-[10px] text-muted-foreground leading-none">{desc}</span>
+                  </button>
+                ))}
+              </div>
             </div>
 
+            {/* Git-specific fields */}
             {deployType === 'git' && (
-              <>
+              <div className="rounded-lg border bg-muted/30 p-3.5 space-y-3.5">
+                <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Repository</p>
                 <div className="space-y-1.5">
-                  <Label>Repository URL</Label>
+                  <Label htmlFor="svc-repo-url">Repository URL</Label>
                   <Input
-                    placeholder="https://github.com/you/repo"
+                    id="svc-repo-url"
+                    placeholder="https://github.com/you/repo  or  git@github.com:you/repo.git"
                     {...register('repo_url')}
                   />
+                  <p className="text-xs text-muted-foreground flex items-start gap-1">
+                    <Info className="h-3 w-3 mt-0.5 shrink-0" />
+                    For private repos, add your SSH deploy key in{' '}
+                    <span className="font-medium text-foreground">Settings → SSH Keys</span>{' '}
+                    and use the SSH URL.
+                  </p>
                   {errors.repo_url && (
                     <p className="text-xs text-destructive">{errors.repo_url.message}</p>
                   )}
                 </div>
                 <div className="space-y-1.5">
-                  <Label>Branch</Label>
-                  <Input placeholder="main" {...register('repo_branch')} />
+                  <Label htmlFor="svc-branch">Branch</Label>
+                  <Input
+                    id="svc-branch"
+                    placeholder="main"
+                    {...register('repo_branch')}
+                  />
                 </div>
-              </>
+              </div>
             )}
 
-            <div className="space-y-1.5">
-              <Label>App port (inside container)</Label>
-              <Input type="number" placeholder="3000" {...register('app_port', { valueAsNumber: true })} />
+            {deployType === 'dockerfile' && (
+              <div className="rounded-lg border bg-muted/30 p-3.5 space-y-2">
+                <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Note</p>
+                <p className="text-xs text-muted-foreground">
+                  The Dockerfile at the root of your repository will be used for the build.
+                  You can also provide a git repository URL above after selecting the Git source.
+                </p>
+              </div>
+            )}
+
+            {/* Container config */}
+            <div className="rounded-lg border bg-muted/30 p-3.5 space-y-3.5">
+              <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Container</p>
+              <div className="space-y-1.5">
+                <Label htmlFor="svc-port">App port</Label>
+                <Input
+                  id="svc-port"
+                  type="number"
+                  placeholder="3000"
+                  {...register('app_port', { valueAsNumber: true })}
+                />
+                <p className="text-xs text-muted-foreground">
+                  The port your app listens on inside the container.
+                </p>
+              </div>
             </div>
 
-            <div className="flex justify-end gap-2">
-              <Button type="button" variant="outline" onClick={() => setNewServiceOpen(false)}>
+            <div className="flex justify-end gap-2 pt-1">
+              <Button type="button" variant="outline" size="sm" onClick={() => { setNewServiceOpen(false); reset() }}>
                 Cancel
               </Button>
-              <Button type="submit" disabled={isSubmitting || createSvcMutation.isPending}>
-                Create service
+              <Button type="submit" size="sm" disabled={isSubmitting || createSvcMutation.isPending} className="gap-1.5">
+                <Rocket className="h-3.5 w-3.5" />
+                {createSvcMutation.isPending ? 'Creating…' : 'Create service'}
               </Button>
             </div>
           </form>
