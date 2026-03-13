@@ -477,6 +477,23 @@ else
   echo "  System user ${SVC_USER} already exists -- skipping"
 fi
 
+# -- 8b. Configure rootless Podman: add subuid/subgid ranges for the service user.
+# Without /etc/subuid + /etc/subgid entries, Podman cannot set up user namespaces
+# and every `podman build`/`podman run` fails with "no subuid ranges found".
+echo "==> Configuring rootless Podman for ${SVC_USER}..."
+for _subfile in /etc/subuid /etc/subgid; do
+  if ! grep -q "^${SVC_USER}:" "$_subfile" 2>/dev/null; then
+    echo "${SVC_USER}:100000:65536" >> "$_subfile"
+    echo "  Added entry to ${_subfile}: ${SVC_USER}:100000:65536"
+  else
+    echo "  ${_subfile} already has an entry for ${SVC_USER} — skipping"
+  fi
+done
+if command -v podman >/dev/null 2>&1; then
+  su -s /bin/sh -c "podman system migrate" "${SVC_USER}" 2>/dev/null || true
+  echo "  Podman storage migrated for ${SVC_USER}"
+fi
+
 # -- 9. Set up data directory with correct ownership, then install + start rqlite
 echo "==> Setting up data directory..."
 mkdir -p "$RQLITE_DATA_DIR"

@@ -126,6 +126,7 @@ func Run() {
 	// ── Step 4: Create service OS user + directories ─────────────────────────
 	fmt.Println("\n── Preparing service user and directories ──────────────────────")
 	createServiceUser(svcUser, svcPassword)
+	setupPodmanRootless(svcUser)
 	mustMkdir(dataDir)
 	mustMkdir(filepath.Join(dataDir, "rqlite-data"))
 	mustMkdir(configDir)
@@ -289,6 +290,44 @@ func promptPassword(tty *os.File, label string) string {
 func die(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "\nERROR: "+format+"\n", args...)
 	os.Exit(1)
+}
+
+// setupPodmanRootless ensures the service user has subuid/subgid ranges in
+// /etc/subuid and /etc/subgid, which are required for Podman rootless to work.
+// Without these entries Podman cannot set up user namespaces and every
+// `podman build` / `podman run` fails with "no subuid ranges found".
+func setupPodmanRootless(username string) {
+	fmt.Printf("\n── Configuring rootless Podman for %s ──────────────────\n", username)
+	ensureSubIDEntry(username, "/etc/subuid", "100000", "65536")
+	ensureSubIDEntry(username, "/etc/subgid", "100000", "65536")
+	// Tell Podman to migrate its storage to use the new mapping.
+	cmd := exec.Command("su", "-s", "/bin/sh", username, "-c", "podman system migrate")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		slog.Warn("podman system migrate failed (non-fatal)", "err", err)
+	}
+	fmt.Printf("  ✓ rootless Podman configured for %s\n", username)
+}
+
+// ensureSubIDEntry appends a subuid/subgid range entry for username to file
+// if no entry for that user already exists.
+func ensureSubIDEntry(username, file, start, count string) {
+	data, _ := os.ReadFile(file)
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, username+":") {
+			fmt.Printf("  %s already has a %s entry — skipping\n", username, file)
+			return
+		}
+	}
+	f, err := os.OpenFile(file, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		slog.Warn("cannot open subid file for writing", "file", file, "err", err)
+		return
+	}
+	defer f.Close()
+	fmt.Fprintf(f, "%s:%s:%s\n", username, start, count)
+	fmt.Printf("  ✓ %s → %s:%s:%s\n", file, username, start, count)
 }
 
 // createServiceUser creates a real login user that owns and runs the service.
