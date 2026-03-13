@@ -314,7 +314,20 @@ func runCapture(dir string, log *logBuf, name string, args ...string) error {
 func runCaptureWithSSH(dir, sshKeyFile string, log *logBuf, name string, args ...string) error {
 	cmd := exec.Command(name, args...)
 	cmd.Dir = dir
-	env := os.Environ()
+
+	// Copy the current environment, stripping HOME and npm_config_cache so our
+	// overrides below take effect (getenv returns the first match, so we must
+	// remove the originals before appending replacements).
+	raw := os.Environ()
+	env := make([]string, 0, len(raw)+4)
+	for _, e := range raw {
+		if !strings.HasPrefix(e, "HOME=") && !strings.HasPrefix(e, "npm_config_cache=") {
+			env = append(env, e)
+		}
+	}
+	// Override HOME to /tmp so package managers (npm, pip, cargo, …) can write
+	// their cache when the service user's home directory may be inaccessible.
+	env = append(env, "HOME=/tmp", "npm_config_cache=/tmp/.fd-npm-cache")
 	if sshKeyFile != "" {
 		env = append(env, SSHGitEnv(sshKeyFile))
 	}

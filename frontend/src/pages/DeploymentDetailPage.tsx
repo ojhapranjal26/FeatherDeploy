@@ -110,7 +110,7 @@ export function DeploymentDetailPage() {
   const isFailed = deployment?.status === 'failed'
 
   return (
-    <div className="flex h-full flex-col">
+    <div>
       <Button
         variant="ghost"
         size="sm"
@@ -163,11 +163,11 @@ export function DeploymentDetailPage() {
         </>
       )}
 
-      {/* Log viewer — fills available height */}
+      {/* Log viewer — fixed height with internal scrolling */}
       <LogViewer
         lines={lines}
         done={done}
-        className="flex-1 min-h-0 h-full"
+        className="h-[520px]"
       />
     </div>
   )
