@@ -316,4 +316,3 @@ func (c *conn) query(query string, args []driver.Value) (driver.Rows, error) {
 		values:  r.Values,
 	}, nil
 }
-

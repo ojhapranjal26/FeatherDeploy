@@ -450,6 +450,12 @@ func seedSuperAdmin(db *sql.DB) {
 		slog.Error("seed superadmin: insert", "err", err)
 		return
 	}
+	fmt.Println(`
+  ╔══════════════════════════════════════════════════════╗
+  ║  DEFAULT SUPERADMIN CREATED — CHANGE IMMEDIATELY!   ║
+  ║  Email   : admin@deploypaaas.local                  ║
+  ║  Password: Admin@123456                             ║
+  ╚══════════════════════════════════════════════════════╝`)
 	slog.Warn("seeded default superadmin — change credentials immediately!",
 		"email", "admin@deploypaaas.local",
 		"password", "Admin@123456",

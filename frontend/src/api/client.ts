@@ -16,7 +16,10 @@ client.interceptors.request.use((config) => {
 client.interceptors.response.use(
   (res) => res,
   (err) => {
-    if (err.response?.status === 401) {
+    // Don't redirect on 401 for the login endpoint itself — let the form's
+    // catch block show the "invalid credentials" toast instead.
+    const isLoginEndpoint = err.config?.url?.includes('/auth/login')
+    if (err.response?.status === 401 && !isLoginEndpoint) {
       localStorage.removeItem('token')
       window.location.href = '/login'
     }
