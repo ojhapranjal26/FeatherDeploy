@@ -146,9 +146,20 @@ func (c *conn) execute(query string, args []driver.Value) (driver.Result, error)
 		return nil, fmt.Errorf("rqlite: read execute response: %w", err)
 	}
 
+	// If the response is not JSON (e.g. "leader not found" plain-text from rqlite
+	// before Raft leader election completes), return a descriptive error so the
+	// caller can retry rather than seeing a confusing json-parse error.
+	if len(data) > 0 && data[0] != '{' && data[0] != '[' {
+		snippet := strings.TrimSpace(string(data))
+		if len(snippet) > 200 {
+			snippet = snippet[:200]
+		}
+		return nil, fmt.Errorf("rqlite: unexpected non-JSON response (HTTP %d): %s", resp.StatusCode, snippet)
+	}
+
 	var result executeResponse
 	if err := json.Unmarshal(data, &result); err != nil {
-		return nil, fmt.Errorf("rqlite: unmarshal execute: %w", err)
+		return nil, fmt.Errorf("rqlite: unmarshal execute (HTTP %d, body=%q): %w", resp.StatusCode, string(data[:min(200, len(data))]), err)
 	}
 	if result.Error != "" {
 		return nil, fmt.Errorf("rqlite: %s", result.Error)

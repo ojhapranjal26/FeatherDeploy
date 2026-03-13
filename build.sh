@@ -249,6 +249,7 @@ ExecStart=/usr/local/bin/rqlited \
   -http-addr=127.0.0.1:4001 \
   -raft-addr=0.0.0.0:4002 \
   -raft-adv-addr=${SERVER_IP}:4002 \
+  -bootstrap-expect=1 \
   ${RQLITE_DATA_DIR}
 Restart=on-failure
 RestartSec=5s
@@ -287,11 +288,14 @@ ensure_rqlite_running() {
     exit 1
   fi
 
-  echo "  Waiting for rqlite HTTP to become ready..."
-  local deadline=$(( $(date +%s) + 20 ))
+  echo "  Waiting for rqlite to elect leader and become ready..."
+  # Use /readyz (not /status) -- rqlite v8 only responds 200 on /readyz once
+  # Raft leader election is complete and the node can accept write requests.
+  local deadline=$(( $(date +%s) + 35 ))
   while [ "$(date +%s)" -lt "$deadline" ]; do
-    if curl -sf http://127.0.0.1:4001/status >/dev/null 2>&1; then
-      echo "  rqlite is ready"
+    if curl -sf http://127.0.0.1:4001/readyz >/dev/null 2>&1; then
+      sleep 1  # grace period after leader election
+      echo "  ✓ rqlite ready"
       return
     fi
     sleep 1
@@ -299,7 +303,7 @@ ensure_rqlite_running() {
 
   # Not responding after 20s -- show the actual journal so you can diagnose it
   echo ""
-  echo "  ERROR: rqlite is not responding on :4001 after 20s"
+  echo "  ERROR: rqlite is not ready at :4001/readyz after 35s"
   echo "  Full journal output:"
   echo "  -----------------------------------------------------------------------"
   journalctl -u rqlite -n 50 --no-pager 2>/dev/null || true

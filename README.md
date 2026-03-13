@@ -110,7 +110,7 @@ sudo journalctl -u featherdeploy -f
 
 ### Switch to the service user
 ```bash
-sudo su - featherdeploy      # or whichever username you chose
+sudo -u featherdeploy /bin/bash    # the account has no login shell — use sudo -u
 ```
 
 ### Restart the panel
@@ -120,7 +120,14 @@ sudo systemctl restart featherdeploy
 
 ### Environment configuration
 
-The installer writes `/etc/featherdeploy/featherdeploy.env`. You can add optional settings:
+The installer writes `/etc/featherdeploy/featherdeploy.env`. This file is readable only by root and the service group. Use `sudo` to view or edit it:
+
+```bash
+sudo nano /etc/featherdeploy/featherdeploy.env
+sudo systemctl restart featherdeploy   # apply changes
+```
+
+Optional settings you can add:
 
 ```env
 # /etc/featherdeploy/featherdeploy.env

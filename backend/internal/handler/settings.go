@@ -55,7 +55,7 @@ func (h *SettingsHandler) SetBranding(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if _, err := h.db.ExecContext(r.Context(),
-		`INSERT INTO system_settings(setting_key,value,updated_at) VALUES('company_name',?,datetime('now'))
+			`INSERT INTO system_settings(setting_key,value,updated_at) VALUES('company_name',?,datetime('now'))
 		 ON CONFLICT(setting_key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`,
 			name,
 		); err != nil {
@@ -76,7 +76,7 @@ func (h *SettingsHandler) SetBranding(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if _, err := h.db.ExecContext(r.Context(),
-		`INSERT INTO system_settings(setting_key,value,updated_at) VALUES('logo_url',?,datetime('now'))
+			`INSERT INTO system_settings(setting_key,value,updated_at) VALUES('logo_url',?,datetime('now'))
 		 ON CONFLICT(setting_key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`,
 			u,
 		); err != nil {

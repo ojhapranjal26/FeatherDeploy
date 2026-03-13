@@ -485,14 +485,18 @@ func downloadHTTP(url, destPath string) error {
 	return os.WriteFile(destPath, data, 0644)
 }
 
-// waitForRqlite polls the rqlite HTTP status endpoint until it responds or times out.
+// waitForRqlite polls the rqlite /readyz endpoint until it responds or times out.
+// /readyz (unlike /status) only returns 200 once Raft leader election is complete
+// and the node is ready to accept write requests.
 func waitForRqlite(maxWait time.Duration) error {
 	deadline := time.Now().Add(maxWait)
 	for time.Now().Before(deadline) {
-		resp, err := http.Get("http://127.0.0.1:4001/status") //nolint:gosec
+		resp, err := http.Get("http://127.0.0.1:4001/readyz") //nolint:gosec
 		if err == nil {
 			resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
+				// Extra 500ms grace period to let rqlite fully commit its Raft state
+				time.Sleep(500 * time.Millisecond)
 				return nil
 			}
 		}
@@ -517,6 +521,7 @@ ExecStart=/usr/local/bin/rqlited \\
   -node-id=main \\
   -http-addr=127.0.0.1:4001 \\
   -raft-addr=0.0.0.0:4002 \\
+  -bootstrap-expect=1 \\
   {{.DataDir}}/rqlite-data
 Restart=always
 RestartSec=5s
@@ -682,10 +687,10 @@ func RunUpdate() {
 	fmt.Println("\n── Restarting services ─────────────────────────────────────────")
 	mustRun("systemctl", "daemon-reload")
 	mustRun("systemctl", "restart", "rqlite")
-	if err := waitForRqlite(20 * time.Second); err != nil {
+	if err := waitForRqlite(45 * time.Second); err != nil {
 		slog.Warn("rqlite did not respond after restart", "err", err)
 	} else {
-		fmt.Println("  ✓ rqlite ready")
+		fmt.Println("  ✓ rqlite ready (leader elected)")
 	}
 
 	// Run schema migrations via rqlite
@@ -715,6 +720,9 @@ func RunUpdate() {
 
      Check status:  sudo systemctl status featherdeploy
      View logs:     sudo journalctl -u featherdeploy -f
+
+     Edit config:   sudo nano /etc/featherdeploy/featherdeploy.env
+                    sudo systemctl restart featherdeploy
   ══════════════════════════════════════════════════════`)
 }
 
