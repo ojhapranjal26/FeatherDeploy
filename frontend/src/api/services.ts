@@ -32,6 +32,7 @@ export interface CreateServicePayload {
   app_port?: number
   build_command?: string
   start_command?: string
+  domain?: string
 }
 
 export interface DetectionResult {

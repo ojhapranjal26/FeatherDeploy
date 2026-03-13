@@ -28,7 +28,7 @@ function DeploymentSteps({ lines, done, failed }: { lines: { line?: string }[]; 
     logText.includes(step.prefix.toLowerCase()) ? i : max, -1)
 
   // Filter: only show steps that are relevant (skip SSH if not in logs at all and not reached)
-  const visibleSteps = PIPELINE_STEPS.filter((step, i) => {
+  const visibleSteps = PIPELINE_STEPS.filter((step) => {
     if (step.prefix === '[ssh]') return logText.includes('[ssh]')
     return true
   })
@@ -99,14 +99,14 @@ export function DeploymentDetailPage() {
     queryFn: () => deploymentsApi.get(projectId!, serviceId!, deploymentId!),
     refetchInterval: (query) => {
       const s = query.state.data?.status
-      return s === 'running' || s === 'pending' ? 2000 : false
+      return s === 'running' || s === 'queued' || s === 'building' ? 2000 : false
     },
     enabled: !!projectId && !!serviceId && !!deploymentId,
   })
 
   const { lines, done } = useDeploymentLogs(projectId!, serviceId!, deploymentId!)
 
-  const isActive = deployment?.status === 'running' || deployment?.status === 'pending'
+  const isActive = deployment?.status === 'running' || deployment?.status === 'queued' || deployment?.status === 'building'
   const isFailed = deployment?.status === 'failed'
 
   return (
