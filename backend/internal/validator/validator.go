@@ -3,6 +3,7 @@ package validator
 import (
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 
@@ -17,6 +18,9 @@ var slugRe = regexp.MustCompile(`^[a-z0-9][a-z0-9\-]*[a-z0-9]$|^[a-z0-9]$`)
 // envKeyRe: uppercase letters, digits, underscores; must start with letter or underscore
 var envKeyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
+// sshURLRe matches SCP-style SSH git URLs: git@host:path or user@host:path
+var sshURLRe = regexp.MustCompile(`^[A-Za-z0-9_]+@[A-Za-z0-9.\-]+:[A-Za-z0-9/_\-.]+\.git$`)
+
 func init() {
 	validate = validator.New()
 
@@ -28,6 +32,24 @@ func init() {
 	// Custom "envkey" tag
 	_ = validate.RegisterValidation("envkey", func(fl validator.FieldLevel) bool {
 		return envKeyRe.MatchString(fl.Field().String())
+	})
+
+	// Custom "giturl" tag: accepts https://, http://, git:// URLs plus SCP SSH format
+	_ = validate.RegisterValidation("giturl", func(fl validator.FieldLevel) bool {
+		v := strings.TrimSpace(fl.Field().String())
+		if v == "" {
+			return true // omitempty handles empty case
+		}
+		// Allow SCP-style SSH git URLs: git@github.com:user/repo.git
+		if sshURLRe.MatchString(v) {
+			return true
+		}
+		// Allow standard HTTP/HTTPS/git protocol URLs
+		u, err := url.ParseRequestURI(v)
+		if err != nil {
+			return false
+		}
+		return u.Scheme == "https" || u.Scheme == "http" || u.Scheme == "git"
 	})
 }
 
@@ -70,8 +92,8 @@ func fieldErrMsg(fe validator.FieldError) string {
 		return fe.Field() + " must be lowercase alphanumeric with hyphens"
 	case "envkey":
 		return fe.Field() + " must match [A-Za-z_][A-Za-z0-9_]*"
-	case "url":
-		return fe.Field() + " must be a valid URL"
+	case "url", "giturl":
+		return fe.Field() + " must be a valid git URL (https://... or git@host:user/repo.git)"
 	case "fqdn":
 		return fe.Field() + " must be a valid domain name"
 	case "hexadecimal":

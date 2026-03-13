@@ -192,8 +192,8 @@ ALTER TABLE nodes ADD COLUMN disk_total   INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE nodes ADD COLUMN last_stats_at DATETIME;
 ALTER TABLE nodes ADD COLUMN node_id      TEXT    NOT NULL DEFAULT '';  -- hostname used as election ID
 
--- 015: system_settings — key/value store for platform-wide configuration
-CREATE TABLE IF NOT EXISTS system_settings (
+-- 016: add deploy_log column to deployments for real deployment output
+ALTER TABLE deployments ADD COLUMN deploy_log TEXT NOT NULL DEFAULT '';
     key        TEXT     PRIMARY KEY,
     value      TEXT     NOT NULL DEFAULT '',
     updated_at DATETIME NOT NULL DEFAULT (datetime('now'))

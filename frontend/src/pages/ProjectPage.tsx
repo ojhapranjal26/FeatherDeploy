@@ -50,7 +50,10 @@ import {
 const serviceSchema = z.object({
   name:        z.string().min(2).max(63).regex(/^[a-z0-9-]+$/, 'Lowercase, numbers, hyphens'),
   deploy_type: z.enum(['git', 'artifact', 'dockerfile']),
-  repo_url:    z.string().url().optional().or(z.literal('')),
+  repo_url:    z.string().refine(
+    v => !v || /^(https?:\/\/|git@|git:\/\/)/.test(v),
+    { message: 'Must be a valid HTTPS or SSH git URL' },
+  ).optional().or(z.literal('')),
   repo_branch: z.string().optional(),
   app_port:    z.number().int().min(1).max(65535).optional(),
 })
@@ -74,7 +77,7 @@ function ServiceCard({ service, projectId }: { service: Service; projectId: stri
         `/projects/${projectId}/services/${service.id}/deployments/${data.deployment_id}`
       )
     },
-    onError: () => toast.error('Failed to trigger deployment.'),
+    onError: (err: unknown) => toast.error((err as any)?.response?.data?.error ?? 'Failed to trigger deployment.'),
   })
 
   const deleteMutation = useMutation({
@@ -83,7 +86,7 @@ function ServiceCard({ service, projectId }: { service: Service; projectId: stri
       qc.invalidateQueries({ queryKey: ['services', projectId] })
       toast.success('Service deleted.')
     },
-    onError: () => toast.error('Failed to delete service.'),
+    onError: (err: unknown) => toast.error((err as any)?.response?.data?.error ?? 'Failed to delete service.'),
   })
 
   return (
@@ -228,7 +231,7 @@ export function ProjectPage() {
       reset()
       toast.success('Service created.')
     },
-    onError: () => toast.error('Failed to create service.'),
+    onError: (err: unknown) => toast.error((err as any)?.response?.data?.error ?? 'Failed to create service.'),
   })
 
   const deleteProjectMutation = useMutation({
@@ -237,7 +240,7 @@ export function ProjectPage() {
       navigate('/dashboard')
       toast.success('Project deleted.')
     },
-    onError: () => toast.error('Failed to delete project.'),
+    onError: (err: unknown) => toast.error((err as any)?.response?.data?.error ?? 'Failed to delete project.'),
   })
 
   return (

@@ -130,7 +130,7 @@ type CreateServiceRequest struct {
 	Name         string `json:"name"          validate:"required,min=2,max=63,slug"`
 	Description  string `json:"description"   validate:"max=256"`
 	DeployType   string `json:"deploy_type"   validate:"required,oneof=git artifact dockerfile"`
-	RepoURL      string `json:"repo_url"      validate:"omitempty,url,max=512"`
+	RepoURL      string `json:"repo_url"      validate:"omitempty,giturl,max=512"`
 	RepoBranch   string `json:"repo_branch"   validate:"required,max=255"`
 	Framework    string `json:"framework"     validate:"max=64"`
 	BuildCommand string `json:"build_command" validate:"max=512"`
@@ -142,7 +142,7 @@ type CreateServiceRequest struct {
 type UpdateServiceRequest struct {
 	Name         string `json:"name"          validate:"omitempty,min=2,max=63,slug"`
 	Description  string `json:"description"   validate:"max=256"`
-	RepoURL      string `json:"repo_url"      validate:"omitempty,url,max=512"`
+	RepoURL      string `json:"repo_url"      validate:"omitempty,giturl,max=512"`
 	RepoBranch   string `json:"repo_branch"   validate:"omitempty,max=255"`
 	Framework    string `json:"framework"     validate:"max=64"`
 	BuildCommand string `json:"build_command" validate:"max=512"`
@@ -153,7 +153,7 @@ type UpdateServiceRequest struct {
 
 type TriggerDeployRequest struct {
 	DeployType   string `json:"deploy_type"   validate:"required,oneof=git artifact dockerfile"`
-	RepoURL      string `json:"repo_url"      validate:"omitempty,url,max=512"`
+	RepoURL      string `json:"repo_url"      validate:"omitempty,giturl,max=512"`
 	RepoBranch   string `json:"repo_branch"   validate:"omitempty,max=255"`
 	CommitSHA    string `json:"commit_sha"    validate:"omitempty,hexadecimal,max=64"`
 	ArtifactPath string `json:"artifact_path" validate:"omitempty,max=512"`

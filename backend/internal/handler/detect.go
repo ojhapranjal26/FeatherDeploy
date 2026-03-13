@@ -9,14 +9,21 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/deploy"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/detect"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/middleware"
 )
 
 // DetectHandler handles automatic app-stack detection by cloning a service's
 // git repository into a temp directory and running static analysis.
-type DetectHandler struct{ db *sql.DB }
+type DetectHandler struct {
+	db        *sql.DB
+	jwtSecret string
+}
 
-func NewDetectHandler(db *sql.DB) *DetectHandler { return &DetectHandler{db: db} }
+func NewDetectHandler(db *sql.DB, jwtSecret string) *DetectHandler {
+	return &DetectHandler{db: db, jwtSecret: jwtSecret}
+}
 
 // POST /api/projects/{projectID}/services/{serviceID}/detect
 //
@@ -49,6 +56,8 @@ func (h *DetectHandler) Detect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	claims := middleware.GetClaims(r.Context())
+
 	// Clone to a throw-away temp directory
 	tmpDir, err := os.MkdirTemp("", "fd-detect-*")
 	if err != nil {
@@ -62,12 +71,29 @@ func (h *DetectHandler) Detect(w http.ResponseWriter, r *http.Request) {
 		repoBranch = "main"
 	}
 
+	// Optional SSH key setup for private repos
+	gitEnv := os.Environ()
+	if deploy.IsSSHURL(repoURL) {
+		if keyFile, cleanup, keyErr := deploy.FetchSSHKey(h.db, h.jwtSecret, claims.UserID); keyErr == nil {
+			defer cleanup()
+			gitEnv = append(gitEnv, deploy.SSHGitEnv(keyFile))
+		} else {
+			slog.Warn("detect: no SSH key for user", "user", claims.UserID, "err", keyErr)
+		}
+	}
+
+	newGitCmd := func(args ...string) *exec.Cmd {
+		cmd := exec.CommandContext(r.Context(), "git", args...)
+		cmd.Env = gitEnv
+		return cmd
+	}
+
 	// First attempt: clone with the configured branch
 	cloneArgs := []string{"clone", "--depth", "1", "--branch", repoBranch, "--", repoURL, tmpDir}
-	if out, err := exec.CommandContext(r.Context(), "git", cloneArgs...).CombinedOutput(); err != nil {
+	if out, err := newGitCmd(cloneArgs...).CombinedOutput(); err != nil {
 		// Second attempt: clone without --branch (uses the repo default)
 		cloneArgs2 := []string{"clone", "--depth", "1", "--", repoURL, tmpDir}
-		if out2, err2 := exec.CommandContext(r.Context(), "git", cloneArgs2...).CombinedOutput(); err2 != nil {
+		if out2, err2 := newGitCmd(cloneArgs2...).CombinedOutput(); err2 != nil {
 			slog.Error("git clone for detect", "url", repoURL, "out", strings.TrimSpace(string(out)+string(out2)))
 			writeJSON(w, http.StatusBadGateway,
 				errMap("failed to clone repository — make sure the URL is correct and accessible"))

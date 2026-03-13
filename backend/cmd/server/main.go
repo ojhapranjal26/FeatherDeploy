@@ -157,7 +157,7 @@ func serve() {
 	userH := handler.NewUserHandler(db)
 	projH := handler.NewProjectHandler(db)
 	svcH := handler.NewServiceHandler(db)
-	depH := handler.NewDeploymentHandler(db)
+	depH := handler.NewDeploymentHandler(db, *jwtSecret)
 	envH := handler.NewEnvHandler(db, *jwtSecret)
 	domainH := handler.NewDomainHandler(db)
 	inviteH := handler.NewInvitationHandler(db, m, *jwtSecret, 24*time.Hour, *origin)
@@ -165,7 +165,7 @@ func serve() {
 	ghAppH := handler.NewGitHubAppHandler(db)
 	sshH := handler.NewSSHKeyHandler(db, *jwtSecret)
 	dashH := handler.NewDashboardHandler(db)
-	detectH := handler.NewDetectHandler(db)
+	detectH := handler.NewDetectHandler(db, *jwtSecret)
 	nodeH := handler.NewNodeHandler(db, *jwtSecret, *envFilePath, "/usr/local/bin/featherdeploy-node", domainFromOrigin(*origin))
 	if err := nodeH.EnsureCA(); err != nil {
 		slog.Warn("CA init warning", "err", err)

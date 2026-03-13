@@ -2,20 +2,26 @@ package handler
 
 import (
 	"database/sql"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/deploy"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/middleware"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/model"
 	v "github.com/ojhapranjal26/featherdeploy/backend/internal/validator"
 )
 
-type DeploymentHandler struct{ db *sql.DB }
+type DeploymentHandler struct {
+	db        *sql.DB
+	jwtSecret string
+}
 
-func NewDeploymentHandler(db *sql.DB) *DeploymentHandler {
-	return &DeploymentHandler{db: db}
+func NewDeploymentHandler(db *sql.DB, jwtSecret string) *DeploymentHandler {
+	return &DeploymentHandler{db: db, jwtSecret: jwtSecret}
 }
 
 // GET /api/projects/{projectID}/services/{serviceID}/deployments
@@ -84,9 +90,7 @@ func (h *DeploymentHandler) Trigger(w http.ResponseWriter, r *http.Request) {
 	h.db.ExecContext(r.Context(),
 		`UPDATE services SET status='deploying', updated_at=datetime('now') WHERE id=?`, svcID)
 
-	// TODO: In production, hand off to a worker queue.
-	// For now: simulate success after writing the record.
-	go h.finishDeployment(depID, svcID)
+	go deploy.Run(h.db, h.jwtSecret, depID, svcID, claims.UserID)
 
 	writeJSON(w, http.StatusCreated, map[string]any{"deployment_id": depID, "status": "running"})
 }
@@ -114,16 +118,16 @@ func (h *DeploymentHandler) Get(w http.ResponseWriter, r *http.Request) {
 }
 
 // GET /api/projects/{projectID}/services/{serviceID}/deployments/{deploymentID}/logs
-// Streams mock ANSI log lines via Server-Sent Events
+// Streams real deployment logs via Server-Sent Events, polling the deploy_log DB column.
 func (h *DeploymentHandler) Logs(w http.ResponseWriter, r *http.Request) {
 	depID, err := strconv.ParseInt(r.PathValue("deploymentID"), 10, 64)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, errMap("invalid deploymentID"))
 		return
 	}
-	// Verify deployment exists and caller can read it
-	var status string
-	err = h.db.QueryRowContext(r.Context(), `SELECT status FROM deployments WHERE id=?`, depID).Scan(&status)
+	// Verify deployment exists
+	var dummy string
+	err = h.db.QueryRowContext(r.Context(), `SELECT id FROM deployments WHERE id=?`, depID).Scan(&dummy)
 	if err == sql.ErrNoRows {
 		writeJSON(w, http.StatusNotFound, errMap("deployment not found"))
 		return
@@ -139,45 +143,54 @@ func (h *DeploymentHandler) Logs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	lines := []string{
-		"\x1b[90m[00:00:01]\x1b[0m Initializing deployment pipeline...",
-		"\x1b[90m[00:00:02]\x1b[0m Cloning repository...",
-		"\x1b[90m[00:00:03]\x1b[0m Detecting runtime... \x1b[32mNode.js 20.x\x1b[0m",
-		"\x1b[90m[00:00:04]\x1b[0m Restoring build cache...",
-		"\x1b[90m[00:00:05]\x1b[0m \x1b[1mRunning:\x1b[0m npm install",
-		"\x1b[90m[00:00:11]\x1b[0m added 1425 packages in 6.2s",
-		"\x1b[90m[00:00:12]\x1b[0m \x1b[1mRunning:\x1b[0m npm run build",
-		"\x1b[90m[00:00:14]\x1b[0m   \x1b[32m✓\x1b[0m Compiled successfully",
-		"\x1b[90m[00:00:16]\x1b[0m   \x1b[32m✓\x1b[0m Type checking passed",
-		"\x1b[90m[00:00:21]\x1b[0m   \x1b[32m✓\x1b[0m Static pages generated",
-		"\x1b[90m[00:00:22]\x1b[0m Build complete. Writing layer cache...",
-		"\x1b[90m[00:00:23]\x1b[0m Starting container...",
-		"\x1b[90m[00:00:24]\x1b[0m Health check \x1b[32mpassed\x1b[0m (200 OK, 12ms)",
-		"\x1b[90m[00:00:25]\x1b[0m \x1b[32mDeployment successful!\x1b[0m",
+	// Stream log lines by polling deploy_log column until deployment finishes.
+	// Lines already sent are tracked by index so we only emit new lines.
+	var sentLines int
+	sendLine := func(line string) {
+		fmt.Fprintf(w, "data: %s\n\n", line)
+		flusher.Flush()
 	}
 
-	for i, line := range lines {
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	for {
 		select {
 		case <-r.Context().Done():
 			return
-		default:
+		case <-ticker.C:
 		}
-		w.Write([]byte("data: " + line + "\n\n"))
-		flusher.Flush()
-		if i < len(lines)-1 {
-			time.Sleep(150 * time.Millisecond)
+
+		var deployLog, status string
+		qErr := h.db.QueryRowContext(r.Context(),
+			`SELECT COALESCE(deploy_log,''), status FROM deployments WHERE id=?`, depID,
+		).Scan(&deployLog, &status)
+		if qErr != nil {
+			return
+		}
+
+		// Emit any new lines
+		if deployLog != "" {
+			allLines := strings.Split(deployLog, "\n")
+			for i := sentLines; i < len(allLines); i++ {
+				if allLines[i] != "" {
+					sendLine(allLines[i])
+				}
+			}
+			sentLines = len(allLines)
+		} else if sentLines == 0 {
+			// Nothing yet — show a waiting message once
+			sendLine("Waiting for deployment to start...")
+			sentLines = -1 // sentinel: waiting message sent
+		}
+
+		// Done when not still running
+		if status != "running" {
+			fmt.Fprint(w, "event: done\ndata: \n\n")
+			flusher.Flush()
+			return
 		}
 	}
-	w.Write([]byte("event: done\ndata: \n\n"))
-	flusher.Flush()
-}
-
-func (h *DeploymentHandler) finishDeployment(depID, svcID int64) {
-	time.Sleep(3 * time.Second)
-	h.db.Exec(
-		`UPDATE deployments SET status='success', finished_at=datetime('now') WHERE id=?`, depID)
-	h.db.Exec(
-		`UPDATE services SET status='running', updated_at=datetime('now') WHERE id=?`, svcID)
 }
 
 // ─── scanner helpers ─────────────────────────────────────────────────────────

@@ -177,7 +177,7 @@ export function ServicePage() {
         `/projects/${projectId}/services/${serviceId}/deployments/${data.deployment_id}`
       )
     },
-    onError: () => toast.error('Failed to trigger deployment.'),
+    onError: (err: unknown) => toast.error((err as any)?.response?.data?.error ?? 'Failed to trigger deployment.'),
   })
 
   // needsDetection: true when deploy_type is git but framework/commands not set

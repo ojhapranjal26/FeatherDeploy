@@ -510,6 +510,9 @@ Before=featherdeploy.service
 Type=simple
 User={{.User}}
 Group={{.User}}
+# Ensure the data directory is owned by the service user on every start
+# (handles reboots where ownership may be reset or the dir was created as root)
+ExecStartPre=/bin/bash -c 'mkdir -p {{.DataDir}}/rqlite-data && chown -R {{.User}}:{{.User}} {{.DataDir}}/rqlite-data'
 ExecStart=/usr/local/bin/rqlited \\
   -node-id=main \\
   -http-addr=127.0.0.1:4001 \\
@@ -517,6 +520,7 @@ ExecStart=/usr/local/bin/rqlited \\
   {{.DataDir}}/rqlite-data
 Restart=always
 RestartSec=5s
+StartLimitIntervalSec=0
 StandardOutput=journal
 StandardError=journal
 
