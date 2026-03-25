@@ -1,10 +1,13 @@
 package handler
 
 import (
+	"bufio"
 	"database/sql"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -201,6 +204,82 @@ func (h *DeploymentHandler) Logs(w http.ResponseWriter, r *http.Request) {
 }
 
 // ─── scanner helpers ─────────────────────────────────────────────────────────
+
+// GET /api/projects/{projectID}/services/{serviceID}/container-logs
+// Streams live stdout+stderr of the running container via Server-Sent Events.
+// The stream ends naturally when the container exits or the client disconnects.
+func (h *DeploymentHandler) ContainerLogs(w http.ResponseWriter, r *http.Request) {
+	svcID, err := strconv.ParseInt(r.PathValue("serviceID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errMap("invalid serviceID"))
+		return
+	}
+
+	// Verify the service exists (container may not be running yet)
+	var dummy int64
+	if err := h.db.QueryRowContext(r.Context(),
+		`SELECT id FROM services WHERE id=?`, svcID).Scan(&dummy); err == sql.ErrNoRows {
+		writeJSON(w, http.StatusNotFound, errMap("service not found"))
+		return
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeJSON(w, http.StatusInternalServerError, errMap("streaming not supported"))
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	sendLine := func(line string) {
+		fmt.Fprintf(w, "data: %s\n\n", strings.ReplaceAll(line, "\r", ""))
+		flusher.Flush()
+	}
+	sendDone := func() {
+		fmt.Fprint(w, "event: done\ndata: \n\n")
+		flusher.Flush()
+	}
+
+	cName := fmt.Sprintf("fd-svc-%d", svcID)
+
+	// Use os.Pipe so that when the child exits its write-end is closed,
+	// causing the scanner to return EOF and exit the loop cleanly.
+	rp, wp, pipeErr := os.Pipe()
+	if pipeErr != nil {
+		sendLine("[error: cannot create pipe]")
+		sendDone()
+		return
+	}
+
+	// exec.CommandContext sends SIGKILL to the process when ctx is cancelled
+	// (i.e. client disconnects), which closes the child's write end of the pipe.
+	cmd := exec.CommandContext(r.Context(),
+		"sudo", "-n", "podman", "logs", "-f", "--tail=100", cName)
+	cmd.Stdout = wp
+	cmd.Stderr = wp
+
+	if err := cmd.Start(); err != nil {
+		rp.Close()
+		wp.Close()
+		sendLine(fmt.Sprintf("[error: %v]", err))
+		sendDone()
+		return
+	}
+	// Close parent's write end so the pipe gets EOF once the child exits.
+	wp.Close()
+
+	scanner := bufio.NewScanner(rp)
+	scanner.Buffer(make([]byte, 256*1024), 256*1024) // guard against very long lines
+	for scanner.Scan() {
+		sendLine(scanner.Text())
+	}
+
+	rp.Close()
+	cmd.Wait() //nolint:errcheck
+	sendDone()
+}
 
 func scanDeployment(row scanner, d *model.Deployment) error {
 	var finishedAt sql.NullTime

@@ -60,7 +60,10 @@ export function DomainsPage() {
       reset()
       toast.success('Domain added. Point your DNS A record to this server.')
     },
-    onError: () => toast.error('Failed to add domain.'),
+    onError: (err: unknown) => {
+      const msg = (err as any)?.response?.data?.error
+      toast.error(msg ?? 'Failed to add domain.')
+    },
   })
 
   const deleteMutation = useMutation({
@@ -70,7 +73,10 @@ export function DomainsPage() {
       qc.invalidateQueries({ queryKey: ['domains', serviceId] })
       toast.success('Domain removed.')
     },
-    onError: () => toast.error('Failed to remove domain.'),
+    onError: (err: unknown) => {
+      const msg = (err as any)?.response?.data?.error
+      toast.error(msg ?? 'Failed to remove domain.')
+    },
   })
 
   const verifyMutation = useMutation({

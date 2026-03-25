@@ -25,6 +25,7 @@ import (
 	"time"
 
 	appCrypto "github.com/ojhapranjal26/featherdeploy/backend/internal/crypto"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/caddy"
 )
 
 // ─── SSH URL detection ────────────────────────────────────────────────────────
@@ -230,6 +231,9 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 	db.Exec(
 		`UPDATE services SET status='running', container_id=?, host_port=?, updated_at=datetime('now') WHERE id=?`,
 		newContainerID, hostPort, svcID)
+
+	// Update Caddy so the service is reachable via its registered domains.
+	go caddy.Reload(db)
 
 	// Tag the freshly built image as the stable snapshot so it can be used as
 	// a fallback if a future deployment build fails.

@@ -330,6 +330,7 @@ func serve() {
 				r.Post("/api/projects/{projectID}/services/{serviceID}/deployments", depH.Trigger)
 				r.Get("/api/projects/{projectID}/services/{serviceID}/deployments/{deploymentID}", depH.Get)
 				r.Get("/api/projects/{projectID}/services/{serviceID}/deployments/{deploymentID}/logs", depH.Logs)
+				r.Get("/api/projects/{projectID}/services/{serviceID}/container-logs", depH.ContainerLogs)
 
 				// ── Env vars ─────────────────────────────────────────────
 				r.Get("/api/projects/{projectID}/services/{serviceID}/env", envH.List)

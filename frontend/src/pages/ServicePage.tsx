@@ -1,9 +1,10 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { ChevronLeft, Rocket, Clock, Search, Loader2, CheckCircle2, Plus, Trash2, Eye, EyeOff, ExternalLink, Terminal, Code2 } from 'lucide-react'
+import { ChevronLeft, Rocket, Clock, Search, Loader2, CheckCircle2, Plus, Trash2, Eye, EyeOff, ExternalLink, Terminal, Code2, CircleDot } from 'lucide-react'
 import { toast } from 'sonner'
 import { servicesApi, type DetectionResult } from '@/api/services'
+import { useContainerLogs } from '@/hooks/useContainerLogs'
 import { deploymentsApi } from '@/api/deployments'
 import { envApi, type UpsertEnvPayload } from '@/api/env'
 import { ServiceStatusBadge } from '@/components/ServiceStatusBadge'
@@ -143,6 +144,9 @@ export function ServicePage() {
   const [detectOpen, setDetectOpen] = useState(false)
   const [detecting, setDetecting] = useState(false)
   const [detection, setDetection] = useState<DetectionResult | null>(null)
+
+  // Tab state — track active tab so the container-logs SSE only connects when visible
+  const [activeTab, setActiveTab] = useState('overview')
 
   // Env state
   const [addEnvOpen, setAddEnvOpen] = useState(false)
@@ -351,11 +355,12 @@ export function ServicePage() {
         onClose={() => setDetectOpen(false)}
       />
 
-      <Tabs defaultValue="overview">
+      <Tabs value={activeTab} onValueChange={setActiveTab}>
         <TabsList className="mb-6">
           <TabsTrigger value="overview">Overview</TabsTrigger>
           <TabsTrigger value="deployments">Deployments</TabsTrigger>
           <TabsTrigger value="env">Environment</TabsTrigger>
+          <TabsTrigger value="logs">Live Logs</TabsTrigger>
           <TabsTrigger value="domains" onClick={() => navigate(`/projects/${projectId}/services/${serviceId}/domains`)}>
             Domains ↗
           </TabsTrigger>
@@ -599,7 +604,66 @@ export function ServicePage() {
             </DialogContent>
           </Dialog>
         </TabsContent>
+
+        {/* ── Live Logs ─────────────────────────────────────────────────────── */}
+        <TabsContent value="logs">
+          <ContainerLogsPanel
+            projectId={projectId}
+            serviceId={serviceId}
+            enabled={activeTab === 'logs'}
+          />
+        </TabsContent>
       </Tabs>
+    </div>
+  )
+}
+
+// ─── Container logs panel ─────────────────────────────────────────────────────
+
+function ContainerLogsPanel({
+  projectId,
+  serviceId,
+  enabled,
+}: {
+  projectId: string | undefined
+  serviceId: string | undefined
+  enabled: boolean
+}) {
+  const { lines, connected } = useContainerLogs(projectId, serviceId, enabled)
+  const bottomRef = useRef<HTMLDivElement>(null)
+
+  // Auto-scroll to bottom when new lines arrive
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [lines])
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="font-medium flex items-center gap-2">
+            <Terminal className="h-4 w-4 text-muted-foreground" /> Container logs
+          </h2>
+          <p className="text-xs text-muted-foreground mt-0.5">Live stdout + stderr from the running container.</p>
+        </div>
+        <div className="flex items-center gap-1.5 text-xs">
+          <CircleDot className={`h-3 w-3 ${connected ? 'text-emerald-500 animate-pulse' : 'text-muted-foreground'}`} />
+          <span className="text-muted-foreground">{connected ? 'Connected' : 'Disconnected'}</span>
+        </div>
+      </div>
+
+      <div className="rounded-lg border bg-zinc-950 dark:bg-black font-mono text-xs text-zinc-300 h-[480px] overflow-y-auto p-4 space-y-0.5">
+        {lines.length === 0 ? (
+          <p className="text-zinc-500 italic">
+            {enabled ? 'Waiting for container output…' : 'Open this tab to start streaming.'}
+          </p>
+        ) : (
+          lines.map((line, i) => (
+            <p key={i} className="whitespace-pre-wrap break-all leading-5">{line}</p>
+          ))
+        )}
+        <div ref={bottomRef} />
+      </div>
     </div>
   )
 }

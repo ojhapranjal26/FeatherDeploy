@@ -515,13 +515,24 @@ fi
 # -- 8d. sudo rule: allow featherdeploy to run rootful podman without a password
 # This gives the service account access to rootful podman, which avoids all
 # rootless user-namespace requirements (newuidmap failures, kernel restrictions).
-echo "==> Installing sudo rule for featherdeploy → podman..."
+echo "==> Installing sudo rule for featherdeploy → podman + caddy..."
 cat > /etc/sudoers.d/featherdeploy-podman << 'SUDOEOF'
 Defaults!/usr/bin/podman !requiretty
 featherdeploy ALL=(root) NOPASSWD: /usr/bin/podman
+featherdeploy ALL=(root) NOPASSWD: /bin/systemctl reload caddy
+featherdeploy ALL=(root) NOPASSWD: /usr/bin/systemctl reload caddy
+featherdeploy ALL=(root) NOPASSWD: /usr/bin/tee /etc/caddy/featherdeploy-services.caddy
 SUDOEOF
 chmod 440 /etc/sudoers.d/featherdeploy-podman
 echo "  /etc/sudoers.d/featherdeploy-podman installed"
+
+# -- 8e. Create the Caddy services include file with correct ownership so the
+#        FeatherDeploy service account can write domain routing config to it.
+echo "==> Preparing Caddy services include file..."
+touch /etc/caddy/featherdeploy-services.caddy
+chown "${SVC_USER}:${SVC_USER}" /etc/caddy/featherdeploy-services.caddy
+chmod 644 /etc/caddy/featherdeploy-services.caddy
+echo "  /etc/caddy/featherdeploy-services.caddy ready"
 
 # -- 9. Set up data directory with correct ownership, then install + start rqlite
 echo "==> Setting up data directory..."

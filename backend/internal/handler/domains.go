@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	caddypkg "github.com/ojhapranjal26/featherdeploy/backend/internal/caddy"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/model"
 	v "github.com/ojhapranjal26/featherdeploy/backend/internal/validator"
 )
@@ -86,6 +87,7 @@ func (h *DomainHandler) Add(w http.ResponseWriter, r *http.Request) {
 	d.TLS = tls == 1
 	d.Verified = verified == 1
 	writeJSON(w, http.StatusCreated, d)
+	go caddypkg.Reload(h.db)
 }
 
 // DELETE /api/projects/{projectID}/services/{serviceID}/domains/{domainID}
@@ -97,6 +99,7 @@ func (h *DomainHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	}
 	h.db.ExecContext(r.Context(), `DELETE FROM domains WHERE id=?`, domainID)
 	w.WriteHeader(http.StatusNoContent)
+	go caddypkg.Reload(h.db)
 }
 
 // POST /api/projects/{projectID}/services/{serviceID}/domains/{domainID}/verify
@@ -139,5 +142,6 @@ func (h *DomainHandler) Verify(w http.ResponseWriter, r *http.Request) {
 		"resolved_ip": resolvedIP,
 		"server_ip":   serverIP,
 	})
+	go caddypkg.Reload(h.db)
 }
 
