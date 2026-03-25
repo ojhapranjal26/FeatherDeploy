@@ -677,11 +677,12 @@ StartLimitBurst=5
 StandardOutput=journal
 StandardError=journal
 
-# Security hardening
-NoNewPrivileges=yes
+# PrivateTmp gives each deployment a clean /tmp namespace.
+# NoNewPrivileges is intentionally NOT set: the service needs to invoke
+# "sudo -n podman" (rootful podman) for container builds and runs.
+# The only elevated permission granted is NOPASSWD: /usr/bin/podman via
+# /etc/sudoers.d/featherdeploy-podman, installed by build.sh.
 PrivateTmp=yes
-ProtectSystem=strict
-ReadWritePaths={{.DataDir}}
 
 [Install]
 WantedBy=multi-user.target
@@ -721,6 +722,23 @@ func RunUpdate() {
 	// ── Run database migrations ───────────────────────────────────────────────
 	fmt.Println("── Applying database migrations ────────────────────────────────")
 	fmt.Println("  (migrations applied via rqlite after service restart below)")
+
+	// ── Rewrite systemd unit to pick up any template changes (e.g. security
+	// hardening directives) without requiring a full reinstall.
+	fmt.Println("\n── Updating systemd service unit ───────────────────────────────")
+	// Detect the service user from the existing unit file so a customised
+	// username is preserved; fall back to the default if not readable.
+	svcUser := defaultSvcUser
+	if data, err := os.ReadFile(systemdUnit); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			if strings.HasPrefix(strings.TrimSpace(line), "User=") {
+				svcUser = strings.TrimPrefix(strings.TrimSpace(line), "User=")
+				break
+			}
+		}
+	}
+	writeSystemdService(svcUser)
+	fmt.Printf("  ✓ systemd unit updated (User=%s)\n", svcUser)
 
 	// ── Restart rqlite + featherdeploy ───────────────────────────────────────
 	fmt.Println("\n── Restarting services ─────────────────────────────────────────")
