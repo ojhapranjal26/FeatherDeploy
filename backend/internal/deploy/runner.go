@@ -470,15 +470,35 @@ func podmanBuildAttempt(dir, imageName string, extraArgs ...string) (string, err
 	args = append(args, ".")
 	cmd := exec.Command("podman", args...)
 	cmd.Dir = dir
-	// Inherit environment, replacing BUILDAH_ISOLATION to skip user-namespace setup.
+	// Inherit environment, stripping variables that reference paths which may
+	// not exist for service accounts (e.g. /home/featherdeploy).
+	strip := map[string]bool{
+		"HOME=": true, "XDG_RUNTIME_DIR=": true,
+		"BUILDAH_ISOLATION=": true, "CONTAINERS_CONF=": true,
+		"REGISTRIES_CONFIG_PATH=": true,
+	}
 	raw := os.Environ()
-	env := make([]string, 0, len(raw)+1)
+	env := make([]string, 0, len(raw)+6)
 	for _, e := range raw {
-		if !strings.HasPrefix(e, "BUILDAH_ISOLATION=") {
+		skip := false
+		for prefix := range strip {
+			if strings.HasPrefix(e, prefix) {
+				skip = true
+				break
+			}
+		}
+		if !skip {
 			env = append(env, e)
 		}
 	}
-	cmd.Env = append(env, "BUILDAH_ISOLATION=chroot")
+	// Use /tmp as home so podman/buildah can write its storage and config files
+	// even when the process runs as a service account with no home directory.
+	env = append(env,
+		"HOME=/tmp",
+		"XDG_RUNTIME_DIR=/tmp/podman-run",
+		"BUILDAH_ISOLATION=chroot",
+	)
+	cmd.Env = env
 	var buf bytes.Buffer
 	cmd.Stdout = &buf
 	cmd.Stderr = &buf
