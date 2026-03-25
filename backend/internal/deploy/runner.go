@@ -26,6 +26,7 @@ import (
 
 	appCrypto "github.com/ojhapranjal26/featherdeploy/backend/internal/crypto"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/caddy"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/detect"
 )
 
 // ─── SSH URL detection ────────────────────────────────────────────────────────
@@ -142,8 +143,41 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 		}
 	}
 
-	// ── 4. Build command ──────────────────────────────────────────────────────
-	if strings.TrimSpace(buildCmd) != "" {
+	// ── 4. Detect Dockerfile presence and fill config gaps ───────────────────
+	dockerfilePath := filepath.Join(workDir, "Dockerfile")
+	repoHasDockerfile := true
+	if _, statErr := os.Stat(dockerfilePath); os.IsNotExist(statErr) {
+		repoHasDockerfile = false
+	}
+
+	// When the repo has no Dockerfile, run the static analyser so any fields
+	// the user left blank (framework, build_command, start_command, app_port)
+	// are filled with sensible defaults derived from the actual repo content.
+	if !repoHasDockerfile {
+		detected := detect.Detect(workDir)
+		if framework == "" && detected.Framework != "" && detected.Framework != "unknown" {
+			framework = detected.Framework
+			log.add("[detect] auto-detected framework: %s", framework)
+		}
+		if strings.TrimSpace(buildCmd) == "" && detected.BuildCommand != "" {
+			buildCmd = detected.BuildCommand
+		}
+		if strings.TrimSpace(startCmd) == "" && detected.StartCommand != "" {
+			startCmd = detected.StartCommand
+		}
+		if appPort <= 0 && detected.AppPort > 0 {
+			appPort = detected.AppPort
+		}
+	}
+
+	// ── 5. Host build step (only when repo ships its own Dockerfile) ──────────
+	// Package-manager commands (pip install, npm install, cargo build, …) must
+	// execute inside the correct runtime image, not on the host server which
+	// may not have those runtimes installed. When we auto-generate the
+	// Dockerfile the build_command is embedded as a Dockerfile RUN instruction
+	// so it runs inside the base image. Only run on the host when the repo
+	// ships its own Dockerfile, where the user may rely on host-built artefacts.
+	if strings.TrimSpace(buildCmd) != "" && repoHasDockerfile {
 		log.add("[build] %s", buildCmd)
 		if err := runShell(workDir, sshKeyFile, buildCmd, log); err != nil {
 			log.add("ERROR: build command failed: %v", err)
@@ -152,16 +186,15 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 		}
 	}
 
-	// ── 5. Ensure Dockerfile ──────────────────────────────────────────────────
-	dockerfilePath := filepath.Join(workDir, "Dockerfile")
-	if _, statErr := os.Stat(dockerfilePath); os.IsNotExist(statErr) {
+	// ── 6. Ensure Dockerfile ──────────────────────────────────────────────────
+	if !repoHasDockerfile {
 		df := generateDockerfile(framework, buildCmd, startCmd, appPort)
 		if writeErr := os.WriteFile(dockerfilePath, []byte(df), 0644); writeErr != nil {
 			log.add("ERROR: write generated Dockerfile: %v", writeErr)
 			markFailed(db, depID, svcID, log.text())
 			return
 		}
-		log.add("[dockerfile] generated Dockerfile for framework=%q", framework)
+		log.add("[dockerfile] generated Dockerfile for framework=%q build=%q", framework, buildCmd)
 	} else {
 		log.add("[dockerfile] using Dockerfile from repository")
 	}
@@ -412,28 +445,84 @@ func maskURL(u string) string {
 	return u
 }
 
-// generateDockerfile creates a simple Dockerfile for use when the repo
-// doesn't include one. It is intentionally conservative (shell entrypoint,
-// no multi-stage build) so it works for most language frameworks.
+// generateDockerfile creates a Dockerfile for repos that don't include one.
+// It handles Python (pip/poetry/pipenv) and Node (npm/yarn/pnpm) specifically
+// so the right runtime image is used and dependencies are installed correctly
+// inside the container rather than on the host server.
 func generateDockerfile(framework, buildCmd, startCmd string, appPort int) string {
-	baseImage := pickBaseImage(framework)
-	if startCmd == "" {
-		startCmd = "./app"
-	}
+	fw := strings.ToLower(strings.TrimSpace(framework))
+	baseImage := pickBaseImage(fw)
 	if appPort <= 0 {
 		appPort = 8080
 	}
+	if startCmd == "" {
+		startCmd = "./app"
+	}
+
+	isPython := fw == "python" || fw == "django" || fw == "flask" || fw == "fastapi" ||
+		fw == "tornado" || fw == "aiohttp" || fw == "starlette" || fw == "sanic" || fw == "bottle"
+	isNode := fw == "nodejs" || fw == "nextjs" || fw == "nuxt" || fw == "remix" ||
+		fw == "express" || fw == "fastify" || fw == "react" || fw == "vue" ||
+		fw == "svelte" || fw == "vite" || fw == "static" || fw == "angular" ||
+		fw == "nestjs" || fw == "koa" || fw == "hapi" || fw == "gatsby"
 
 	var sb strings.Builder
 	sb.WriteString("FROM " + baseImage + "\n")
 	sb.WriteString("WORKDIR /app\n")
 	sb.WriteString("COPY . .\n")
-	if buildCmd != "" {
-		sb.WriteString("RUN " + buildCmd + "\n")
+
+	switch {
+	case isPython:
+		// Use the user-configured build command when it is already a pip/poetry/
+		// pipenv invocation; otherwise auto-inject a requirements.txt install.
+		pipInstallCmd := buildCmd
+		remainingBuild := ""
+		if !looksLikePipInstall(buildCmd) {
+			pipInstallCmd = "pip install --no-cache-dir -r requirements.txt"
+			remainingBuild = buildCmd
+		}
+		sb.WriteString("RUN " + pipInstallCmd + "\n")
+		if strings.TrimSpace(remainingBuild) != "" {
+			sb.WriteString("RUN " + remainingBuild + "\n")
+		}
+	case isNode:
+		// If the build command already handles npm install (e.g. "npm ci && npm
+		// run build") use it as a single RUN; otherwise prepend npm install.
+		if strings.TrimSpace(buildCmd) != "" && looksLikeNpmInstall(buildCmd) {
+			sb.WriteString("RUN " + buildCmd + "\n")
+		} else {
+			sb.WriteString("RUN npm install\n")
+			if strings.TrimSpace(buildCmd) != "" {
+				sb.WriteString("RUN " + buildCmd + "\n")
+			}
+		}
+	default:
+		if strings.TrimSpace(buildCmd) != "" {
+			sb.WriteString("RUN " + buildCmd + "\n")
+		}
 	}
+
 	sb.WriteString(fmt.Sprintf("EXPOSE %d\n", appPort))
 	sb.WriteString(`CMD ["/bin/sh", "-c", "` + strings.ReplaceAll(startCmd, `"`, `\"`) + `"]` + "\n")
 	return sb.String()
+}
+
+// looksLikePipInstall reports whether cmd is a Python dependency-install
+// invocation (pip, pip3, python -m pip, poetry install, pipenv install).
+func looksLikePipInstall(cmd string) bool {
+	c := strings.ToLower(strings.TrimSpace(cmd))
+	return strings.HasPrefix(c, "pip ") || strings.HasPrefix(c, "pip3 ") ||
+		strings.Contains(c, "python -m pip ") ||
+		strings.HasPrefix(c, "poetry install") ||
+		strings.HasPrefix(c, "pipenv install")
+}
+
+// looksLikeNpmInstall reports whether cmd begins with a Node dependency-
+// install invocation (npm install/ci, yarn install, pnpm install).
+func looksLikeNpmInstall(cmd string) bool {
+	c := strings.ToLower(strings.TrimSpace(cmd))
+	return strings.HasPrefix(c, "npm install") || strings.HasPrefix(c, "npm ci") ||
+		strings.HasPrefix(c, "yarn install") || strings.HasPrefix(c, "pnpm install")
 }
 
 // podmanCmd creates a rootful podman command executed via `sudo -n`.
@@ -481,11 +570,13 @@ func podmanImageExists(image string) bool {
 func pickBaseImage(framework string) string {
 	fw := strings.ToLower(framework)
 	switch {
-	case fw == "nextjs" || fw == "nuxt" || fw == "remix" || fw == "nodejs" || fw == "express" || fw == "fastify":
+	case fw == "nextjs" || fw == "nuxt" || fw == "remix" || fw == "nodejs" || fw == "express" || fw == "fastify" ||
+		fw == "nestjs" || fw == "koa" || fw == "hapi" || fw == "gatsby" || fw == "angular":
 		return "node:20-alpine"
 	case fw == "react" || fw == "vue" || fw == "svelte" || fw == "vite" || fw == "static":
 		return "node:20-alpine"
-	case fw == "django" || fw == "flask" || fw == "fastapi" || fw == "python":
+	case fw == "django" || fw == "flask" || fw == "fastapi" || fw == "python" ||
+		fw == "tornado" || fw == "aiohttp" || fw == "starlette" || fw == "sanic" || fw == "bottle":
 		return "python:3.12-slim"
 	case fw == "laravel" || fw == "symfony" || fw == "php":
 		return "php:8.2-fpm-alpine"
