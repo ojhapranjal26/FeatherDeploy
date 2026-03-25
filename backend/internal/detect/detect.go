@@ -231,39 +231,45 @@ func detectPython(root string) *Result {
 	case strings.Contains(depsContent, "fastapi"):
 		r.Framework = "fastapi"
 		r.BuildCommand = "pip install --no-cache-dir -r requirements.txt"
-		r.StartCommand = "uvicorn main:app --host 0.0.0.0 --port 8000"
+		appModule := detectPythonModule(root, "app", "main", "server", "application", "api")
+		r.StartCommand = "uvicorn " + appModule + ":app --host 0.0.0.0 --port 8000"
 	case strings.Contains(depsContent, "django"):
 		r.Framework = "django"
-		r.BuildCommand = "pip install --no-cache-dir -r requirements.txt && python manage.py collectstatic --noinput"
-		r.StartCommand = "gunicorn --bind 0.0.0.0:8000 --workers 2 wsgi:application"
+		// collectstatic requires DJANGO_SETTINGS_MODULE and a working DB;
+		// run it only if it can succeed (|| true prevents build failure).
+		r.BuildCommand = "pip install --no-cache-dir -r requirements.txt && python manage.py collectstatic --noinput || true"
+		wsgiModule := findDjangoWsgiModule(root)
+		r.StartCommand = "gunicorn --bind 0.0.0.0:8000 --workers 2 " + wsgiModule
 	case strings.Contains(depsContent, "flask"):
 		r.Framework = "flask"
 		r.BuildCommand = "pip install --no-cache-dir -r requirements.txt"
-		r.StartCommand = "gunicorn --bind 0.0.0.0:8000 " + flaskEntry + ":app"
-	case strings.Contains(depsContent, "tornado"):
-		r.Framework = "tornado"
-		r.BuildCommand = "pip install --no-cache-dir -r requirements.txt"
-		r.StartCommand = "python main.py"
-	case strings.Contains(depsContent, "aiohttp"):
-		r.Framework = "aiohttp"
-		r.BuildCommand = "pip install --no-cache-dir -r requirements.txt"
-		r.StartCommand = "python main.py"
+		appVar := detectFlaskAppVar(root, flaskEntry+".py")
+		r.StartCommand = "gunicorn --bind 0.0.0.0:8000 " + flaskEntry + ":" + appVar
 	case strings.Contains(depsContent, "starlette"):
 		r.Framework = "starlette"
 		r.BuildCommand = "pip install --no-cache-dir -r requirements.txt"
-		r.StartCommand = "uvicorn main:app --host 0.0.0.0 --port 8000"
+		appModule := detectPythonModule(root, "main", "app", "server")
+		r.StartCommand = "uvicorn " + appModule + ":app --host 0.0.0.0 --port 8000"
+	case strings.Contains(depsContent, "tornado"):
+		r.Framework = "tornado"
+		r.BuildCommand = "pip install --no-cache-dir -r requirements.txt"
+		r.StartCommand = "python " + detectPythonModule(root, "main", "app", "server") + ".py"
+	case strings.Contains(depsContent, "aiohttp"):
+		r.Framework = "aiohttp"
+		r.BuildCommand = "pip install --no-cache-dir -r requirements.txt"
+		r.StartCommand = "python " + detectPythonModule(root, "main", "app", "server") + ".py"
 	case strings.Contains(depsContent, "bottle"):
 		r.Framework = "bottle"
 		r.BuildCommand = "pip install --no-cache-dir -r requirements.txt"
-		r.StartCommand = "python app.py"
+		r.StartCommand = "python " + detectPythonModule(root, "app", "main", "server") + ".py"
 	case strings.Contains(depsContent, "sanic"):
 		r.Framework = "sanic"
 		r.BuildCommand = "pip install --no-cache-dir -r requirements.txt"
-		r.StartCommand = "python server.py"
+		r.StartCommand = "python " + detectPythonModule(root, "server", "app", "main") + ".py"
 	default:
 		r.Framework = "python"
 		r.BuildCommand = "pip install --no-cache-dir -r requirements.txt"
-		r.StartCommand = "python main.py"
+		r.StartCommand = "python " + detectPythonModule(root, "main", "app", "server", "run", "manage") + ".py"
 	}
 
 	// Use Pipenv if Pipfile present
@@ -272,6 +278,90 @@ func detectPython(root string) *Result {
 	}
 
 	return r
+}
+
+// findDjangoWsgiModule locates the wsgi.py in the project and returns the
+// dotted Python module path (e.g. "myproject.wsgi:application").
+// Django projects keep wsgi.py inside a package subdirectory, not at root.
+func findDjangoWsgiModule(root string) string {
+	// 1. Root-level wsgi.py (unusual but possible)
+	if _, err := os.Stat(filepath.Join(root, "wsgi.py")); err == nil {
+		return "wsgi:application"
+	}
+	// 2. Extract project name from manage.py DJANGO_SETTINGS_MODULE
+	if data, err := os.ReadFile(filepath.Join(root, "manage.py")); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			if strings.Contains(line, "DJANGO_SETTINGS_MODULE") {
+				// e.g. 'myproject.settings'  or  "myproject.settings.base"
+				for _, tok := range strings.FieldsFunc(line, func(r rune) bool {
+					return r == '"' || r == '\''
+				}) {
+					if idx := strings.Index(tok, ".settings"); idx > 0 {
+						pkg := tok[:idx]
+						// Verify the package/wsgi.py actually exists
+						if _, err := os.Stat(filepath.Join(root, pkg, "wsgi.py")); err == nil {
+							return pkg + ".wsgi:application"
+						}
+						// Return the dotted path even if file not found yet (may exist after build)
+						return pkg + ".wsgi:application"
+					}
+				}
+			}
+		}
+	}
+	// 3. Walk immediate subdirectories for wsgi.py
+	if entries, err := os.ReadDir(root); err == nil {
+		for _, e := range entries {
+			if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+				continue
+			}
+			switch e.Name() {
+			case "venv", ".venv", "env", "__pycache__", "static", "media", "node_modules":
+				continue
+			}
+			if _, err := os.Stat(filepath.Join(root, e.Name(), "wsgi.py")); err == nil {
+				return e.Name() + ".wsgi:application"
+			}
+		}
+	}
+	return "wsgi:application"
+}
+
+// detectFlaskAppVar inspects filename in root to find the Flask application
+// variable name. Handles factory pattern (create_app) and non-standard names.
+func detectFlaskAppVar(root, filename string) string {
+	data, err := os.ReadFile(filepath.Join(root, filename))
+	if err != nil {
+		return "app"
+	}
+	content := string(data)
+	// Factory pattern: gunicorn supports "module:create_app()"
+	if strings.Contains(content, "def create_app") {
+		return "create_app()"
+	}
+	// application = Flask(
+	if strings.Contains(content, "application = Flask(") || strings.Contains(content, "application=Flask(") {
+		return "application"
+	}
+	// app = Flask(  (most common)
+	if strings.Contains(content, "app = Flask(") || strings.Contains(content, "app=Flask(") {
+		return "app"
+	}
+	return "app"
+}
+
+// detectPythonModule returns the first of candidates that exists as a .py
+// file in root. Falls back to the first candidate if none are found.
+func detectPythonModule(root string, candidates ...string) string {
+	for _, c := range candidates {
+		if _, err := os.Stat(filepath.Join(root, c+".py")); err == nil {
+			return c
+		}
+	}
+	if len(candidates) > 0 {
+		return candidates[0]
+	}
+	return "main"
 }
 
 func detectPythonVersion(root string) string {

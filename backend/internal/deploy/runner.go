@@ -494,6 +494,11 @@ func generateDockerfile(workDir, framework, buildCmd, startCmd string, appPort i
 		if strings.TrimSpace(remainingBuild) != "" {
 			sb.WriteString("RUN " + remainingBuild + "\n")
 		}
+		// Ensure the WSGI/ASGI server used in startCmd is installed even when
+		// it is absent from requirements.txt (common for managed-host repos).
+		if extra := pythonServerPipInstall(workDir, startCmd); extra != "" {
+			sb.WriteString("RUN " + extra + "\n")
+		}
 	case isNode:
 		// If the build command already handles npm install (e.g. "npm ci && npm
 		// run build") use it as a single RUN; otherwise prepend npm install.
@@ -598,6 +603,33 @@ func detectPythonAptDeps(workDir string) []string {
 		return final
 	}
 	return nil
+}
+
+// pythonServerPipInstall returns a "pip install ..." command string for the
+// WSGI/ASGI server referenced in startCmd when that server is not already
+// listed in the project's dependency files. Returns "" when nothing is needed.
+func pythonServerPipInstall(workDir, startCmd string) string {
+	// Read combined content of all dependency declaration files
+	var content string
+	for _, f := range []string{"requirements.txt", "requirements-dev.txt", "Pipfile", "pyproject.toml", "setup.py", "setup.cfg"} {
+		if data, err := os.ReadFile(filepath.Join(workDir, f)); err == nil {
+			content += strings.ToLower(string(data)) + "\n"
+		}
+	}
+	cmd := strings.ToLower(startCmd)
+	switch {
+	case strings.Contains(cmd, "gunicorn") && !strings.Contains(content, "gunicorn"):
+		return "pip install --no-cache-dir gunicorn"
+	case strings.Contains(cmd, "uvicorn") && !strings.Contains(content, "uvicorn"):
+		return "pip install --no-cache-dir 'uvicorn[standard]'"
+	case strings.Contains(cmd, "hypercorn") && !strings.Contains(content, "hypercorn"):
+		return "pip install --no-cache-dir hypercorn"
+	case strings.Contains(cmd, "daphne") && !strings.Contains(content, "daphne"):
+		return "pip install --no-cache-dir daphne"
+	case strings.Contains(cmd, "waitress") && !strings.Contains(content, "waitress"):
+		return "pip install --no-cache-dir waitress"
+	}
+	return ""
 }
 
 // looksLikePipInstall reports whether cmd is a Python dependency-install
