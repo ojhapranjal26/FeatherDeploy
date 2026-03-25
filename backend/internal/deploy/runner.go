@@ -167,11 +167,23 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 
 	// ── 6. Podman build ───────────────────────────────────────────────────────
 	imageName := fmt.Sprintf("featherdeploy/svc-%d:dep-%d", svcID, depID)
+	stableImage := fmt.Sprintf("featherdeploy/svc-%d:stable", svcID)
 	log.add("[podman] building image %s", imageName)
-	if err := runCapture(workDir, log, "podman", "build", "-t", imageName, "."); err != nil {
-		log.add("ERROR: podman build failed: %v", err)
-		markFailed(db, depID, svcID, log.text())
-		return
+	buildErr := podmanBuild(workDir, log, imageName)
+	var usingFallback bool
+	if buildErr != nil {
+		log.add("ERROR: podman build failed: %v", buildErr)
+		// ── Fallback: use last stable image if available ──────────────────────
+		var lastImage string
+		db.QueryRow(`SELECT last_image FROM services WHERE id=?`, svcID).Scan(&lastImage) //nolint
+		if lastImage != "" && podmanImageExists(lastImage) {
+			log.add("[podman] falling back to last stable image: %s", lastImage)
+			imageName = lastImage
+			usingFallback = true
+		} else {
+			markFailed(db, depID, svcID, log.text())
+			return
+		}
 	}
 
 	// ── 7. Stop / remove existing container ──────────────────────────────────
@@ -218,6 +230,17 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 	db.Exec(
 		`UPDATE services SET status='running', container_id=?, host_port=?, updated_at=datetime('now') WHERE id=?`,
 		newContainerID, hostPort, svcID)
+
+	// Tag the freshly built image as the stable snapshot so it can be used as
+	// a fallback if a future deployment build fails.
+	if !usingFallback {
+		if tagErr := exec.Command("podman", "tag", imageName, stableImage).Run(); tagErr != nil {
+			log.add("[podman] warning: could not tag stable image: %v", tagErr)
+		} else {
+			log.add("[podman] saved %s as stable snapshot", stableImage)
+			db.Exec(`UPDATE services SET last_image=? WHERE id=?`, stableImage, svcID) //nolint
+		}
+	}
 
 	slog.Info("deployment succeeded", "dep_id", depID, "svc_id", svcID, "container", shortID)
 }
@@ -407,6 +430,65 @@ func generateDockerfile(framework, buildCmd, startCmd string, appPort int) strin
 	sb.WriteString(fmt.Sprintf("EXPOSE %d\n", appPort))
 	sb.WriteString(`CMD ["/bin/sh", "-c", "` + strings.ReplaceAll(startCmd, `"`, `\"`) + `"]` + "\n")
 	return sb.String()
+}
+
+// podmanBuild builds a container image with podman.
+// It sets BUILDAH_ISOLATION=chroot to avoid user-namespace (newuidmap) errors
+// that occur in restricted environments. If a namespace or storage error is
+// detected in the output it automatically retries with --storage-driver=vfs.
+func podmanBuild(dir string, log *logBuf, imageName string) error {
+	out, err := podmanBuildAttempt(dir, imageName)
+	for _, line := range strings.Split(out, "\n") {
+		if t := strings.TrimSpace(line); t != "" {
+			log.add("  %s", t)
+		}
+	}
+	if err == nil {
+		return nil
+	}
+	// Detect namespace / user-mapping errors and retry with the slower but
+	// always-available VFS storage driver.
+	lower := strings.ToLower(out)
+	if strings.Contains(lower, "newuidmap") || strings.Contains(lower, "uid_map") ||
+		strings.Contains(lower, "operation not permitted") || strings.Contains(lower, "namespace") {
+		log.add("[podman] namespace error detected — retrying with --storage-driver=vfs")
+		out2, err2 := podmanBuildAttempt(dir, imageName, "--storage-driver=vfs")
+		for _, line := range strings.Split(out2, "\n") {
+			if t := strings.TrimSpace(line); t != "" {
+				log.add("  %s", t)
+			}
+		}
+		return err2
+	}
+	return err
+}
+
+// podmanBuildAttempt runs `podman build` with BUILDAH_ISOLATION=chroot and
+// any extra arguments before the context path. It returns (combined output, error).
+func podmanBuildAttempt(dir, imageName string, extraArgs ...string) (string, error) {
+	args := append([]string{"build", "-t", imageName}, extraArgs...)
+	args = append(args, ".")
+	cmd := exec.Command("podman", args...)
+	cmd.Dir = dir
+	// Inherit environment, replacing BUILDAH_ISOLATION to skip user-namespace setup.
+	raw := os.Environ()
+	env := make([]string, 0, len(raw)+1)
+	for _, e := range raw {
+		if !strings.HasPrefix(e, "BUILDAH_ISOLATION=") {
+			env = append(env, e)
+		}
+	}
+	cmd.Env = append(env, "BUILDAH_ISOLATION=chroot")
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+	err := cmd.Run()
+	return strings.TrimSpace(buf.String()), err
+}
+
+// podmanImageExists returns true if the named image exists in podman's local store.
+func podmanImageExists(image string) bool {
+	return exec.Command("podman", "image", "exists", image).Run() == nil
 }
 
 func pickBaseImage(framework string) string {
