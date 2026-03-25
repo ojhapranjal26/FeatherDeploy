@@ -190,8 +190,8 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 	cName := fmt.Sprintf("fd-svc-%d", svcID)
 	if containerExists(cName) {
 		log.add("[podman] stopping existing container %s", cName)
-		exec.Command("podman", "stop", "--time", "10", cName).Run() //nolint
-		exec.Command("podman", "rm", "-f", cName).Run()             //nolint
+		podmanCmd("stop", "--time", "10", cName).Run() //nolint
+		podmanCmd("rm", "-f", cName).Run()             //nolint
 	}
 
 	// ── 8. Collect env vars ───────────────────────────────────────────────────
@@ -208,7 +208,7 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 	runArgs = append(runArgs, imageName)
 
 	log.add("[podman] podman run -d --name %s -p %d:%d %s", cName, hostPort, appPort, imageName)
-	out, err := exec.Command("podman", runArgs...).CombinedOutput()
+	out, err := podmanCmd(runArgs...).CombinedOutput()
 	if err != nil {
 		log.add("ERROR: podman run failed: %v\n%s", err, strings.TrimSpace(string(out)))
 		markFailed(db, depID, svcID, log.text())
@@ -234,7 +234,7 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 	// Tag the freshly built image as the stable snapshot so it can be used as
 	// a fallback if a future deployment build fails.
 	if !usingFallback {
-		if tagErr := exec.Command("podman", "tag", imageName, stableImage).Run(); tagErr != nil {
+		if tagErr := podmanCmd("tag", imageName, stableImage).Run(); tagErr != nil {
 			log.add("[podman] warning: could not tag stable image: %v", tagErr)
 		} else {
 			log.add("[podman] saved %s as stable snapshot", stableImage)
@@ -374,7 +374,7 @@ func runShell(dir, sshKeyFile, command string, log *logBuf) error {
 }
 
 func containerExists(name string) bool {
-	out, err := exec.Command("podman", "ps", "-a", "--filter", "name=^"+name+"$", "--format", "{{.Names}}").Output()
+	out, err := podmanCmd("ps", "-a", "--filter", "name=^"+name+"$", "--format", "{{.Names}}").Output()
 	if err != nil {
 		return false
 	}
@@ -432,99 +432,46 @@ func generateDockerfile(framework, buildCmd, startCmd string, appPort int) strin
 	return sb.String()
 }
 
-// podmanBuild builds a container image with podman.
-// It sets BUILDAH_ISOLATION=chroot to avoid user-namespace (newuidmap) errors
-// that occur in restricted environments. Each attempt uses an isolated storage
-// root so a failed overlay attempt never leaves a stale driver database that
-// would cause a "database mismatch" error on the VFS retry.
+// podmanCmd creates a rootful podman command executed via `sudo -n`.
+//
+// Rootless podman (running as the featherdeploy service account) requires the
+// kernel to allow unprivileged user-namespace creation and calls newuidmap,
+// both of which are disabled or broken on many VPS / VM kernels. Running podman
+// as root via sudo sidesteps every user-namespace restriction. Images are
+// stored in /var/lib/containers (root's persistent storage) and are visible to
+// all subsequent sudo podman calls.
+//
+// Prerequisite: build.sh installs the sudoers rule
+//   featherdeploy ALL=(root) NOPASSWD: /usr/bin/podman
+func podmanCmd(args ...string) *exec.Cmd {
+	// sudo -n: non-interactive mode — fail immediately if a password would be
+	// prompted (should never happen with NOPASSWD in place).
+	full := make([]string, 0, 2+len(args))
+	full = append(full, "-n", "podman")
+	full = append(full, args...)
+	return exec.Command("sudo", full...)
+}
+
+// podmanBuild builds a container image using rootful podman (via sudo).
 func podmanBuild(dir string, log *logBuf, imageName string) error {
-	// Ensure XDG_RUNTIME_DIR exists — podman errors out if this path is absent.
-	os.MkdirAll("/tmp/podman-run", 0700) //nolint
-
-	// Attempt 1: overlay (fastest). Fresh isolated root to avoid any pre-existing DB.
-	root1 := fmt.Sprintf("/tmp/fd-st-%d-a", time.Now().UnixNano())
-	os.MkdirAll(root1, 0700) //nolint
-	defer os.RemoveAll(root1)
-
-	out, err := podmanBuildAttempt(dir, imageName, root1)
+	cmd := podmanCmd("build", "-t", imageName, ".")
+	cmd.Dir = dir
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+	err := cmd.Run()
+	out := strings.TrimSpace(buf.String())
 	for _, line := range strings.Split(out, "\n") {
 		if t := strings.TrimSpace(line); t != "" {
 			log.add("  %s", t)
 		}
 	}
-	if err == nil {
-		return nil
-	}
-	// Detect namespace / user-mapping errors and retry with the slower but
-	// always-available VFS storage driver.
-	lower := strings.ToLower(out)
-	if strings.Contains(lower, "newuidmap") || strings.Contains(lower, "uid_map") ||
-		strings.Contains(lower, "operation not permitted") || strings.Contains(lower, "namespace") {
-		log.add("[podman] namespace error detected — retrying with --storage-driver=vfs")
-		// Use a second fresh root so the failed overlay DB from attempt 1 can
-		// never trigger a "database graph driver mismatch" error.
-		root2 := fmt.Sprintf("/tmp/fd-st-%d-b", time.Now().UnixNano())
-		os.MkdirAll(root2, 0700) //nolint
-		defer os.RemoveAll(root2)
-		out2, err2 := podmanBuildAttempt(dir, imageName, root2, "--storage-driver=vfs")
-		for _, line := range strings.Split(out2, "\n") {
-			if t := strings.TrimSpace(line); t != "" {
-				log.add("  %s", t)
-			}
-		}
-		return err2
-	}
 	return err
 }
 
-// podmanBuildAttempt runs `podman build` with BUILDAH_ISOLATION=chroot using
-// the given isolated storage root. extraArgs are inserted before the context
-// path. Returns (combined output, error).
-func podmanBuildAttempt(dir, imageName, storageRoot string, extraArgs ...string) (string, error) {
-	args := []string{"build", "--root", storageRoot, "-t", imageName}
-	args = append(args, extraArgs...)
-	args = append(args, ".")
-	cmd := exec.Command("podman", args...)
-	cmd.Dir = dir
-	// Inherit environment, stripping variables that reference paths which may
-	// not exist for service accounts (e.g. /home/featherdeploy).
-	strip := map[string]bool{
-		"HOME=": true, "XDG_RUNTIME_DIR=": true,
-		"BUILDAH_ISOLATION=": true, "CONTAINERS_CONF=": true,
-		"REGISTRIES_CONFIG_PATH=": true,
-	}
-	raw := os.Environ()
-	env := make([]string, 0, len(raw)+6)
-	for _, e := range raw {
-		skip := false
-		for prefix := range strip {
-			if strings.HasPrefix(e, prefix) {
-				skip = true
-				break
-			}
-		}
-		if !skip {
-			env = append(env, e)
-		}
-	}
-	// Use /tmp as home so podman/buildah can write its storage and config files
-	// even when the process runs as a service account with no home directory.
-	env = append(env,
-		"HOME=/tmp",
-		"XDG_RUNTIME_DIR=/tmp/podman-run",
-		"BUILDAH_ISOLATION=chroot",
-	)
-	cmd.Env = env
-	var buf bytes.Buffer
-	cmd.Stdout = &buf
-	cmd.Stderr = &buf
-	err := cmd.Run()
-	return strings.TrimSpace(buf.String()), err
-}
-
-// podmanImageExists returns true if the named image exists in podman's local store.
+// podmanImageExists returns true if the named image exists in the rootful podman store.
 func podmanImageExists(image string) bool {
-	return exec.Command("podman", "image", "exists", image).Run() == nil
+	return podmanCmd("image", "exists", image).Run() == nil
 }
 
 func pickBaseImage(framework string) string {

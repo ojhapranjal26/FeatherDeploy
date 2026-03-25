@@ -323,7 +323,7 @@ ensure_rqlite_running() {
 install_deps_apt() {
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -y
-  apt-get install -y curl git gcc make ca-certificates build-essential
+  apt-get install -y curl git gcc make ca-certificates build-essential sudo uidmap
   if ! command -v podman >/dev/null 2>&1; then
     echo "==> Installing Podman..."
     apt-get install -y podman 2>/dev/null || apt-get install -y podman-docker 2>/dev/null || echo "  WARNING: podman not in apt"
@@ -493,6 +493,35 @@ if command -v podman >/dev/null 2>&1; then
   su -s /bin/sh -c "podman system migrate" "${SVC_USER}" 2>/dev/null || true
   echo "  Podman storage migrated for ${SVC_USER}"
 fi
+
+# -- 8c. Enable unprivileged user namespaces so rootless tools can work
+echo "==> Enabling unprivileged user namespaces..."
+mkdir -p /etc/sysctl.d
+if [ -f /proc/sys/kernel/unprivileged_userns_clone ]; then
+  sysctl -w kernel.unprivileged_userns_clone=1 2>/dev/null || true
+  echo 'kernel.unprivileged_userns_clone=1' > /etc/sysctl.d/99-featherdeploy.conf
+  echo "  kernel.unprivileged_userns_clone=1"
+fi
+# Ensure at least 3000 user namespaces are available (default may be 0 on some kernels)
+if [ -f /proc/sys/user/max_user_namespaces ]; then
+  cur=$(cat /proc/sys/user/max_user_namespaces)
+  if [ "$cur" -lt 3000 ] 2>/dev/null; then
+    sysctl -w user.max_user_namespaces=3000 2>/dev/null || true
+    echo 'user.max_user_namespaces=3000' >> /etc/sysctl.d/99-featherdeploy.conf
+    echo "  user.max_user_namespaces=3000"
+  fi
+fi
+
+# -- 8d. sudo rule: allow featherdeploy to run rootful podman without a password
+# This gives the service account access to rootful podman, which avoids all
+# rootless user-namespace requirements (newuidmap failures, kernel restrictions).
+echo "==> Installing sudo rule for featherdeploy → podman..."
+cat > /etc/sudoers.d/featherdeploy-podman << 'SUDOEOF'
+Defaults!/usr/bin/podman !requiretty
+featherdeploy ALL=(root) NOPASSWD: /usr/bin/podman
+SUDOEOF
+chmod 440 /etc/sudoers.d/featherdeploy-podman
+echo "  /etc/sudoers.d/featherdeploy-podman installed"
 
 # -- 9. Set up data directory with correct ownership, then install + start rqlite
 echo "==> Setting up data directory..."

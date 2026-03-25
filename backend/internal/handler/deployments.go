@@ -172,7 +172,14 @@ func (h *DeploymentHandler) Logs(w http.ResponseWriter, r *http.Request) {
 		// Emit any new lines
 		if deployLog != "" {
 			allLines := strings.Split(deployLog, "\n")
-			for i := sentLines; i < len(allLines); i++ {
+			// sentLines may be -1 (the "waiting" sentinel) — clamp to 0 so we
+			// don't attempt a negative slice index, which would panic and drop
+			// the SSE connection, forcing the user to reload the page.
+			start := sentLines
+			if start < 0 {
+				start = 0
+			}
+			for i := start; i < len(allLines); i++ {
 				if allLines[i] != "" {
 					sendLine(allLines[i])
 				}
