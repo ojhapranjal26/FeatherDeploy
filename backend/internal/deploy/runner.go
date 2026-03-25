@@ -188,7 +188,7 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 
 	// ── 6. Ensure Dockerfile ──────────────────────────────────────────────────
 	if !repoHasDockerfile {
-		df := generateDockerfile(framework, buildCmd, startCmd, appPort)
+		df := generateDockerfile(workDir, framework, buildCmd, startCmd, appPort)
 		if writeErr := os.WriteFile(dockerfilePath, []byte(df), 0644); writeErr != nil {
 			log.add("ERROR: write generated Dockerfile: %v", writeErr)
 			markFailed(db, depID, svcID, log.text())
@@ -449,7 +449,7 @@ func maskURL(u string) string {
 // It handles Python (pip/poetry/pipenv) and Node (npm/yarn/pnpm) specifically
 // so the right runtime image is used and dependencies are installed correctly
 // inside the container rather than on the host server.
-func generateDockerfile(framework, buildCmd, startCmd string, appPort int) string {
+func generateDockerfile(workDir, framework, buildCmd, startCmd string, appPort int) string {
 	fw := strings.ToLower(strings.TrimSpace(framework))
 	baseImage := pickBaseImage(fw)
 	if appPort <= 0 {
@@ -473,6 +473,15 @@ func generateDockerfile(framework, buildCmd, startCmd string, appPort int) strin
 
 	switch {
 	case isPython:
+		// Inject apt-get install for any C-extension build dependencies that
+		// the detected requirements need (e.g. mysqlclient → pkg-config +
+		// default-libmysqlclient-dev, psycopg2 → libpq-dev, lxml → libxml2-dev…).
+		// python:3.12-slim ships no compiler or pkg-config by default.
+		if aptPkgs := detectPythonAptDeps(workDir); len(aptPkgs) > 0 {
+			sb.WriteString("RUN apt-get update && apt-get install -y --no-install-recommends " +
+				strings.Join(aptPkgs, " ") +
+				" && rm -rf /var/lib/apt/lists/*\n")
+		}
 		// Use the user-configured build command when it is already a pip/poetry/
 		// pipenv invocation; otherwise auto-inject a requirements.txt install.
 		pipInstallCmd := buildCmd
@@ -505,6 +514,90 @@ func generateDockerfile(framework, buildCmd, startCmd string, appPort int) strin
 	sb.WriteString(fmt.Sprintf("EXPOSE %d\n", appPort))
 	sb.WriteString(`CMD ["/bin/sh", "-c", "` + strings.ReplaceAll(startCmd, `"`, `\"`) + `"]` + "\n")
 	return sb.String()
+}
+
+// detectPythonAptDeps scans the repo's dependency files and returns the
+// apt packages required to build any C-extension wheels found there.
+// python:3.12-slim ships no compiler, pkg-config, or dev headers.
+func detectPythonAptDeps(workDir string) []string {
+	var content string
+	for _, f := range []string{"requirements.txt", "requirements-dev.txt", "Pipfile", "pyproject.toml", "setup.py", "setup.cfg"} {
+		if data, err := os.ReadFile(filepath.Join(workDir, f)); err == nil {
+			content += strings.ToLower(string(data)) + "\n"
+		}
+	}
+	if content == "" {
+		return nil
+	}
+
+	var pkgs []string
+	seen := map[string]bool{}
+	add := func(p ...string) {
+		for _, pkg := range p {
+			if !seen[pkg] {
+				seen[pkg] = true
+				pkgs = append(pkgs, pkg)
+			}
+		}
+	}
+
+	needsBuildTools := false
+
+	// MySQL client (mysqlclient, flask-mysqldb, mysql-connector-python)
+	if strings.Contains(content, "mysqlclient") || strings.Contains(content, "flask-mysqldb") ||
+		strings.Contains(content, "mysql-connector") || strings.Contains(content, "pymysql") {
+		add("pkg-config", "default-libmysqlclient-dev")
+		needsBuildTools = true
+	}
+
+	// PostgreSQL (psycopg2 source build; psycopg2-binary is a pre-built wheel)
+	if strings.Contains(content, "psycopg2") && !strings.Contains(content, "psycopg2-binary") {
+		add("libpq-dev")
+		needsBuildTools = true
+	}
+
+	// XML / HTML parsing
+	if strings.Contains(content, "lxml") {
+		add("libxml2-dev", "libxslt1-dev")
+		needsBuildTools = true
+	}
+
+	// Cryptography, CFFI, PyOpenSSL
+	if strings.Contains(content, "cryptography") || strings.Contains(content, "pyopenssl") ||
+		strings.Contains(content, "cffi") {
+		add("libssl-dev", "libffi-dev")
+		needsBuildTools = true
+	}
+
+	// Image processing
+	if strings.Contains(content, "pillow") || strings.Contains(content, "\"pil\"") {
+		add("libjpeg-dev", "zlib1g-dev")
+		needsBuildTools = true
+	}
+
+	// uWSGI
+	if strings.Contains(content, "uwsgi") {
+		needsBuildTools = true
+	}
+
+	// Numpy / scipy with non-wheel source builds (rare but possible)
+	if strings.Contains(content, "scipy") {
+		add("gfortran", "libopenblas-dev")
+		needsBuildTools = true
+	}
+
+	// Any C extension that wasn't already covered needs gcc at minimum
+	if needsBuildTools {
+		// Prepend gcc so it appears first in the apt install list
+		final := []string{"gcc"}
+		for _, p := range pkgs {
+			if p != "gcc" {
+				final = append(final, p)
+			}
+		}
+		return final
+	}
+	return nil
 }
 
 // looksLikePipInstall reports whether cmd is a Python dependency-install
