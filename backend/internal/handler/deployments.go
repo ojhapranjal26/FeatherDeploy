@@ -148,9 +148,16 @@ func (h *DeploymentHandler) Logs(w http.ResponseWriter, r *http.Request) {
 
 	// Stream log lines by polling deploy_log column until deployment finishes.
 	// Lines already sent are tracked by index so we only emit new lines.
+	// A keep-alive SSE comment (": ping") is sent on every tick even when
+	// there are no new log lines — this prevents Caddy/nginx from closing
+	// the connection during long-running steps (e.g. podman stop 10s wait).
 	var sentLines int
 	sendLine := func(line string) {
 		fmt.Fprintf(w, "data: %s\n\n", line)
+		flusher.Flush()
+	}
+	sendPing := func() {
+		fmt.Fprint(w, ": ping\n\n")
 		flusher.Flush()
 	}
 
@@ -175,23 +182,28 @@ func (h *DeploymentHandler) Logs(w http.ResponseWriter, r *http.Request) {
 		// Emit any new lines
 		if deployLog != "" {
 			allLines := strings.Split(deployLog, "\n")
-			// sentLines may be -1 (the "waiting" sentinel) — clamp to 0 so we
-			// don't attempt a negative slice index, which would panic and drop
-			// the SSE connection, forcing the user to reload the page.
 			start := sentLines
 			if start < 0 {
 				start = 0
 			}
+			newLinesSent := 0
 			for i := start; i < len(allLines); i++ {
 				if allLines[i] != "" {
 					sendLine(allLines[i])
+					newLinesSent++
 				}
 			}
 			sentLines = len(allLines)
+			// Send keep-alive if no new content was emitted this tick
+			if newLinesSent == 0 {
+				sendPing()
+			}
 		} else if sentLines == 0 {
 			// Nothing yet — show a waiting message once
 			sendLine("Waiting for deployment to start...")
 			sentLines = -1 // sentinel: waiting message sent
+		} else {
+			sendPing()
 		}
 
 		// Done when not still running

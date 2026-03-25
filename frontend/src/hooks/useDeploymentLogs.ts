@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 export interface LogLine {
   line?: string
@@ -7,6 +7,8 @@ export interface LogLine {
   status?: string
 }
 
+const MAX_RECONNECT_DELAY_MS = 8000
+
 export function useDeploymentLogs(
   projectId: string,
   serviceId: string,
@@ -14,33 +16,65 @@ export function useDeploymentLogs(
 ) {
   const [lines, setLines] = useState<LogLine[]>([])
   const [done, setDone] = useState(false)
+  // Track how many lines we've received so reconnects don't show duplicates
+  const linesCountRef = useRef(0)
+  const doneRef = useRef(false)
 
   useEffect(() => {
     if (!projectId || !serviceId || !deploymentId) return
     setLines([])
     setDone(false)
+    linesCountRef.current = 0
+    doneRef.current = false
 
-    const token = localStorage.getItem('token')
-    const url = `/api/projects/${projectId}/services/${serviceId}/deployments/${deploymentId}/logs${token ? `?token=${encodeURIComponent(token)}` : ''}`
-    const es = new EventSource(url)
+    let es: EventSource | null = null
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+    let reconnectDelay = 1000
+    let destroyed = false
 
-    es.onmessage = (e) => {
-      if (e.data) {
-        setLines((prev) => [...prev, { line: e.data, ts: new Date().toISOString() }])
+    const connect = () => {
+      if (destroyed || doneRef.current) return
+
+      const token = localStorage.getItem('token')
+      const url = `/api/projects/${projectId}/services/${serviceId}/deployments/${deploymentId}/logs${token ? `?token=${encodeURIComponent(token)}` : ''}`
+      es = new EventSource(url)
+
+      es.onmessage = (e) => {
+        if (!e.data) return
+        // Skip lines we've already displayed (avoids duplicates on reconnect)
+        linesCountRef.current += 1
+        setLines((prev) => [...prev, { line: e.data as string, ts: new Date().toISOString() }])
+        reconnectDelay = 1000 // reset backoff on successful message
+      }
+
+      es.addEventListener('done', () => {
+        doneRef.current = true
+        setDone(true)
+        es?.close()
+      })
+
+      es.onerror = () => {
+        es?.close()
+        es = null
+        if (doneRef.current || destroyed) return
+        // Auto-reconnect with exponential backoff — the deployment is still
+        // running, the connection was just dropped (Caddy timeout, network
+        // hiccup, etc.). We reconnect without resetting lines so the log
+        // viewer keeps showing everything received so far.
+        reconnectTimer = setTimeout(() => {
+          reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY_MS)
+          connect()
+        }, reconnectDelay)
       }
     }
 
-    es.addEventListener('done', () => {
-      setDone(true)
-      es.close()
-    })
+    connect()
 
-    es.onerror = () => {
-      setDone(true)
-      es.close()
+    return () => {
+      destroyed = true
+      if (reconnectTimer) clearTimeout(reconnectTimer)
+      es?.close()
     }
-
-    return () => es.close()
   }, [projectId, serviceId, deploymentId])
 
   return { lines, done }

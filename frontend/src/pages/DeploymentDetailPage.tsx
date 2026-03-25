@@ -110,11 +110,11 @@ export function DeploymentDetailPage() {
   const isFailed = deployment?.status === 'failed'
 
   return (
-    <div>
+    <div className="space-y-4 pb-8">
       <Button
         variant="ghost"
         size="sm"
-        className="mb-4 w-fit gap-1.5 text-muted-foreground"
+        className="gap-1.5 text-muted-foreground"
         onClick={() => navigate(`/projects/${projectId}/services/${serviceId}`)}
       >
         <ChevronLeft className="h-3.5 w-3.5" /> Back to service
@@ -127,48 +127,46 @@ export function DeploymentDetailPage() {
         </div>
       ) : (
         <>
-          {/* Header */}
-          <div className="mb-3 flex flex-wrap items-center gap-3">
-            <DeploymentStatusBadge status={deployment!.status} />
-            {deployment?.commit_sha && (
-              <div className="flex items-center gap-1.5 font-mono text-xs text-muted-foreground">
-                <GitCommit className="h-3.5 w-3.5" />
-                {deployment.commit_sha.slice(0, 7)}
+          {/* Header card */}
+          <div className="rounded-xl border bg-card p-4">
+            <div className="flex flex-wrap items-center gap-3 mb-3">
+              <DeploymentStatusBadge status={deployment!.status} />
+              {deployment?.commit_sha && (
+                <div className="flex items-center gap-1.5 font-mono text-xs text-muted-foreground bg-muted px-2 py-1 rounded">
+                  <GitCommit className="h-3 w-3" />
+                  {deployment.commit_sha.slice(0, 7)}
+                </div>
+              )}
+              <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                <Clock className="h-3.5 w-3.5" />
+                {formatDate(deployment?.started_at ?? deployment?.created_at)}
+              </div>
+              <div className="ml-auto text-xs font-medium text-muted-foreground">
+                {formatDuration(deployment?.started_at, deployment?.finished_at)}
+              </div>
+            </div>
+
+            {/* Pipeline steps */}
+            <DeploymentSteps lines={lines} done={done && !isFailed} failed={isFailed} />
+
+            {deployment?.error_message && (
+              <div className="mt-3 rounded-lg border border-destructive/30 bg-destructive/8 px-3 py-2.5 text-sm text-destructive">
+                {deployment.error_message}
               </div>
             )}
-            <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-              <Clock className="h-3.5 w-3.5" />
-              {formatDate(deployment?.started_at ?? deployment?.created_at)}
-            </div>
-            <div className="ml-auto text-xs text-muted-foreground">
-              Duration: {formatDuration(deployment?.started_at, deployment?.finished_at)}
-            </div>
+
+            {isActive && lines.length === 0 && (
+              <div className="mt-2 flex items-center gap-2 text-xs text-muted-foreground">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                Connecting to deployment log stream…
+              </div>
+            )}
           </div>
-
-          {/* Animated pipeline steps */}
-          <DeploymentSteps lines={lines} done={done && !isFailed} failed={isFailed} />
-
-          {deployment?.error_message && (
-            <div className="mb-3 rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
-              {deployment.error_message}
-            </div>
-          )}
-
-          {isActive && lines.length === 0 && (
-            <div className="mb-3 flex items-center gap-2 text-xs text-muted-foreground animate-pulse">
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              Waiting for deployment to start…
-            </div>
-          )}
         </>
       )}
 
-      {/* Log viewer — fixed height with internal scrolling */}
-      <LogViewer
-        lines={lines}
-        done={done}
-        className="h-[520px]"
-      />
+      {/* Log viewer */}
+      <LogViewer lines={lines} done={done} className="h-[520px]" />
     </div>
   )
 }

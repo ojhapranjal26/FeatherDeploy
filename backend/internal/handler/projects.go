@@ -167,6 +167,15 @@ func (h *ProjectHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, errMap("invalid projectID"))
 		return
 	}
+	// Block deletion until all services are removed (data safety + container cleanup)
+	var svcCount int
+	h.db.QueryRowContext(r.Context(),
+		`SELECT COUNT(*) FROM services WHERE project_id=?`, projectID).Scan(&svcCount) //nolint
+	if svcCount > 0 {
+		writeJSON(w, http.StatusConflict, errMap(
+			"cannot delete project: delete all services first to ensure containers are cleaned up"))
+		return
+	}
 	res, err := h.db.ExecContext(r.Context(), `DELETE FROM projects WHERE id=?`, projectID)
 	if err != nil {
 		slog.Error("delete project", "err", err)
@@ -177,6 +186,8 @@ func (h *ProjectHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, errMap("project not found"))
 		return
 	}
+	// Clean up project members
+	h.db.ExecContext(r.Context(), `DELETE FROM project_members WHERE project_id=?`, projectID) //nolint
 	w.WriteHeader(http.StatusNoContent)
 }
 

@@ -7,6 +7,7 @@ import { z } from 'zod'
 import {
   Plus, ChevronLeft, Rocket, Settings2, Trash2,
   ExternalLink, GitBranch, Terminal, GitFork, Package, FileCode2, Info,
+  Globe, AlertTriangle,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { projectsApi } from '@/api/projects'
@@ -33,6 +34,7 @@ import {
   DialogHeader,
   DialogTitle,
   DialogDescription,
+  DialogFooter,
 } from '@/components/ui/dialog'
 import {
   DropdownMenu,
@@ -43,7 +45,7 @@ import {
 } from '@/components/ui/dropdown-menu'
 
 const serviceSchema = z.object({
-  name:        z.string().min(2).max(63).regex(/^[a-z0-9-]+$/, 'Lowercase, numbers, hyphens'),
+  name:        z.string().min(2).max(63).regex(/^[a-z0-9-]+$/, 'Lowercase, numbers, hyphens only'),
   deploy_type: z.enum(['git', 'artifact', 'dockerfile']),
   repo_url:    z.string().refine(
     v => !v || /^(https?:\/\/|git@|git:\/\/)/.test(v),
@@ -51,13 +53,13 @@ const serviceSchema = z.object({
   ).optional().or(z.literal('')),
   repo_branch: z.string().optional(),
   app_port:    z.number().int().min(1).max(65535).optional(),
-  domain:      z.string().max(253).optional().or(z.literal('')),
 })
 type ServiceFormData = z.infer<typeof serviceSchema>
 
 function ServiceCard({ service, projectId }: { service: Service; projectId: string }) {
   const navigate = useNavigate()
   const qc = useQueryClient()
+  const [confirmDelete, setConfirmDelete] = useState(false)
 
   const deployMutation = useMutation({
     mutationFn: () =>
@@ -69,9 +71,7 @@ function ServiceCard({ service, projectId }: { service: Service; projectId: stri
     onSuccess: (data) => {
       toast.success('Deployment triggered.')
       qc.invalidateQueries({ queryKey: ['services', projectId] })
-      navigate(
-        `/projects/${projectId}/services/${service.id}/deployments/${data.deployment_id}`
-      )
+      navigate(`/projects/${projectId}/services/${service.id}/deployments/${data.deployment_id}`)
     },
     onError: (err: unknown) => toast.error((err as any)?.response?.data?.error ?? 'Failed to trigger deployment.'),
   })
@@ -80,106 +80,157 @@ function ServiceCard({ service, projectId }: { service: Service; projectId: stri
     mutationFn: () => servicesApi.delete(projectId, service.id),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['services', projectId] })
-      toast.success('Service deleted.')
+      toast.success('Service deleted. Container cleanup running in background.')
     },
     onError: (err: unknown) => toast.error((err as any)?.response?.data?.error ?? 'Failed to delete service.'),
   })
 
+  const isDeploying = service.status === 'deploying'
+
   return (
-    <Card>
-      <CardHeader className="pb-3">
-        <div className="flex items-start justify-between gap-2">
-          <div className="min-w-0">
-            <div className="flex items-center gap-2">
-              <CardTitle className="text-base truncate">{service.name}</CardTitle>
-              <ServiceStatusBadge status={service.status} />
+    <>
+      <Card className="group relative flex flex-col overflow-hidden transition-shadow hover:shadow-md">
+        {/* Status strip */}
+        <div className={cn(
+          'absolute inset-x-0 top-0 h-0.5',
+          service.status === 'running'   ? 'bg-emerald-500' :
+          service.status === 'deploying' ? 'bg-amber-400 animate-pulse' :
+          service.status === 'error'     ? 'bg-red-500' :
+          'bg-border'
+        )} />
+        <CardHeader className="pb-2 pt-4">
+          <div className="flex items-start justify-between gap-2">
+            <div className="min-w-0 flex-1">
+              <button
+                className="text-left w-full"
+                onClick={() => navigate(`/projects/${projectId}/services/${service.id}`)}
+              >
+                <CardTitle className="text-sm font-semibold truncate hover:text-primary transition-colors">
+                  {service.name}
+                </CardTitle>
+              </button>
+              <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                <ServiceStatusBadge status={service.status} />
+                {service.framework && (
+                  <Badge variant="secondary" className="text-[10px] px-1.5 py-0">
+                    {service.framework}
+                  </Badge>
+                )}
+                <Badge variant="outline" className="text-[10px] px-1.5 py-0">
+                  {service.deploy_type}
+                </Badge>
+              </div>
             </div>
-            {service.framework && (
-              <Badge variant="secondary" className="mt-1 text-xs">
-                {service.framework}
-              </Badge>
-            )}
+            <DropdownMenu>
+              <DropdownMenuTrigger render={<Button variant="ghost" size="icon" className="h-7 w-7 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity" />}>
+                <Settings2 className="h-3.5 w-3.5" />
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem onClick={() => navigate(`/projects/${projectId}/services/${service.id}`)}>
+                  <Terminal className="mr-2 h-3.5 w-3.5" /> View service
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => navigate(`/projects/${projectId}/services/${service.id}/env`)}>
+                  <Settings2 className="mr-2 h-3.5 w-3.5" /> Environment
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => navigate(`/projects/${projectId}/services/${service.id}/domains`)}>
+                  <Globe className="mr-2 h-3.5 w-3.5" /> Domains
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  className="text-destructive focus:text-destructive"
+                  onClick={() => setConfirmDelete(true)}
+                >
+                  <Trash2 className="mr-2 h-3.5 w-3.5" /> Delete service
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
-          <DropdownMenu>
-            <DropdownMenuTrigger render={<Button variant="ghost" size="icon" className="h-6 w-6 shrink-0" />}>
-              <Settings2 className="h-3.5 w-3.5" />
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-              <DropdownMenuItem
-                onClick={() =>
-                  navigate(`/projects/${projectId}/services/${service.id}`)
-                }
-              >
-                <Terminal className="mr-2 h-3.5 w-3.5" /> View service
-              </DropdownMenuItem>
-              <DropdownMenuItem
-                onClick={() =>
-                  navigate(`/projects/${projectId}/services/${service.id}/env`)
-                }
-              >
-                <Settings2 className="mr-2 h-3.5 w-3.5" /> Environment
-              </DropdownMenuItem>
-              <DropdownMenuItem
-                onClick={() =>
-                  navigate(`/projects/${projectId}/services/${service.id}/domains`)
-                }
-              >
-                <ExternalLink className="mr-2 h-3.5 w-3.5" /> Domains
-              </DropdownMenuItem>
-              <DropdownMenuSeparator />
-              <DropdownMenuItem
-                className="text-destructive"
-                onClick={() => {
-                  if (confirm(`Delete service "${service.name}"?`)) {
-                    deleteMutation.mutate()
-                  }
-                }}
-              >
-                <Trash2 className="mr-2 h-3.5 w-3.5" /> Delete
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-        </div>
-      </CardHeader>
-      <CardContent className="space-y-3">
-        {service.repo_url && (
-          <div className="flex items-center gap-1.5 text-xs text-muted-foreground truncate">
-            <GitBranch className="h-3.5 w-3.5 shrink-0" />
-            <span className="truncate">{service.repo_url}</span>
-            <span className="shrink-0">@{service.repo_branch}</span>
+        </CardHeader>
+
+        <CardContent className="flex flex-col gap-3 flex-1 pb-4">
+          {service.repo_url && (
+            <div className="flex items-center gap-1.5 text-xs text-muted-foreground overflow-hidden">
+              <GitBranch className="h-3 w-3 shrink-0" />
+              <span className="truncate font-mono text-[11px]">{repoShort(service.repo_url)}</span>
+              {service.repo_branch && (
+                <span className="shrink-0 text-muted-foreground">@ {service.repo_branch}</span>
+              )}
+            </div>
+          )}
+
+          {service.host_port ? (
+            <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <ExternalLink className="h-3 w-3 shrink-0" />
+              <span>Port <span className="font-mono text-foreground">{service.host_port}</span></span>
+            </div>
+          ) : null}
+
+          <div className="mt-auto flex gap-2">
+            <Button
+              size="sm"
+              className="flex-1 gap-1.5 text-xs h-8"
+              onClick={() => deployMutation.mutate()}
+              disabled={deployMutation.isPending || isDeploying}
+            >
+              {isDeploying ? (
+                <span className="flex items-center gap-1.5">
+                  <span className="h-3 w-3 rounded-full border-2 border-current border-t-transparent animate-spin" />
+                  Deploying…
+                </span>
+              ) : (
+                <><Rocket className="h-3 w-3" /> Deploy</>
+              )}
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              className="text-xs h-8 px-3"
+              onClick={() => navigate(`/projects/${projectId}/services/${service.id}/deployments`)}
+            >
+              History
+            </Button>
           </div>
-        )}
-        {service.host_port && (
-          <div className="text-xs text-muted-foreground">
-            Port:{' '}
-            <span className="font-mono text-foreground">{service.host_port}</span>
-          </div>
-        )}
-        <div className="flex gap-2">
-          <Button
-            size="sm"
-            className="flex-1 gap-1.5"
-            onClick={() => deployMutation.mutate()}
-            disabled={deployMutation.isPending || service.status === 'deploying'}
-          >
-            <Rocket className="h-3.5 w-3.5" />
-            Deploy
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() =>
-              navigate(
-                `/projects/${projectId}/services/${service.id}/deployments`
-              )
-            }
-          >
-            History
-          </Button>
-        </div>
-      </CardContent>
-    </Card>
+        </CardContent>
+      </Card>
+
+      {/* Confirm delete dialog */}
+      <Dialog open={confirmDelete} onOpenChange={setConfirmDelete}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <AlertTriangle className="h-4 w-4 text-destructive" />
+              Delete service
+            </DialogTitle>
+            <DialogDescription>
+              This will permanently delete <strong>{service.name}</strong>, stop its container,
+              remove all images, domains, deployments and environment variables.
+              This cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-2">
+            <Button variant="ghost" size="sm" onClick={() => setConfirmDelete(false)}>Cancel</Button>
+            <Button
+              variant="destructive" size="sm"
+              disabled={deleteMutation.isPending}
+              onClick={() => { setConfirmDelete(false); deleteMutation.mutate() }}
+            >
+              {deleteMutation.isPending ? 'Deleting…' : 'Delete service'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
   )
+}
+
+function repoShort(url: string) {
+  try {
+    // https://github.com/user/repo.git → user/repo
+    const m = url.match(/[:/]([^:/]+\/[^/]+?)(\.git)?$/)
+    return m ? m[1] : url
+  } catch {
+    return url
+  }
 }
 
 export function ProjectPage() {
@@ -187,6 +238,7 @@ export function ProjectPage() {
   const navigate = useNavigate()
   const qc = useQueryClient()
   const [newServiceOpen, setNewServiceOpen] = useState(false)
+  const [confirmDeleteProject, setConfirmDeleteProject] = useState(false)
 
   const { data: project, isLoading: projLoading } = useQuery({
     queryKey: ['project', projectId],
@@ -220,7 +272,6 @@ export function ProjectPage() {
       servicesApi.create(projectId!, {
         ...data,
         repo_url: data.repo_url || undefined,
-        domain: data.domain || undefined,
       }),
     onSuccess: (service) => {
       qc.invalidateQueries({ queryKey: ['services', projectId] })
@@ -238,86 +289,80 @@ export function ProjectPage() {
       navigate('/dashboard')
       toast.success('Project deleted.')
     },
-    onError: (err: unknown) => toast.error((err as any)?.response?.data?.error ?? 'Failed to delete project.'),
+    onError: (err: unknown) => {
+      setConfirmDeleteProject(false)
+      toast.error((err as any)?.response?.data?.error ?? 'Failed to delete project.')
+    },
   })
 
+  const hasServices = (services?.length ?? 0) > 0
+
   return (
-    <div className="space-y-6">
-      {/* Back */}
+    <div className="space-y-6 pb-8">
       <Button
         variant="ghost"
         size="sm"
-        className="mb-4 gap-1.5 text-muted-foreground"
+        className="gap-1.5 text-muted-foreground"
         onClick={() => navigate('/dashboard')}
       >
         <ChevronLeft className="h-3.5 w-3.5" /> All projects
       </Button>
 
-      {/* Project header */}
       {projLoading ? (
-        <Skeleton className="h-8 w-48 mb-6" />
+        <div className="space-y-2">
+          <Skeleton className="h-8 w-48" />
+          <Skeleton className="h-4 w-72" />
+        </div>
       ) : (
-        <div className="mb-6 flex items-center justify-between">
+        <div className="flex items-start justify-between gap-4 flex-wrap">
           <div>
-            <h1 className="text-2xl font-semibold">{project?.name}</h1>
+            <h1 className="text-2xl font-bold tracking-tight">{project?.name}</h1>
             {project?.description && (
-              <p className="text-sm text-muted-foreground">{project.description}</p>
+              <p className="mt-1 text-sm text-muted-foreground">{project.description}</p>
             )}
+            <p className="mt-1 text-xs text-muted-foreground">
+              {services?.length ?? 0} service{(services?.length ?? 0) !== 1 ? 's' : ''}
+            </p>
           </div>
           <div className="flex gap-2">
             <Button
               size="sm"
               variant="outline"
-              className="gap-1.5"
-              onClick={() => {
-                if (confirm(`Delete project "${project?.name}" and all its services?`)) {
-                  deleteProjectMutation.mutate()
-                }
-              }}
+              className="gap-1.5 text-destructive hover:text-destructive hover:bg-destructive/10"
+              onClick={() => setConfirmDeleteProject(true)}
             >
-              <Trash2 className="h-3.5 w-3.5" />
-              Delete project
+              <Trash2 className="h-3.5 w-3.5" /> Delete project
             </Button>
-            <Button
-              size="sm"
-              className="gap-1.5"
-              onClick={() => setNewServiceOpen(true)}
-            >
+            <Button size="sm" className="gap-1.5" onClick={() => setNewServiceOpen(true)}>
               <Plus className="h-4 w-4" /> New service
             </Button>
           </div>
         </div>
       )}
 
-      <Separator className="mb-6" />
+      <Separator />
 
       {/* Services grid */}
       {svcLoading ? (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {[...Array(3)].map((_, i) => (
-            <Card key={i}>
-              <CardHeader>
-                <Skeleton className="h-4 w-28" />
-              </CardHeader>
-              <CardContent>
-                <Skeleton className="h-8 w-full" />
-              </CardContent>
+            <Card key={i} className="h-36">
+              <CardHeader><Skeleton className="h-4 w-24" /></CardHeader>
+              <CardContent><Skeleton className="h-8 w-full" /></CardContent>
             </Card>
           ))}
         </div>
       ) : services?.length === 0 ? (
-        <div className="flex flex-col items-center justify-center rounded-xl border border-dashed py-20 text-center">
-          <Rocket className="mb-3 h-10 w-10 text-muted-foreground" />
-          <p className="font-medium">No services yet</p>
-          <p className="text-sm text-muted-foreground">
-            Add a service to start deploying.
+        <div className="flex flex-col items-center justify-center rounded-xl border border-dashed py-24 text-center">
+          <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-muted">
+            <Rocket className="h-6 w-6 text-muted-foreground" />
+          </div>
+          <p className="text-base font-medium">No services yet</p>
+          <p className="mt-1 text-sm text-muted-foreground max-w-xs">
+            Create a service to start deploying your applications as containers.
           </p>
-          <Button
-            size="sm"
-            className="mt-4 gap-1.5"
-            onClick={() => setNewServiceOpen(true)}
-          >
-            <Plus className="h-4 w-4" /> Add service
+          <Button size="sm" className="mt-5 gap-1.5" onClick={() => setNewServiceOpen(true)}>
+            <Plus className="h-4 w-4" /> Create first service
           </Button>
         </div>
       ) : (
@@ -328,22 +373,22 @@ export function ProjectPage() {
         </div>
       )}
 
-      {/* New service dialog */}
+      {/* ── New service dialog ─────────────────────────────────────────── */}
       <Dialog open={newServiceOpen} onOpenChange={(o) => { setNewServiceOpen(o); if (!o) reset() }}>
         <DialogContent className="sm:max-w-lg">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
-              <Rocket className="h-4 w-4 text-primary" />
-              New service
+              <Rocket className="h-4 w-4 text-primary" /> New service
             </DialogTitle>
             <DialogDescription>
-              Configure your service and deploy it to a container.
+              Define your service source and configure the build. Domains and
+              environment variables can be added after creation.
             </DialogDescription>
           </DialogHeader>
 
           <form
             onSubmit={handleSubmit((d) => createSvcMutation.mutate(d))}
-            className="space-y-5 pt-1"
+            className="space-y-4 pt-1"
           >
             {/* Service name */}
             <div className="space-y-1.5">
@@ -353,17 +398,16 @@ export function ProjectPage() {
               <Input
                 id="svc-name"
                 placeholder="e.g. web, api, worker"
+                autoFocus
                 {...register('name')}
               />
               <p className="text-xs text-muted-foreground">
-                Lowercase letters, numbers and hyphens only. Used as the container name.
+                Lowercase letters, numbers and hyphens only. Becomes the container name.
               </p>
-              {errors.name && (
-                <p className="text-xs text-destructive">{errors.name.message}</p>
-              )}
+              {errors.name && <p className="text-xs text-destructive">{errors.name.message}</p>}
             </div>
 
-            {/* Deploy type cards */}
+            {/* Deploy type */}
             <div className="space-y-2">
               <Label>Deploy from</Label>
               <div className="grid grid-cols-3 gap-2">
@@ -377,10 +421,10 @@ export function ProjectPage() {
                     type="button"
                     onClick={() => setValue('deploy_type', value)}
                     className={cn(
-                      'flex flex-col items-center gap-1.5 rounded-lg border p-3 text-center transition-all hover:border-primary/60',
+                      'flex flex-col items-center gap-1.5 rounded-lg border p-3 text-center transition-all',
                       deployType === value
-                        ? 'border-primary bg-primary/5 ring-1 ring-primary/30'
-                        : 'border-border bg-background',
+                        ? 'border-primary bg-primary/5 ring-1 ring-primary/20'
+                        : 'border-border hover:border-muted-foreground/40',
                     )}
                   >
                     <Icon className={cn('h-5 w-5', deployType === value ? 'text-primary' : 'text-muted-foreground')} />
@@ -393,8 +437,8 @@ export function ProjectPage() {
 
             {/* Git-specific fields */}
             {deployType === 'git' && (
-              <div className="rounded-lg border bg-muted/30 p-3.5 space-y-3.5">
-                <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Repository</p>
+              <div className="rounded-lg border bg-muted/30 p-3.5 space-y-3">
+                <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Repository</p>
                 <div className="space-y-1.5">
                   <Label htmlFor="svc-repo-url">Repository URL</Label>
                   <Input
@@ -404,68 +448,47 @@ export function ProjectPage() {
                   />
                   <p className="text-xs text-muted-foreground flex items-start gap-1">
                     <Info className="h-3 w-3 mt-0.5 shrink-0" />
-                    For private repos, add your SSH deploy key in{' '}
-                    <span className="font-medium text-foreground">Settings → SSH Keys</span>{' '}
-                    and use the SSH URL.
+                    For private repos, add an SSH key in{' '}
+                    <strong className="text-foreground">Settings → SSH Keys</strong>{' '}
+                    and use an SSH URL.
                   </p>
-                  {errors.repo_url && (
-                    <p className="text-xs text-destructive">{errors.repo_url.message}</p>
-                  )}
+                  {errors.repo_url && <p className="text-xs text-destructive">{errors.repo_url.message}</p>}
                 </div>
                 <div className="space-y-1.5">
                   <Label htmlFor="svc-branch">Branch</Label>
-                  <Input
-                    id="svc-branch"
-                    placeholder="main"
-                    {...register('repo_branch')}
-                  />
+                  <Input id="svc-branch" placeholder="main" {...register('repo_branch')} />
                 </div>
               </div>
             )}
 
             {deployType === 'dockerfile' && (
-              <div className="rounded-lg border bg-muted/30 p-3.5 space-y-2">
-                <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Note</p>
+              <div className="rounded-lg border bg-muted/30 p-3.5 space-y-1.5">
+                <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Note</p>
                 <p className="text-xs text-muted-foreground">
-                  The Dockerfile at the root of your repository will be used for the build.
-                  You can also provide a git repository URL above after selecting the Git source.
+                  The Dockerfile at the root of your repository will be used. Provide the
+                  repo URL above after switching to a Git source, or deploy after creation.
                 </p>
               </div>
             )}
 
-            {/* Container config */}
-            <div className="rounded-lg border bg-muted/30 p-3.5 space-y-3.5">
-              <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Container</p>
-              <div className="space-y-1.5">
-                <Label htmlFor="svc-port">
-                  App port <span className="text-muted-foreground font-normal">(optional)</span>
-                </Label>
-                <Input
-                  id="svc-port"
-                  type="number"
-                  placeholder="e.g. 3000 — auto-detected if left blank"
-                  {...register('app_port', { valueAsNumber: true })}
-                />
-                <p className="text-xs text-muted-foreground">
-                  The port your app listens on inside the container. Leave blank to auto-detect.
-                </p>
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="svc-domain">
-                  Domain <span className="text-muted-foreground font-normal">(optional)</span>
-                </Label>
-                <Input
-                  id="svc-domain"
-                  placeholder="e.g. api.featherdeploy.in"
-                  {...register('domain')}
-                />
-                <p className="text-xs text-muted-foreground">
-                  Custom domain for this service. Must point to this server&apos;s IP.
-                </p>
-              </div>
+            {/* App port */}
+            <div className="space-y-1.5">
+              <Label htmlFor="svc-port">
+                App port{' '}
+                <span className="text-muted-foreground font-normal">(optional)</span>
+              </Label>
+              <Input
+                id="svc-port"
+                type="number"
+                placeholder="3000  —  defaults to 8080 if left blank"
+                {...register('app_port', { valueAsNumber: true })}
+              />
+              <p className="text-xs text-muted-foreground">
+                The port your app listens on <em>inside</em> the container.
+              </p>
             </div>
 
-            <div className="flex justify-end gap-2 pt-1">
+            <div className="flex justify-end gap-2 pt-2">
               <Button type="button" variant="outline" size="sm" onClick={() => { setNewServiceOpen(false); reset() }}>
                 Cancel
               </Button>
@@ -475,6 +498,38 @@ export function ProjectPage() {
               </Button>
             </div>
           </form>
+        </DialogContent>
+      </Dialog>
+
+      {/* ── Confirm delete project ─────────────────────────────────────── */}
+      <Dialog open={confirmDeleteProject} onOpenChange={setConfirmDeleteProject}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <AlertTriangle className="h-4 w-4 text-destructive" />
+              Delete project
+            </DialogTitle>
+            <DialogDescription>
+              {hasServices ? (
+                <span className="text-destructive font-medium">
+                  This project has {services?.length} active service{services?.length !== 1 ? 's' : ''}.
+                  Delete all services first to clean up their containers before deleting the project.
+                </span>
+              ) : (
+                <>Permanently delete <strong>{project?.name}</strong>? This cannot be undone.</>
+              )}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-2">
+            <Button variant="ghost" size="sm" onClick={() => setConfirmDeleteProject(false)}>Cancel</Button>
+            <Button
+              variant="destructive" size="sm"
+              disabled={hasServices || deleteProjectMutation.isPending}
+              onClick={() => deleteProjectMutation.mutate()}
+            >
+              {deleteProjectMutation.isPending ? 'Deleting…' : 'Delete project'}
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>

@@ -2,10 +2,13 @@ package handler
 
 import (
 	"database/sql"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"os/exec"
 	"strconv"
 
+	caddypkg "github.com/ojhapranjal26/featherdeploy/backend/internal/caddy"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/model"
 	v "github.com/ojhapranjal26/featherdeploy/backend/internal/validator"
 )
@@ -77,12 +80,6 @@ func (h *ServiceHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id, _ := res.LastInsertId()
-	// If a domain was provided, register it immediately
-	if req.Domain != "" {
-		h.db.ExecContext(r.Context(),
-			`INSERT OR IGNORE INTO domains (service_id, domain, tls) VALUES (?, ?, 1)`,
-			id, req.Domain)
-	}
 	h.getByID(w, r, id)
 }
 
@@ -145,17 +142,89 @@ func (h *ServiceHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, errMap("invalid serviceID"))
 		return
 	}
-	res, err := h.db.ExecContext(r.Context(),
-		`DELETE FROM services WHERE id=? AND project_id=?`, svcID, projectID)
-	if err != nil {
+
+	// Verify service exists and belongs to project
+	var containerID sql.NullString
+	err = h.db.QueryRowContext(r.Context(),
+		`SELECT container_id FROM services WHERE id=? AND project_id=?`, svcID, projectID,
+	).Scan(&containerID)
+	if err == sql.ErrNoRows {
+		writeJSON(w, http.StatusNotFound, errMap("service not found"))
+		return
+	} else if err != nil {
 		writeJSON(w, http.StatusInternalServerError, errMap("internal error"))
 		return
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		writeJSON(w, http.StatusNotFound, errMap("service not found"))
-		return
-	}
+
+	// ── Cascade delete in DB ──────────────────────────────────────────────────
+	h.db.ExecContext(r.Context(), `DELETE FROM domains WHERE service_id=?`, svcID)       //nolint
+	h.db.ExecContext(r.Context(), `DELETE FROM env_variables WHERE service_id=?`, svcID) //nolint
+	h.db.ExecContext(r.Context(), `DELETE FROM deployments WHERE service_id=?`, svcID)   //nolint
+	h.db.ExecContext(r.Context(), `DELETE FROM services WHERE id=?`, svcID)              //nolint
+
+	// ── Update Caddy (domain removed) ────────────────────────────────────────
+	go caddypkg.Reload(h.db)
+
+	// ── Stop and remove the container ─────────────────────────────────────────
+	cName := fmt.Sprintf("fd-svc-%d", svcID)
+	go func() {
+		exec.Command("sudo", "-n", "podman", "stop", "--time", "10", cName).Run() //nolint
+		exec.Command("sudo", "-n", "podman", "rm", "-f", cName).Run()             //nolint
+		// Remove associated images to free disk space
+		stableImage := fmt.Sprintf("featherdeploy/svc-%d:stable", svcID)
+		exec.Command("sudo", "-n", "podman", "rmi", "-f", stableImage).Run() //nolint
+		// Remove any per-deployment tagged images
+		out, err := exec.Command("sudo", "-n", "podman", "images",
+			"--format", "{{.Repository}}:{{.Tag}}",
+			"--filter", fmt.Sprintf("reference=featherdeploy/svc-%d", svcID),
+		).Output()
+		if err == nil {
+			for _, img := range splitLines(string(out)) {
+				if img != "" {
+					exec.Command("sudo", "-n", "podman", "rmi", "-f", img).Run() //nolint
+				}
+			}
+		}
+		slog.Info("service cleanup complete", "svc_id", svcID, "container", cName)
+	}()
+
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// splitLines splits a newline-separated string, trimming whitespace.
+func splitLines(s string) []string {
+	var out []string
+	for _, l := range splitNewline(s) {
+		if t := trimString(l); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+func splitNewline(s string) []string {
+	var lines []string
+	start := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\n' {
+			lines = append(lines, s[start:i])
+			start = i + 1
+		}
+	}
+	if start < len(s) {
+		lines = append(lines, s[start:])
+	}
+	return lines
+}
+
+func trimString(s string) string {
+	for len(s) > 0 && (s[0] == ' ' || s[0] == '\t' || s[0] == '\r') {
+		s = s[1:]
+	}
+	for len(s) > 0 && (s[len(s)-1] == ' ' || s[len(s)-1] == '\t' || s[len(s)-1] == '\r') {
+		s = s[:len(s)-1]
+	}
+	return s
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
