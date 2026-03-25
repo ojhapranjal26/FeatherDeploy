@@ -434,10 +434,19 @@ func generateDockerfile(framework, buildCmd, startCmd string, appPort int) strin
 
 // podmanBuild builds a container image with podman.
 // It sets BUILDAH_ISOLATION=chroot to avoid user-namespace (newuidmap) errors
-// that occur in restricted environments. If a namespace or storage error is
-// detected in the output it automatically retries with --storage-driver=vfs.
+// that occur in restricted environments. Each attempt uses an isolated storage
+// root so a failed overlay attempt never leaves a stale driver database that
+// would cause a "database mismatch" error on the VFS retry.
 func podmanBuild(dir string, log *logBuf, imageName string) error {
-	out, err := podmanBuildAttempt(dir, imageName)
+	// Ensure XDG_RUNTIME_DIR exists — podman errors out if this path is absent.
+	os.MkdirAll("/tmp/podman-run", 0700) //nolint
+
+	// Attempt 1: overlay (fastest). Fresh isolated root to avoid any pre-existing DB.
+	root1 := fmt.Sprintf("/tmp/fd-st-%d-a", time.Now().UnixNano())
+	os.MkdirAll(root1, 0700) //nolint
+	defer os.RemoveAll(root1)
+
+	out, err := podmanBuildAttempt(dir, imageName, root1)
 	for _, line := range strings.Split(out, "\n") {
 		if t := strings.TrimSpace(line); t != "" {
 			log.add("  %s", t)
@@ -452,7 +461,12 @@ func podmanBuild(dir string, log *logBuf, imageName string) error {
 	if strings.Contains(lower, "newuidmap") || strings.Contains(lower, "uid_map") ||
 		strings.Contains(lower, "operation not permitted") || strings.Contains(lower, "namespace") {
 		log.add("[podman] namespace error detected — retrying with --storage-driver=vfs")
-		out2, err2 := podmanBuildAttempt(dir, imageName, "--storage-driver=vfs")
+		// Use a second fresh root so the failed overlay DB from attempt 1 can
+		// never trigger a "database graph driver mismatch" error.
+		root2 := fmt.Sprintf("/tmp/fd-st-%d-b", time.Now().UnixNano())
+		os.MkdirAll(root2, 0700) //nolint
+		defer os.RemoveAll(root2)
+		out2, err2 := podmanBuildAttempt(dir, imageName, root2, "--storage-driver=vfs")
 		for _, line := range strings.Split(out2, "\n") {
 			if t := strings.TrimSpace(line); t != "" {
 				log.add("  %s", t)
@@ -463,10 +477,12 @@ func podmanBuild(dir string, log *logBuf, imageName string) error {
 	return err
 }
 
-// podmanBuildAttempt runs `podman build` with BUILDAH_ISOLATION=chroot and
-// any extra arguments before the context path. It returns (combined output, error).
-func podmanBuildAttempt(dir, imageName string, extraArgs ...string) (string, error) {
-	args := append([]string{"build", "-t", imageName}, extraArgs...)
+// podmanBuildAttempt runs `podman build` with BUILDAH_ISOLATION=chroot using
+// the given isolated storage root. extraArgs are inserted before the context
+// path. Returns (combined output, error).
+func podmanBuildAttempt(dir, imageName, storageRoot string, extraArgs ...string) (string, error) {
+	args := []string{"build", "--root", storageRoot, "-t", imageName}
+	args = append(args, extraArgs...)
 	args = append(args, ".")
 	cmd := exec.Command("podman", args...)
 	cmd.Dir = dir
