@@ -503,8 +503,8 @@ func ensureSSHKey(db *sql.DB) error {
 	return nil
 }
 
-// collectServerStats reads /proc/meminfo and statvfs for the main server's
-// current resource usage.  Returns empty stats on non-Linux systems.
+// collectServerStats reads /proc/meminfo, /proc/stat and statvfs for the main
+// server's current resource usage.  Returns empty stats on non-Linux systems.
 func collectServerStats() heartbeat.BrainStats {
 	var s heartbeat.BrainStats
 	// RAM from /proc/meminfo
@@ -521,11 +521,44 @@ func collectServerStats() heartbeat.BrainStats {
 			}
 		}
 	}
-	// CPU: simple 1-second sample via /proc/stat
-	s.CPU = 0 // lightweight: leave as 0 from main server side; nodes calculate their own
+	// CPU: 200 ms sample of /proc/stat
+	s.CPU = readServerCPU()
 	// Disk: root filesystem
 	s.DiskUsed, s.DiskTotal = diskUsage("/")
 	return s
+}
+
+// readServerCPU returns the CPU utilisation (0–100) as a short /proc/stat diff.
+func readServerCPU() float64 {
+	type snap struct{ idle, total int64 }
+	sample := func() (s snap) {
+		data, err := os.ReadFile("/proc/stat")
+		if err != nil {
+			return
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			if !strings.HasPrefix(line, "cpu ") {
+				continue
+			}
+			for i, f := range strings.Fields(line)[1:] {
+				n, _ := strconv.ParseInt(f, 10, 64)
+				s.total += n
+				if i == 3 {
+					s.idle = n
+				}
+			}
+			return
+		}
+		return
+	}
+	a := sample()
+	time.Sleep(200 * time.Millisecond)
+	b := sample()
+	dt := b.total - a.total
+	if dt == 0 {
+		return 0
+	}
+	return 100.0 * float64(dt-(b.idle-a.idle)) / float64(dt)
 }
 
 func diskUsage(path string) (used, total int64) {

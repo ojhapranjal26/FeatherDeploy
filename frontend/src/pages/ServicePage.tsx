@@ -775,7 +775,7 @@ function ContainerStatsPanel({
           {/* CPU chart */}
           <div className="rounded-xl border border-border/60 bg-card p-4">
             <p className="text-sm font-medium mb-3 flex items-center gap-2">
-              <Cpu className="h-4 w-4 text-muted-foreground" /> CPU Usage (2-minute window)
+              <Cpu className="h-4 w-4 text-muted-foreground" /> CPU Usage
             </p>
             <ResponsiveContainer width="100%" height={160}>
               <AreaChart data={cpuData} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
@@ -802,7 +802,7 @@ function ContainerStatsPanel({
           {/* Memory chart */}
           <div className="rounded-xl border border-border/60 bg-card p-4">
             <p className="text-sm font-medium mb-3 flex items-center gap-2">
-              <MemoryStick className="h-4 w-4 text-muted-foreground" /> Memory Usage (2-minute window)
+              <MemoryStick className="h-4 w-4 text-muted-foreground" /> Memory Usage
             </p>
             <ResponsiveContainer width="100%" height={160}>
               <AreaChart data={memData} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>

@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { ChevronLeft, Plus, Trash2, Eye, EyeOff, Upload, Copy, Download } from 'lucide-react'
+import { ChevronLeft, Plus, Trash2, Eye, EyeOff, Upload, Copy, Download, X, Lock, Globe } from 'lucide-react'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
@@ -44,6 +44,7 @@ export function EnvPage() {
   const [revealedIds, setRevealedIds] = useState<Set<number>>(new Set())
   const [revealedValues, setRevealedValues] = useState<Record<number, string>>({})
   const [bulkText, setBulkText] = useState('')
+  const [previewRows, setPreviewRows] = useState<{id: string; key: string; value: string; isSecret: boolean}[]>([])
 
   const { data: vars, isLoading } = useQuery({
     queryKey: ['env', serviceId],
@@ -87,35 +88,58 @@ export function EnvPage() {
   const { register, handleSubmit, reset, formState: { errors, isSubmitting } } =
     useForm<FormData>({ resolver: zodResolver(schema), defaultValues: { is_secret: true } })
 
-  const parseBulk = () => {
-    const lines = bulkText
+  const parseLine = (l: string) => {
+    const eq = l.indexOf('=')
+    return {
+      id: `${Math.random()}`,
+      key: l.slice(0, eq).trim(),
+      value: l.slice(eq + 1).trim().replace(/^["']|["']$/g, ''),
+      isSecret: true,
+    }
+  }
+
+  const handleBulkText = (text: string) => {
+    setBulkText(text)
+    const rows = text
       .split('\n')
-      .map((l) => l.trim())
-      .filter((l) => l && !l.startsWith('#') && l.includes('='))
-    const vars: UpsertEnvPayload[] = lines.map((l) => {
-      const eq = l.indexOf('=')
-      return {
-        key: l.slice(0, eq).trim(),
-        value: l.slice(eq + 1).trim().replace(/^["']|["']$/g, ''),
-        is_secret: true,
-      }
-    })
+      .map(l => l.trim())
+      .filter(l => l && !l.startsWith('#') && l.includes('='))
+      .map(parseLine)
+    setPreviewRows(rows)
+  }
+
+  const updatePreviewRow = (id: string, field: 'key' | 'value' | 'isSecret', val: string | boolean) =>
+    setPreviewRows(rows => rows.map(r => r.id === id ? { ...r, [field]: val } : r))
+
+  const removePreviewRow = (id: string) =>
+    setPreviewRows(rows => rows.filter(r => r.id !== id))
+
+  const importPreview = () => {
+    const vars: UpsertEnvPayload[] = previewRows
+      .filter(r => r.key.trim())
+      .map(r => ({ key: r.key.trim(), value: r.value, is_secret: r.isSecret }))
     bulkMutation.mutate(vars)
   }
 
   const toggleReveal = async (id: number, key: string, isSecret: boolean) => {
+    const currentlyRevealed = revealedIds.has(id)
     setRevealedIds((prev) => {
       const next = new Set(prev)
       next.has(id) ? next.delete(id) : next.add(id)
       return next
     })
+    // Toggling off — nothing more to do
+    if (currentlyRevealed) return
     if (!isSecret) return
+    // Already fetched — reuse cached plaintext
     if (revealedValues[id] !== undefined) return
     try {
       const value = await envApi.reveal(projectId!, serviceId!, key)
       setRevealedValues(prev => ({ ...prev, [id]: value }))
     } catch {
       toast.error('Failed to reveal secret.')
+      // Close the eye since we have no value to show
+      setRevealedIds(prev => { const n = new Set(prev); n.delete(id); return n })
     }
   }
 
@@ -289,23 +313,92 @@ export function EnvPage() {
       </Dialog>
 
       {/* Bulk import dialog */}
-      <Dialog open={bulkOpen} onOpenChange={setBulkOpen}>
-        <DialogContent>
+      <Dialog open={bulkOpen} onOpenChange={(o) => { setBulkOpen(o); if (!o) { setBulkText(''); setPreviewRows([]) } }}>
+        <DialogContent className="max-w-2xl">
           <DialogHeader>
-            <DialogTitle>Bulk import (.env format)</DialogTitle>
+            <DialogTitle>Import .env file</DialogTitle>
           </DialogHeader>
           <div className="space-y-4 pt-2">
             <Textarea
-              rows={10}
+              rows={5}
               className="font-mono text-xs"
-              placeholder={'KEY=value\nANOTHER_KEY=another_value'}
+              placeholder={'DATABASE_URL=postgres://user:pass@host/db\nAPI_KEY=supersecret\nDEBUG=false'}
               value={bulkText}
-              onChange={(e) => setBulkText(e.target.value)}
+              onChange={(e) => handleBulkText(e.target.value)}
+              autoFocus
             />
+            {previewRows.length > 0 && (
+              <div className="rounded-lg border overflow-hidden">
+                <div className="bg-muted/40 px-3 py-1.5 text-xs font-medium text-muted-foreground flex items-center justify-between">
+                  <span>{previewRows.length} variable{previewRows.length !== 1 ? 's' : ''} — review &amp; edit before importing</span>
+                </div>
+                <div className="max-h-56 overflow-y-auto">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Key</TableHead>
+                        <TableHead>Value</TableHead>
+                        <TableHead className="w-24">Type</TableHead>
+                        <TableHead className="w-8" />
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {previewRows.map(row => (
+                        <TableRow key={row.id}>
+                          <TableCell className="py-1">
+                            <Input
+                              className="h-7 font-mono text-xs"
+                              value={row.key}
+                              onChange={e => updatePreviewRow(row.id, 'key', e.target.value)}
+                            />
+                          </TableCell>
+                          <TableCell className="py-1">
+                            <Input
+                              className="h-7 font-mono text-xs"
+                              type={row.isSecret ? 'password' : 'text'}
+                              value={row.value}
+                              onChange={e => updatePreviewRow(row.id, 'value', e.target.value)}
+                            />
+                          </TableCell>
+                          <TableCell className="py-1">
+                            <button
+                              type="button"
+                              className={`flex items-center gap-1 text-xs rounded-full px-2.5 py-0.5 font-medium transition-colors ${
+                                row.isSecret
+                                  ? 'bg-amber-500/15 text-amber-700 dark:text-amber-400'
+                                  : 'bg-muted text-muted-foreground'
+                              }`}
+                              onClick={() => updatePreviewRow(row.id, 'isSecret', !row.isSecret)}
+                            >
+                              {row.isSecret
+                                ? <><Lock className="h-2.5 w-2.5" /> Secret</>
+                                : <><Globe className="h-2.5 w-2.5" /> Plain</>}
+                            </button>
+                          </TableCell>
+                          <TableCell className="py-1">
+                            <Button
+                              variant="ghost" size="icon" className="h-6 w-6 text-muted-foreground"
+                              onClick={() => removePreviewRow(row.id)}
+                            >
+                              <X className="h-3 w-3" />
+                            </Button>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              </div>
+            )}
             <div className="flex justify-end gap-2">
               <Button variant="outline" onClick={() => setBulkOpen(false)}>Cancel</Button>
-              <Button onClick={parseBulk} disabled={bulkMutation.isPending}>
-                Import
+              <Button
+                onClick={importPreview}
+                disabled={!previewRows.filter(r => r.key.trim()).length || bulkMutation.isPending}
+              >
+                {previewRows.filter(r => r.key.trim()).length > 0
+                  ? `Import ${previewRows.filter(r => r.key.trim()).length} variable${previewRows.filter(r => r.key.trim()).length !== 1 ? 's' : ''}`
+                  : 'Import'}
               </Button>
             </div>
           </div>
