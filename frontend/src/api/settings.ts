@@ -31,6 +31,15 @@ export const settingsApi = {
     await client.put('/settings/branding', data)
   },
 
+  uploadLogo: async (file: File): Promise<{ logo_url: string }> => {
+    const form = new FormData()
+    form.append('logo', file)
+    const res = await client.post<{ logo_url: string }>('/settings/branding/logo', form, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    })
+    return res.data
+  },
+
   // ── SMTP ────────────────────────────────────────────────────────────────
 
   getSMTPStatus: async (): Promise<SMTPStatus> => {

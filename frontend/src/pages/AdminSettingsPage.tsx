@@ -1,8 +1,8 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   ShieldCheck, Server, ImageIcon, Building2, Mail, Github,
-  CheckCircle2, XCircle, Trash2, Eye, EyeOff, ExternalLink,
+  CheckCircle2, XCircle, Trash2, Eye, EyeOff, ExternalLink, Upload,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
@@ -77,12 +77,29 @@ export function AdminSettingsPage() {
   const { data: branding } = useQuery({ queryKey: ['branding'], queryFn: settingsApi.getBranding })
   const [companyName, setCompanyName] = useState('')
   const [logoUrl, setLogoUrl] = useState('')
+  const [selectedFile, setSelectedFile] = useState<File | null>(null)
+  const [filePreview, setFilePreview] = useState<string | null>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
   useEffect(() => {
     if (branding) { setCompanyName(branding.company_name); setLogoUrl(branding.logo_url) }
   }, [branding])
+  // Revoke object URL on cleanup
+  useEffect(() => () => { if (filePreview) URL.revokeObjectURL(filePreview) }, [filePreview])
   const brandingMutation = useMutation({
-    mutationFn: () => settingsApi.setBranding({ company_name: companyName, logo_url: logoUrl }),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['branding'] }); toast.success('Branding saved') },
+    mutationFn: async () => {
+      let url = logoUrl
+      if (selectedFile) {
+        const res = await settingsApi.uploadLogo(selectedFile)
+        url = res.logo_url
+      }
+      await settingsApi.setBranding({ company_name: companyName, logo_url: url })
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['branding'] })
+      setSelectedFile(null)
+      setFilePreview(null)
+      toast.success('Branding saved')
+    },
     onError: () => toast.error('Failed to save branding'),
   })
 
@@ -168,16 +185,54 @@ export function AdminSettingsPage() {
             <p className="text-[11px] text-muted-foreground">Shown in the sidebar and login page.</p>
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="logo-url" className="text-xs">Logo URL</Label>
-            <Input id="logo-url" type="url" className="h-8 text-xs" placeholder="https://example.com/logo.png"
-              value={logoUrl} onChange={(e) => setLogoUrl(e.target.value)} />
+            <Label className="text-xs">Logo</Label>
+            <div className="flex gap-2">
+              <Input
+                className="h-8 text-xs"
+                placeholder="https://example.com/logo.png"
+                value={logoUrl}
+                onChange={(e) => {
+                  setLogoUrl(e.target.value)
+                  setSelectedFile(null)
+                  if (filePreview) { URL.revokeObjectURL(filePreview); setFilePreview(null) }
+                }}
+              />
+              <Button type="button" size="sm" variant="outline" className="h-8 gap-1.5 shrink-0 text-xs"
+                onClick={() => fileInputRef.current?.click()}>
+                <Upload className="h-3.5 w-3.5" />
+                Browse
+              </Button>
+            </div>
+            <p className="text-[11px] text-muted-foreground">
+              Paste an https:// URL or upload a file — recommended 120×40 px, PNG/JPG/SVG, max 2 MB.
+            </p>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/jpeg,image/png,image/gif,image/webp,image/svg+xml"
+              className="hidden"
+              onChange={(e) => {
+                const f = e.target.files?.[0]
+                if (!f) return
+                setSelectedFile(f)
+                if (filePreview) URL.revokeObjectURL(filePreview)
+                setFilePreview(URL.createObjectURL(f))
+                setLogoUrl('')
+                e.target.value = ''
+              }}
+            />
           </div>
         </div>
-        {logoUrl && (
+        {(filePreview || logoUrl) && (
           <div className="flex items-center gap-3 rounded-lg border bg-muted/40 px-4 py-2.5">
             <ImageIcon className="h-4 w-4 shrink-0 text-muted-foreground" />
-            <img src={logoUrl} alt="Logo preview" className="h-8 w-auto max-w-[200px] object-contain"
+            <img src={filePreview ?? logoUrl} alt="Logo preview" className="h-8 w-auto max-w-[200px] object-contain"
               onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }} />
+            {selectedFile && (
+              <span className="text-[11px] text-muted-foreground ml-1 truncate">
+                {selectedFile.name} — will be uploaded on save
+              </span>
+            )}
           </div>
         )}
         <div className="flex justify-end">

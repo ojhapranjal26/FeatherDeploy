@@ -200,6 +200,8 @@ func serve() {
 
 	// Branding is public so the login page can show it before authentication
 	r.Get("/api/settings/branding", settingsH.GetBranding)
+	// Uploaded logo is public so it can be used in the login page and sidebar
+	r.Get("/api/settings/branding/logo", settingsH.GetLogoImage)
 
 	// Invitation accept flow (public — token acts as credential)
 	r.Get("/api/invitations/{token}", inviteH.Verify)
@@ -246,6 +248,7 @@ func serve() {
 			r.Use(mw.RequireRole(model.RoleSuperAdmin))
 			// Branding
 			r.Put("/api/settings/branding", settingsH.SetBranding)
+			r.Post("/api/settings/branding/logo", settingsH.UploadLogo)
 			// SMTP
 			r.Get("/api/settings/smtp", settingsH.GetSMTPStatus)
 			r.Post("/api/settings/smtp", settingsH.SetSMTP)
