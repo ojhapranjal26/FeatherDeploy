@@ -144,14 +144,19 @@ func serve() {
 
 	// ─── Handlers ─────────────────────────────────────────────────────────────
 	smtpPortInt, _ := strconv.Atoi(*smtpPort)
-	m := mailer.New(mailer.Config{
-		Host:     *smtpHost,
-		Port:     smtpPortInt,
-		Username: *smtpUser,
-		Password: *smtpPass,
-		From:     *smtpFrom,
-		UseTLS:   *smtpTLS == "true",
-	})
+	cfgStore := handler.NewConfigStore(
+		db,
+		*jwtSecret,
+		mailer.Config{
+			Host:     *smtpHost,
+			Port:     smtpPortInt,
+			Username: *smtpUser,
+			Password: *smtpPass,
+			From:     *smtpFrom,
+			UseTLS:   *smtpTLS == "true",
+		},
+		*ghClientID, *ghClientSecret,
+	)
 
 	authH := handler.NewAuthHandler(db, *jwtSecret, 24*time.Hour)
 	userH := handler.NewUserHandler(db)
@@ -160,8 +165,8 @@ func serve() {
 	depH := handler.NewDeploymentHandler(db, *jwtSecret)
 	envH := handler.NewEnvHandler(db, *jwtSecret)
 	domainH := handler.NewDomainHandler(db)
-	inviteH := handler.NewInvitationHandler(db, m, *jwtSecret, 24*time.Hour, *origin)
-	ghH := handler.NewGitHubHandler(db, *ghClientID, *ghClientSecret, *origin)
+	inviteH := handler.NewInvitationHandler(db, cfgStore, *jwtSecret, 24*time.Hour, *origin)
+	ghH := handler.NewGitHubHandler(db, cfgStore, *origin)
 	ghAppH := handler.NewGitHubAppHandler(db)
 	sshH := handler.NewSSHKeyHandler(db, *jwtSecret)
 	dashH := handler.NewDashboardHandler(db)
@@ -170,7 +175,7 @@ func serve() {
 	if err := nodeH.EnsureCA(); err != nil {
 		slog.Warn("CA init warning", "err", err)
 	}
-	settingsH := handler.NewSettingsHandler(db)
+	settingsH := handler.NewSettingsHandler(db, cfgStore)
 	statsH := handler.NewStatsHandler(db)
 	containerStatsH := handler.NewContainerStatsHandler()
 
@@ -236,6 +241,21 @@ func serve() {
 			r.Delete("/api/admin/users/{userID}", userH.Delete)
 		})
 
+		// ── Superadmin: platform settings ─────────────────────────────────
+		r.Group(func(r chi.Router) {
+			r.Use(mw.RequireRole(model.RoleSuperAdmin))
+			// Branding
+			r.Put("/api/settings/branding", settingsH.SetBranding)
+			// SMTP
+			r.Get("/api/settings/smtp", settingsH.GetSMTPStatus)
+			r.Post("/api/settings/smtp", settingsH.SetSMTP)
+			r.Delete("/api/settings/smtp", settingsH.DeleteSMTP)
+			// GitHub OAuth credentials
+			r.Get("/api/settings/github-oauth", settingsH.GetGitHubOAuthStatus)
+			r.Post("/api/settings/github-oauth", settingsH.SetGitHubOAuth)
+			r.Delete("/api/settings/github-oauth", settingsH.DeleteGitHubOAuth)
+		})
+
 		// ── GitHub OAuth ───────────────────────────────────────────────────
 		// All authenticated users can connect/disconnect their GitHub account
 		// and browse repos, branches and folder trees.
@@ -254,8 +274,7 @@ func serve() {
 			r.Get("/api/github-app/config", ghAppH.GetConfig)
 			r.Post("/api/github-app/config", ghAppH.SetConfig)
 			r.Delete("/api/github-app/config", ghAppH.DeleteConfig)
-			// Branding write requires superadmin
-			r.Put("/api/settings/branding", settingsH.SetBranding)
+
 		})
 
 		// ── Live stats SSE stream (no 30s timeout — long-lived connection) ──

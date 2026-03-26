@@ -22,22 +22,22 @@ import (
 // Users connect their GitHub account once; all subsequent repo API calls
 // use the stored access token.
 type GitHubHandler struct {
-	db           *sql.DB
-	clientID     string
-	clientSecret string
-	origin       string // frontend base URL for redirect after OAuth
+	db     *sql.DB
+	config *ConfigStore
+	origin string // frontend base URL for redirect after OAuth
 }
 
-func NewGitHubHandler(db *sql.DB, clientID, clientSecret, origin string) *GitHubHandler {
-	return &GitHubHandler{db: db, clientID: clientID, clientSecret: clientSecret, origin: origin}
+func NewGitHubHandler(db *sql.DB, config *ConfigStore, origin string) *GitHubHandler {
+	return &GitHubHandler{db: db, config: config, origin: origin}
 }
 
 // ─── GET /api/github/auth ────────────────────────────────────────────────────
 // Returns the GitHub OAuth URL the frontend should redirect to.
 func (h *GitHubHandler) AuthURL(w http.ResponseWriter, r *http.Request) {
-	if h.clientID == "" {
+	clientID, _ := h.config.GitHubOAuth(r.Context())
+	if clientID == "" {
 		writeJSON(w, http.StatusServiceUnavailable,
-			map[string]string{"error": "GitHub integration not configured — set GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET"})
+			map[string]string{"error": "GitHub integration not configured — set credentials in Admin Settings"})
 		return
 	}
 
@@ -59,9 +59,8 @@ func (h *GitHubHandler) AuthURL(w http.ResponseWriter, r *http.Request) {
 	})
 
 	redirectURI := fmt.Sprintf("%s/api/github/callback", strings.TrimRight(h.origin, "/"))
-	// Note: redirectURI here is the backend callback URL that returns to the frontend
 	params := url.Values{
-		"client_id":    {h.clientID},
+		"client_id":    {clientID},
 		"redirect_uri": {redirectURI},
 		"scope":        {"repo read:user"},
 		"state":        {state},
@@ -178,17 +177,18 @@ func (h *GitHubHandler) Status(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"connected":    accessToken != "",
 		"github_login": ghLogin,
-		"configured":   h.clientID != "",
+		"configured":   func() bool { id, _ := h.config.GitHubOAuth(r.Context()); return id != "" }(),
 	})
 }
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
 func (h *GitHubHandler) exchangeCode(r *http.Request, code string) (accessToken, login string, err error) {
+	clientID, clientSecret := h.config.GitHubOAuth(r.Context())
 	redirectURI := fmt.Sprintf("%s/api/github/callback", strings.TrimRight(h.origin, "/"))
 	body := url.Values{
-		"client_id":     {h.clientID},
-		"client_secret": {h.clientSecret},
+		"client_id":     {clientID},
+		"client_secret": {clientSecret},
 		"code":          {code},
 		"redirect_uri":  {redirectURI},
 	}

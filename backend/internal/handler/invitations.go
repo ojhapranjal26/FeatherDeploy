@@ -21,14 +21,14 @@ const inviteTTL = 15 * time.Minute
 // InvitationHandler manages invite-based user registration.
 type InvitationHandler struct {
 	db        *sql.DB
-	mailer    *mailer.Mailer
+	config    *ConfigStore
 	jwtSecret string
 	jwtTTL    time.Duration
 	origin    string // frontend base URL for building invite links
 }
 
-func NewInvitationHandler(db *sql.DB, m *mailer.Mailer, jwtSecret string, jwtTTL time.Duration, origin string) *InvitationHandler {
-	return &InvitationHandler{db: db, mailer: m, jwtSecret: jwtSecret, jwtTTL: jwtTTL, origin: origin}
+func NewInvitationHandler(db *sql.DB, config *ConfigStore, jwtSecret string, jwtTTL time.Duration, origin string) *InvitationHandler {
+	return &InvitationHandler{db: db, config: config, jwtSecret: jwtSecret, jwtTTL: jwtTTL, origin: origin}
 }
 
 // ─── POST /api/admin/invitations ─────────────────────────────────────────────
@@ -85,7 +85,8 @@ func (h *InvitationHandler) Create(w http.ResponseWriter, r *http.Request) {
 	inviteURL := fmt.Sprintf("%s/invite/%s", h.origin, token)
 
 	// Send email (non-blocking: log but don't fail if SMTP is down)
-	if err := h.mailer.SendInvitation(req.Email, inviterName, inviteURL, inviteTTL); err != nil {
+	m := mailer.New(h.config.SMTPConfig(r.Context()))
+	if err := m.SendInvitation(req.Email, inviterName, inviteURL, inviteTTL); err != nil {
 		// Log but continue — admin can still copy the link from the response
 		_ = err
 	}

@@ -210,3 +210,13 @@ INSERT OR IGNORE INTO system_settings (setting_key, value) VALUES ('logo_url', '
 
 -- 016: add deploy_log column to deployments for real deployment output
 ALTER TABLE deployments ADD COLUMN deploy_log TEXT NOT NULL DEFAULT '';
+
+-- 017: app_settings — AES-256-GCM encrypted key-value store for sensitive
+-- platform configuration (SMTP credentials, GitHub OAuth credentials, etc.)
+-- Values are write-only from the API: GET endpoints return status/presence only,
+-- never the decrypted value.
+CREATE TABLE IF NOT EXISTS app_settings (
+    key         TEXT     PRIMARY KEY,
+    enc_value   TEXT     NOT NULL DEFAULT '',
+    updated_at  DATETIME NOT NULL DEFAULT (datetime('now'))
+);
