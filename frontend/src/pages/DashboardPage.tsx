@@ -32,6 +32,7 @@ type DashStats = {
   failed_deployments: number; recent_deployments: DashDep[]
 }
 type CpuPoint = { t: string; v: number }
+type RamPoint = { t: string; v: number }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 const gb = (bytes: number) => (bytes / 1073741824).toFixed(1)
@@ -79,6 +80,35 @@ function CpuSparkline({ data, color = '#6366f1' }: { data: CpuPoint[]; color?: s
   )
 }
 
+// ── RamSparkline ──────────────────────────────────────────────────────────────
+function RamSparkline({ data }: { data: RamPoint[] }) {
+  if (data.length < 2) return null
+  const color = '#10b981'
+  return (
+    <ResponsiveContainer width="100%" height={32}>
+      <AreaChart data={data} margin={{ top: 2, right: 0, bottom: 0, left: 0 }}>
+        <defs>
+          <linearGradient id="gradRam" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor={color} stopOpacity={0.35} />
+            <stop offset="100%" stopColor={color} stopOpacity={0.03} />
+          </linearGradient>
+        </defs>
+        <XAxis dataKey="t" hide />
+        <Tooltip
+          contentStyle={{ fontSize: 11, padding: '2px 8px', borderRadius: 6 }}
+          formatter={(v: unknown) => [`${Number(v).toFixed(1)}%`, 'RAM']}
+          labelFormatter={() => ''}
+        />
+        <Area
+          type="monotone" dataKey="v" stroke={color} strokeWidth={1.5}
+          fill="url(#gradRam)"
+          dot={false} isAnimationActive={false}
+        />
+      </AreaChart>
+    </ResponsiveContainer>
+  )
+}
+
 // ── StatCard ──────────────────────────────────────────────────────────────────
 function StatCard({ title, value, icon: Icon, iconCls, bgCls, loading }: {
   title: string; value: number; icon: React.ElementType
@@ -102,9 +132,9 @@ function StatCard({ title, value, icon: Icon, iconCls, bgCls, loading }: {
 }
 
 // ── BrainCard ─────────────────────────────────────────────────────────────────
-function BrainCard({ brain, history, connected }: {
+function BrainCard({ brain, history, ramHistory, connected }: {
   brain: NonNullable<ReturnType<typeof useStatsSSE>['brain']>
-  history: CpuPoint[]; connected: boolean
+  history: CpuPoint[]; ramHistory: RamPoint[]; connected: boolean
 }) {
   const cpuPct = Math.round(brain.CPU ?? 0)
   const ramPct = pct(brain.RAMUsed, brain.RAMTotal)
@@ -164,6 +194,7 @@ function BrainCard({ brain, history, connected }: {
               </span>
             </div>
             <Progress value={ramPct} className={cn('h-2.5 rounded-full', barColor(ramPct))} />
+            <RamSparkline data={ramHistory} />
           </div>
         )}
 
@@ -187,7 +218,7 @@ function BrainCard({ brain, history, connected }: {
 }
 
 // ── NodeCard ──────────────────────────────────────────────────────────────────
-function NodeCard({ node, history }: { node: NodeStats; history: CpuPoint[] }) {
+function NodeCard({ node, history, ramHistory }: { node: NodeStats; history: CpuPoint[]; ramHistory: RamPoint[] }) {
   const isConn = node.status === 'connected'
   const stale = node.last_stats_at
     ? Date.now() - new Date(node.last_stats_at).getTime() > 30_000 : true
@@ -232,6 +263,7 @@ function NodeCard({ node, history }: { node: NodeStats; history: CpuPoint[] }) {
                   <span className="tabular-nums">{gb(node.ram_used)} / {gb(node.ram_total)} GB</span>
                 </div>
                 <Progress value={ramPct} className={cn('h-1.5', barColor(ramPct))} />
+                <RamSparkline data={ramHistory} />
               </div>
             )}
             {node.disk_total > 0 && (
@@ -267,13 +299,17 @@ export function DashboardPage() {
   const { brain, nodes: liveNodes, connected } = useStatsSSE()
 
   const brainHistoryRef = useRef<CpuPoint[]>([])
+  const brainRamHistoryRef = useRef<RamPoint[]>([])
   const nodeHistoriesRef = useRef<Record<number, CpuPoint[]>>({})
+  const nodeRamHistoriesRef = useRef<Record<number, RamPoint[]>>({})
   const [, setTick] = useState(0)
 
   useEffect(() => {
     if (!brain) return
     const t = new Date().toLocaleTimeString('en', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })
     brainHistoryRef.current = [...brainHistoryRef.current, { t, v: brain.CPU ?? 0 }].slice(-30)
+    const ramPct = brain.RAMTotal > 0 ? (brain.RAMUsed / brain.RAMTotal) * 100 : 0
+    brainRamHistoryRef.current = [...brainRamHistoryRef.current, { t, v: ramPct }].slice(-30)
     setTick(n => n + 1)
   }, [brain])
 
@@ -283,6 +319,9 @@ export function DashboardPage() {
     for (const node of liveNodes) {
       const prev = nodeHistoriesRef.current[node.id] ?? []
       nodeHistoriesRef.current[node.id] = [...prev, { t, v: node.cpu_usage }].slice(-30)
+      const ramPct = node.ram_total > 0 ? (node.ram_used / node.ram_total) * 100 : 0
+      const prevRam = nodeRamHistoriesRef.current[node.id] ?? []
+      nodeRamHistoriesRef.current[node.id] = [...prevRam, { t, v: ramPct }].slice(-30)
     }
     setTick(n => n + 1)
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -347,9 +386,9 @@ export function DashboardPage() {
           </div>
         ) : (
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            <BrainCard brain={brain} history={brainHistoryRef.current} connected={connected} />
+            <BrainCard brain={brain} history={brainHistoryRef.current} ramHistory={brainRamHistoryRef.current} connected={connected} />
             {liveNodes.map(node => (
-              <NodeCard key={node.id} node={node} history={nodeHistoriesRef.current[node.id] ?? []} />
+              <NodeCard key={node.id} node={node} history={nodeHistoriesRef.current[node.id] ?? []} ramHistory={nodeRamHistoriesRef.current[node.id] ?? []} />
             ))}
           </div>
         )}

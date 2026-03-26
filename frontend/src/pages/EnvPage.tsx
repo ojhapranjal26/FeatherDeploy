@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { ChevronLeft, Plus, Trash2, Eye, EyeOff, Upload } from 'lucide-react'
+import { ChevronLeft, Plus, Trash2, Eye, EyeOff, Upload, Copy, Download } from 'lucide-react'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
@@ -42,6 +42,7 @@ export function EnvPage() {
   const [addOpen, setAddOpen] = useState(false)
   const [bulkOpen, setBulkOpen] = useState(false)
   const [revealedIds, setRevealedIds] = useState<Set<number>>(new Set())
+  const [revealedValues, setRevealedValues] = useState<Record<number, string>>({})
   const [bulkText, setBulkText] = useState('')
 
   const { data: vars, isLoading } = useQuery({
@@ -102,12 +103,46 @@ export function EnvPage() {
     bulkMutation.mutate(vars)
   }
 
-  const toggleReveal = (id: number) => {
+  const toggleReveal = async (id: number, key: string, isSecret: boolean) => {
     setRevealedIds((prev) => {
       const next = new Set(prev)
       next.has(id) ? next.delete(id) : next.add(id)
       return next
     })
+    if (!isSecret) return
+    if (revealedValues[id] !== undefined) return
+    try {
+      const value = await envApi.reveal(projectId!, serviceId!, key)
+      setRevealedValues(prev => ({ ...prev, [id]: value }))
+    } catch {
+      toast.error('Failed to reveal secret.')
+    }
+  }
+
+  const buildEnvText = () => {
+    return (vars ?? []).map(v => {
+      const val = v.is_secret ? (revealedValues[v.id] ?? '••••••••') : v.value
+      return `${v.key}=${val}`
+    }).join('\n')
+  }
+
+  const copyEnv = async () => {
+    try {
+      await navigator.clipboard.writeText(buildEnvText())
+      toast.success('Copied to clipboard.')
+    } catch {
+      toast.error('Clipboard copy failed.')
+    }
+  }
+
+  const downloadEnv = () => {
+    const blob = new Blob([buildEnvText()], { type: 'text/plain' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = '.env'
+    a.click()
+    URL.revokeObjectURL(url)
   }
 
   return (
@@ -124,6 +159,24 @@ export function EnvPage() {
       <div className="mb-6 flex items-center justify-between">
         <h1 className="text-2xl font-semibold">Environment variables</h1>
         <div className="flex gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            className="gap-1.5"
+            onClick={copyEnv}
+            disabled={!vars?.length}
+          >
+            <Copy className="h-3.5 w-3.5" /> Copy .env
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="gap-1.5"
+            onClick={downloadEnv}
+            disabled={!vars?.length}
+          >
+            <Download className="h-3.5 w-3.5" /> Download .env
+          </Button>
           <Button
             variant="outline"
             size="sm"
@@ -167,7 +220,7 @@ export function EnvPage() {
                   <TableCell className="font-mono text-sm max-w-xs truncate">
                     {v.is_secret
                       ? revealedIds.has(v.id)
-                        ? v.value
+                        ? (revealedValues[v.id] ?? <span className="text-muted-foreground italic text-xs">loading…</span>)
                         : '••••••••'
                       : v.value}
                   </TableCell>
@@ -181,7 +234,7 @@ export function EnvPage() {
                           variant="ghost"
                           size="icon"
                           className="h-7 w-7"
-                          onClick={() => toggleReveal(v.id)}
+                          onClick={() => toggleReveal(v.id, v.key, v.is_secret)}
                         >
                           {revealedIds.has(v.id)
                             ? <EyeOff className="h-3.5 w-3.5" />

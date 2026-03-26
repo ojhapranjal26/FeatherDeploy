@@ -147,11 +147,11 @@ func (h *DeploymentHandler) Logs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Stream log lines by polling deploy_log column until deployment finishes.
-	// Lines already sent are tracked by index so we only emit new lines.
-	// A keep-alive SSE comment (": ping") is sent on every tick even when
-	// there are no new log lines — this prevents Caddy/nginx from closing
-	// the connection during long-running steps (e.g. podman stop 10s wait).
-	var sentLines int
+	// We track the number of *non-empty* lines already sent so we only emit
+	// new content on each tick.  A keep-alive SSE comment (": ping") is sent
+	// on every tick even when there are no new log lines — this prevents
+	// Caddy/nginx from closing the connection during long-running steps.
+	sentLines := 0
 	sendLine := func(line string) {
 		fmt.Fprintf(w, "data: %s\n\n", line)
 		flusher.Flush()
@@ -161,7 +161,7 @@ func (h *DeploymentHandler) Logs(w http.ResponseWriter, r *http.Request) {
 		flusher.Flush()
 	}
 
-	ticker := time.NewTicker(1 * time.Second)
+	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
 	for {
@@ -179,29 +179,25 @@ func (h *DeploymentHandler) Logs(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Emit any new lines
-		if deployLog != "" {
-			allLines := strings.Split(deployLog, "\n")
-			start := sentLines
-			if start < 0 {
-				start = 0
+		// Collect all non-empty lines
+		allLines := strings.Split(deployLog, "\n")
+		var nonEmpty []string
+		for _, l := range allLines {
+			if strings.TrimSpace(l) != "" {
+				nonEmpty = append(nonEmpty, l)
 			}
-			newLinesSent := 0
-			for i := start; i < len(allLines); i++ {
-				if allLines[i] != "" {
-					sendLine(allLines[i])
-					newLinesSent++
-				}
+		}
+
+		// Emit only lines we haven't sent yet
+		if len(nonEmpty) > sentLines {
+			for _, line := range nonEmpty[sentLines:] {
+				sendLine(line)
 			}
-			sentLines = len(allLines)
-			// Send keep-alive if no new content was emitted this tick
-			if newLinesSent == 0 {
-				sendPing()
-			}
-		} else if sentLines == 0 {
-			// Nothing yet — show a waiting message once
+			sentLines = len(nonEmpty)
+		} else if sentLines == 0 && deployLog == "" {
+			// Nothing yet — send a waiting indicator (not counted in sentLines)
 			sendLine("Waiting for deployment to start...")
-			sentLines = -1 // sentinel: waiting message sent
+			sendPing()
 		} else {
 			sendPing()
 		}

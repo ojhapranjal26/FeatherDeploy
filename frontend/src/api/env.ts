@@ -34,4 +34,8 @@ export const envApi = {
   // The backend deletes by key, not by ID
   delete: (projectId: string | number, serviceId: string | number, key: string): Promise<void> =>
     client.delete(`/projects/${projectId}/services/${serviceId}/env/${encodeURIComponent(key)}`).then(() => undefined),
+
+  reveal: (projectId: string | number, serviceId: string | number, key: string): Promise<string> =>
+    client.get<{ value: string }>(`/projects/${projectId}/services/${serviceId}/env/${encodeURIComponent(key)}/reveal`)
+      .then(r => r.data.value),
 }

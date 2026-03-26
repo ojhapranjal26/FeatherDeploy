@@ -121,6 +121,48 @@ func (h *EnvHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// GET /api/projects/{projectID}/services/{serviceID}/env/{key}/reveal
+// Returns the decrypted plaintext value of a secret env var. Only authenticated
+// users with at least editor access to the project may call this.
+func (h *EnvHandler) Reveal(w http.ResponseWriter, r *http.Request) {
+	svcID, err := strconv.ParseInt(r.PathValue("serviceID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errMap("invalid serviceID"))
+		return
+	}
+	key := r.PathValue("key")
+	if key == "" {
+		writeJSON(w, http.StatusBadRequest, errMap("missing key"))
+		return
+	}
+
+	var value string
+	var isSecret int
+	err = h.db.QueryRowContext(r.Context(),
+		`SELECT value, is_secret FROM env_variables WHERE service_id=? AND key=?`, svcID, key,
+	).Scan(&value, &isSecret)
+	if err == sql.ErrNoRows {
+		writeJSON(w, http.StatusNotFound, errMap("variable not found"))
+		return
+	}
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errMap("internal error"))
+		return
+	}
+
+	plaintext := value
+	if isSecret == 1 && len(value) > len(encryptedPrefix) && value[:len(encryptedPrefix)] == encryptedPrefix {
+		decrypted, decErr := crypto.Decrypt(value[len(encryptedPrefix):], h.jwtSecret)
+		if decErr != nil {
+			writeJSON(w, http.StatusInternalServerError, errMap("decryption error"))
+			return
+		}
+		plaintext = decrypted
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"value": plaintext})
+}
+
 // GetDecryptedEnv returns all env vars for a service with secret values
 // decrypted. This is intended for internal use by the deployment engine when
 // injecting environment variables into a container.

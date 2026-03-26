@@ -13,6 +13,7 @@ package deploy
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"fmt"
 	"log/slog"
@@ -63,12 +64,12 @@ func (l *logBuf) text() string {
 func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 	log := &logBuf{}
 
-	// Flush log buffer to DB every 2 s so the SSE log stream shows real-time
+	// Flush log buffer to DB every 500 ms so the SSE log stream shows real-time
 	// progress even while the deployment is still running.
 	done := make(chan struct{})
 	defer close(done)
 	go func() {
-		ticker := time.NewTicker(2 * time.Second)
+		ticker := time.NewTicker(500 * time.Millisecond)
 		defer ticker.Stop()
 		for {
 			select {
@@ -199,7 +200,18 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 		log.add("[dockerfile] using Dockerfile from repository")
 	}
 
-	// ── 6. Podman build ───────────────────────────────────────────────────────
+	// ── 6. Inject env vars as .env for build-time access (Next.js, CRA, etc.) ──
+	// We write the service's env vars to .env / .env.local before podman build.
+	// This allows frameworks that read .env at build time (Next.js, Vite, etc.)
+	// to access DATABASE_URL and other vars during `npm run build` / `tsc`.
+	// The .env file is included via COPY . . in the Dockerfile.
+	if writeErr := writeEnvFileForBuild(db, svcID, jwtSecret, workDir); writeErr != nil {
+		log.add("[env] warning: could not write .env for build: %v", writeErr)
+	} else {
+		log.add("[env] injected env vars into build context")
+	}
+
+	// ── 6b. Podman build ──────────────────────────────────────────────────────
 	imageName := fmt.Sprintf("featherdeploy/svc-%d:dep-%d", svcID, depID)
 	stableImage := fmt.Sprintf("featherdeploy/svc-%d:stable", svcID)
 	log.add("[podman] building image %s", imageName)
@@ -223,13 +235,16 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 	// ── 7. Stop / remove existing container ──────────────────────────────────
 	cName := fmt.Sprintf("fd-svc-%d", svcID)
 	if containerExists(cName) {
-		log.add("[podman] stopping existing container %s", cName)
-		podmanCmd("stop", "--time", "10", cName).Run() //nolint
-		podmanCmd("rm", "-f", cName).Run()             //nolint
+		log.add("[podman] stopping container %s (grace=10s, hard limit=20s)", cName)
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 20*time.Second)
+		podmanCmdCtx(stopCtx, "stop", "--time", "10", cName).Run() //nolint
+		stopCancel()
+		podmanCmd("rm", "-f", cName).Run() //nolint
+		log.add("[podman] container %s removed", cName)
 	}
 
 	// ── 8. Collect env vars ───────────────────────────────────────────────────
-	envArgs := collectEnvArgs(db, svcID)
+	envArgs := collectEnvArgs(db, svcID, jwtSecret)
 
 	// ── 9. Run new container ──────────────────────────────────────────────────
 	runArgs := []string{
@@ -418,9 +433,9 @@ func containerExists(name string) bool {
 	return strings.Contains(string(out), name)
 }
 
-func collectEnvArgs(db *sql.DB, svcID int64) []string {
+func collectEnvArgs(db *sql.DB, svcID int64, jwtSecret string) []string {
 	rows, err := db.Query(
-		`SELECT key, value FROM env_variables WHERE service_id=?`, svcID)
+		`SELECT key, value, is_secret FROM env_variables WHERE service_id=?`, svcID)
 	if err != nil {
 		return nil
 	}
@@ -428,7 +443,15 @@ func collectEnvArgs(db *sql.DB, svcID int64) []string {
 	var args []string
 	for rows.Next() {
 		var k, v string
-		if rows.Scan(&k, &v) == nil {
+		var isSecret int
+		if rows.Scan(&k, &v, &isSecret) == nil {
+			// Decrypt secrets before injecting into container environment
+			if isSecret == 1 && strings.HasPrefix(v, "fdenc:") {
+				plain, err := appCrypto.Decrypt(v[len("fdenc:"):], jwtSecret)
+				if err == nil {
+					v = plain
+				}
+			}
 			args = append(args, "-e", k+"="+v)
 		}
 	}
@@ -670,6 +693,14 @@ func podmanCmd(args ...string) *exec.Cmd {
 	return exec.Command("sudo", full...)
 }
 
+// podmanCmdCtx is like podmanCmd but accepts a context for timeout control.
+func podmanCmdCtx(ctx context.Context, args ...string) *exec.Cmd {
+	full := make([]string, 0, 2+len(args))
+	full = append(full, "-n", "podman")
+	full = append(full, args...)
+	return exec.CommandContext(ctx, "sudo", full...)
+}
+
 // podmanBuild builds a container image using rootful podman (via sudo).
 func podmanBuild(dir string, log *logBuf, imageName string) error {
 	cmd := podmanCmd("build", "-t", imageName, ".")
@@ -714,4 +745,44 @@ func pickBaseImage(framework string) string {
 	default:
 		return "alpine:3.19"
 	}
+}
+
+// writeEnvFileForBuild writes service env vars to .env and .env.local in
+// workDir so that frameworks which read env vars at build time (Next.js,
+// Vite, Create React App, etc.) can access them during `npm run build`.
+// Secret values are decrypted before writing.
+// Both .env and .env.local are written so Next.js and other tools pick them up.
+func writeEnvFileForBuild(db *sql.DB, svcID int64, jwtSecret, workDir string) error {
+	rows, err := db.Query(
+		`SELECT key, value, is_secret FROM env_variables WHERE service_id=?`, svcID)
+	if err != nil {
+		return nil // no vars is fine
+	}
+	defer rows.Close()
+
+	var sb strings.Builder
+	for rows.Next() {
+		var k, v string
+		var isSecret int
+		if rows.Scan(&k, &v, &isSecret) != nil {
+			continue
+		}
+		if isSecret == 1 && strings.HasPrefix(v, "fdenc:") {
+			plain, decErr := appCrypto.Decrypt(v[len("fdenc:"):], jwtSecret)
+			if decErr != nil {
+				continue // skip undecryptable vars
+			}
+			v = plain
+		}
+		// Quote values that contain special shell chars
+		sb.WriteString(k + "=" + v + "\n")
+	}
+	content := []byte(sb.String())
+	if len(content) == 0 {
+		return nil
+	}
+	// Write both .env and .env.local (Next.js prefers .env.local)
+	os.WriteFile(filepath.Join(workDir, ".env"), content, 0600)        //nolint
+	os.WriteFile(filepath.Join(workDir, ".env.local"), content, 0600)  //nolint
+	return nil
 }

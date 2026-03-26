@@ -15,11 +15,9 @@ export interface ContainerStatPoint {
 
 export interface ContainerStatsState {
   latest: ContainerStatPoint | null
-  history: ContainerStatPoint[]   // last MAX_HISTORY points
+  history: ContainerStatPoint[]   // grows while user is on the page
   status: 'connecting' | 'running' | 'not_found' | 'error'
 }
-
-const MAX_HISTORY = 60   // 60 × 2 s = 2 minutes of history
 
 export function useContainerStatsSSE(
   projectId: string | undefined,
@@ -64,14 +62,11 @@ export function useContainerStatsSSE(
           blkOut:   raw.blk_out,
           pids:     raw.pids,
         }
-        setState(prev => {
-          const newHistory = [...prev.history, pt].slice(-MAX_HISTORY)
-          return {
-            latest: pt,
-            history: newHistory,
-            status: raw.status === 'not_found' ? 'not_found' : 'running',
-          }
-        })
+        setState(prev => ({
+          latest: pt,
+          history: [...prev.history, pt],
+          status: raw.status === 'not_found' ? 'not_found' : 'running',
+        }))
       } catch { /* ignore parse errors */ }
     })
 

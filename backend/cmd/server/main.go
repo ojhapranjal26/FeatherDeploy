@@ -337,7 +337,7 @@ func serve() {
 				r.Get("/api/projects/{projectID}/services/{serviceID}/env", envH.List)
 				r.Put("/api/projects/{projectID}/services/{serviceID}/env", envH.Upsert)
 				r.Delete("/api/projects/{projectID}/services/{serviceID}/env/{key}", envH.Delete)
-
+				r.Get("/api/projects/{projectID}/services/{serviceID}/env/{key}/reveal", envH.Reveal)
 				// ── Container live stats SSE ──────────────────────────────
 				r.Get("/api/projects/{projectID}/services/{serviceID}/stats/stream", containerStatsH.Stream)
 

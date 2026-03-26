@@ -20,22 +20,136 @@ func NewContainerStatsHandler() *ContainerStatsHandler {
 	return &ContainerStatsHandler{}
 }
 
-// podmanStatEntry is the JSON object podman emits per container when run with
-//
-//	sudo podman stats --no-stream --format json <name>
+// podmanStatEntry handles both old podman (string "12.34%") and new podman
+// (float64 12.34) CPU field formats via custom JSON unmarshaling.
 type podmanStatEntry struct {
 	Name      string  `json:"Name"`
 	ID        string  `json:"ID"`
-	CPUPerc   string  `json:"CPU"`      // "12.34%"
-	MemUsage  uint64  `json:"MemUsage"` // bytes
-	MemLimit  uint64  `json:"MemLimit"` // bytes
-	MemPerc   string  `json:"MemPerc"`  // "1.23%"
-	NetInput  uint64  `json:"NetInput"` // bytes
+	CPUPerc   string  `json:"-"`        // populated by UnmarshalJSON
+	MemUsage  uint64  `json:"MemUsage"` // bytes (old format)
+	MemLimit  uint64  `json:"MemLimit"` // bytes (old format)
+	MemPerc   string  `json:"-"`        // populated by UnmarshalJSON
+	NetInput  uint64  `json:"NetInput"`
 	NetOutput uint64  `json:"NetOutput"`
 	BlockIn   uint64  `json:"BlockInput"`
 	BlockOut  uint64  `json:"BlockOutput"`
 	PIDs      uint64  `json:"PIDs"`
-	Status    string  `json:"Status"`
+}
+
+// UnmarshalJSON handles multiple podman JSON format variations:
+//   - Old podman: {"CPU":"12.34%", "MemUsage":1234, "MemLimit":5678, "MemPerc":"1.23%"}
+//   - Newer podman: {"cpu_percent":12.34, "mem_usage":{"value":1234,...}, "mem_percent":1.23}
+func (e *podmanStatEntry) UnmarshalJSON(data []byte) error {
+	// Use a raw map so we can handle any key casing and type variations
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+
+	// Helper to read a string key as string
+	str := func(key string) string {
+		if v, ok := raw[key]; ok {
+			var s string
+			if json.Unmarshal(v, &s) == nil {
+				return s
+			}
+		}
+		return ""
+	}
+	// Helper to read a key as float64 (handles both string "12%" and float 12.0)
+	numStr := func(key string) string {
+		if v, ok := raw[key]; ok {
+			var f float64
+			if json.Unmarshal(v, &f) == nil {
+				return strconv.FormatFloat(f, 'f', 2, 64) + "%"
+			}
+			var s string
+			if json.Unmarshal(v, &s) == nil {
+				return s
+			}
+		}
+		return ""
+	}
+	// Helper to read a key as uint64
+	u64 := func(key string) uint64 {
+		if v, ok := raw[key]; ok {
+			var n uint64
+			if json.Unmarshal(v, &n) == nil {
+				return n
+			}
+			// Some formats wrap it in {value: N, string: "..."}
+			var obj struct{ Value uint64 `json:"value"` }
+			if json.Unmarshal(v, &obj) == nil && obj.Value > 0 {
+				return obj.Value
+			}
+		}
+		return 0
+	}
+
+	e.Name = str("Name")
+	if e.Name == "" {
+		e.Name = str("name")
+	}
+	e.ID = str("ID")
+	if e.ID == "" {
+		e.ID = str("id")
+	}
+
+	// CPU: try multiple field names
+	e.CPUPerc = numStr("CPU")
+	if e.CPUPerc == "" || e.CPUPerc == "0.00%" {
+		if v := numStr("cpu_percent"); v != "" {
+			e.CPUPerc = v
+		}
+	}
+	if e.CPUPerc == "" || e.CPUPerc == "0.00%" {
+		if v := numStr("CPUPerc"); v != "" {
+			e.CPUPerc = v
+		}
+	}
+
+	// Memory
+	e.MemPerc = numStr("MemPerc")
+	if e.MemPerc == "" {
+		e.MemPerc = numStr("mem_percent")
+	}
+
+	e.MemUsage = u64("MemUsage")
+	if e.MemUsage == 0 {
+		e.MemUsage = u64("mem_usage")
+	}
+	e.MemLimit = u64("MemLimit")
+	if e.MemLimit == 0 {
+		e.MemLimit = u64("mem_limit")
+	}
+
+	// Network
+	e.NetInput = u64("NetInput")
+	if e.NetInput == 0 {
+		e.NetInput = u64("net_input")
+	}
+	e.NetOutput = u64("NetOutput")
+	if e.NetOutput == 0 {
+		e.NetOutput = u64("net_output")
+	}
+
+	// Block I/O
+	e.BlockIn = u64("BlockInput")
+	if e.BlockIn == 0 {
+		e.BlockIn = u64("block_input")
+	}
+	e.BlockOut = u64("BlockOutput")
+	if e.BlockOut == 0 {
+		e.BlockOut = u64("block_output")
+	}
+
+	// PIDs
+	e.PIDs = u64("PIDs")
+	if e.PIDs == 0 {
+		e.PIDs = u64("pids")
+	}
+
+	return nil
 }
 
 // ContainerStatsEvent is what we send to the frontend.
@@ -99,9 +213,6 @@ func (h *ContainerStatsHandler) Stream(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			return
 		case <-ticker.C:
-			// Keep-alive ping if container gone
-			fmt.Fprint(w, ": ping\n\n")
-			flusher.Flush()
 			send()
 		}
 	}
@@ -129,7 +240,7 @@ func collectContainerStats(cName string) ContainerStatsEvent {
 	if err := json.Unmarshal([]byte(raw), &entries); err != nil || len(entries) == 0 {
 		// Fallback: try single-object format
 		var single podmanStatEntry
-		if err2 := json.Unmarshal([]byte(raw), &single); err2 == nil {
+		if err2 := json.Unmarshal([]byte(raw), &single); err2 == nil && single.Name != "" {
 			entries = []podmanStatEntry{single}
 		} else {
 			return ContainerStatsEvent{Name: cName, Status: "not_found"}
