@@ -252,6 +252,9 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 		"--name", cName,
 		"--restart", "unless-stopped",
 		"-p", fmt.Sprintf("%d:%d", hostPort, appPort),
+		// Rotate container logs: max 10 MB per file, keep 3 files
+		"--log-opt", "max-size=10m",
+		"--log-opt", "max-file=3",
 	}
 	runArgs = append(runArgs, envArgs...)
 	runArgs = append(runArgs, imageName)

@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react'
 
+const MAX_LOG_LINES = 2000
+
 export function useContainerLogs(
   projectId: string | undefined,
   serviceId: string | undefined,
@@ -26,7 +28,11 @@ export function useContainerLogs(
 
     es.onmessage = (e) => {
       if (e.data) {
-        setLines((prev) => [...prev, e.data as string])
+        setLines((prev) => {
+          const next = [...prev, e.data as string]
+          // Keep only the most recent MAX_LOG_LINES lines to avoid memory growth
+          return next.length > MAX_LOG_LINES ? next.slice(next.length - MAX_LOG_LINES) : next
+        })
       }
     }
 

@@ -330,16 +330,39 @@ export function ServicePage() {
     }
   }
 
-  const buildEnvText = () =>
-    (envVars ?? []).map(v => `${v.key}=${v.is_secret ? (revealedValues[v.id] ?? '••••••••') : v.value}`).join('\n')
+  const buildEnvText = (extra: Record<number, string> = {}) => {
+    const r = { ...revealedValues, ...extra }
+    return (envVars ?? []).map(v => `${v.key}=${v.is_secret ? (r[v.id] ?? '') : v.value}`).join('\n')
+  }
+
+  // Reveal all unrevealed secrets in parallel, return merged map
+  const revealAll = async (): Promise<Record<number, string> | null> => {
+    const unrevealed = (envVars ?? []).filter(v => v.is_secret && revealedValues[v.id] === undefined)
+    if (unrevealed.length === 0) return {}
+    try {
+      const results = await Promise.all(
+        unrevealed.map(v => envApi.reveal(projectId!, serviceId!, v.key).then(val => [v.id, val] as [number, string]))
+      )
+      const extra = Object.fromEntries(results)
+      setRevealedValues(prev => ({ ...prev, ...extra }))
+      return extra
+    } catch {
+      toast.error('Failed to reveal secrets.')
+      return null
+    }
+  }
 
   const copyEnv = async () => {
-    try { await navigator.clipboard.writeText(buildEnvText()); toast.success('Copied to clipboard.') }
+    const extra = await revealAll()
+    if (extra === null) return
+    try { await navigator.clipboard.writeText(buildEnvText(extra)); toast.success('Copied to clipboard.') }
     catch { toast.error('Clipboard copy failed.') }
   }
 
-  const downloadEnv = () => {
-    const blob = new Blob([buildEnvText()], { type: 'text/plain' })
+  const downloadEnv = async () => {
+    const extra = await revealAll()
+    if (extra === null) return
+    const blob = new Blob([buildEnvText(extra)], { type: 'text/plain' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a'); a.href = url; a.download = '.env'; a.click()
     URL.revokeObjectURL(url)

@@ -221,54 +221,66 @@ func (h *ContainerStatsHandler) Stream(w http.ResponseWriter, r *http.Request) {
 // collectContainerStats runs podman stats --no-stream for cName and returns
 // the parsed event. Returns a "not_found" event if the container is absent.
 func collectContainerStats(cName string) ContainerStatsEvent {
-	cmd := exec.Command("sudo", "-n", "podman", "stats", "--no-stream", "--format", "json", "--no-trunc", cName)
+	cmd := exec.Command("sudo", "-n", "podman", "stats", "--no-stream", "--format", "json", cName)
 	var outBuf, errBuf bytes.Buffer
 	cmd.Stdout = &outBuf
 	cmd.Stderr = &errBuf
 
-	if err := cmd.Run(); err != nil {
-		// Container may not exist, or not be running — normal case
-		return ContainerStatsEvent{Name: cName, Status: "not_found"}
-	}
+	// Capture the error but do NOT return yet — some podman versions exit with a
+	// non-zero code even when the container is running (e.g. cgroup v1 systems).
+	// We try to parse stdout first; only fall back to not_found if that fails.
+	runErr := cmd.Run()
 
-	// Strip any leading non-JSON content (warnings, TTY noise on stderr leaked
-	// to stdout in some podman configurations).
+	// Strip any leading non-JSON content (warnings, TTY noise).
 	raw := strings.TrimSpace(outBuf.String())
 	if idx := strings.IndexAny(raw, "[{"); idx > 0 {
 		raw = raw[idx:]
 	}
-	if raw == "" || raw == "null" || raw == "[]" {
-		return ContainerStatsEvent{Name: cName, Status: "not_found"}
-	}
 
-	// podman stats --format json returns a JSON array
-	var entries []podmanStatEntry
-	if err := json.Unmarshal([]byte(raw), &entries); err != nil || len(entries) == 0 {
-		// Fallback: try single-object format
-		var single podmanStatEntry
-		if err2 := json.Unmarshal([]byte(raw), &single); err2 == nil && single.Name != "" {
-			entries = []podmanStatEntry{single}
-		} else {
-			return ContainerStatsEvent{Name: cName, Status: "not_found"}
+	if raw != "" && raw != "null" && raw != "[]" {
+		// podman stats --format json returns a JSON array
+		var entries []podmanStatEntry
+		if err := json.Unmarshal([]byte(raw), &entries); err != nil || len(entries) == 0 {
+			// Fallback: try single-object format
+			var single podmanStatEntry
+			if err2 := json.Unmarshal([]byte(raw), &single); err2 == nil {
+				entries = []podmanStatEntry{single}
+			}
+		}
+		if len(entries) > 0 {
+			e := entries[0]
+			if e.Name == "" {
+				e.Name = cName
+			}
+			return ContainerStatsEvent{
+				Name:     e.Name,
+				CPUPct:   parsePercent(e.CPUPerc),
+				MemUsed:  e.MemUsage,
+				MemTotal: e.MemLimit,
+				MemPct:   parsePercent(e.MemPerc),
+				NetIn:    e.NetInput,
+				NetOut:   e.NetOutput,
+				BlkIn:    e.BlockIn,
+				BlkOut:   e.BlockOut,
+				PIDs:     e.PIDs,
+				Status:   "running",
+			}
 		}
 	}
 
-	e := entries[0]
-	// If Name came back empty (some podman versions omit it), set it from cName
-	if e.Name == "" {
-		e.Name = cName
+	// stdout was empty or unparseable.
+	if runErr != nil {
+		// Command failed and no output → container not found or not running.
+		return ContainerStatsEvent{Name: cName, Status: "not_found"}
 	}
-	return ContainerStatsEvent{
-		Name:     e.Name,
-		CPUPct:   parsePercent(e.CPUPerc),
-		MemUsed:  e.MemUsage,
-		MemTotal: e.MemLimit,
-		MemPct:   parsePercent(e.MemPerc),
-		NetIn:    e.NetInput,
-		NetOut:   e.NetOutput,
-		BlkIn:    e.BlockIn,
-		BlkOut:   e.BlockOut,
-		PIDs:     e.PIDs,
-		Status:   "running",
+
+	// Command succeeded but returned no useful stats — container may be starting.
+	// Ask podman inspect for its actual state.
+	inspCmd := exec.Command("sudo", "-n", "podman", "inspect", "--format", "{{.State.Status}}", cName)
+	out, _ := inspCmd.Output()
+	state := strings.TrimSpace(string(out))
+	if state == "running" {
+		return ContainerStatsEvent{Name: cName, Status: "running"}
 	}
+	return ContainerStatsEvent{Name: cName, Status: "not_found"}
 }
