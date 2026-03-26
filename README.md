@@ -21,6 +21,7 @@
   - OAuth App — connect a personal GitHub account
   - GitHub App — organisation-wide repo access via RS256 JWT installation tokens
   - SSH Keys — generate or import ED25519 deploy keys (private keys stored AES-256-GCM encrypted)
+  - 📖 [Full GitHub setup guide →](docs/github-setup.md)
 - **Podman containers** — deploy services as rootless OCI containers.
 - **Automatic TLS** — Caddy reverse proxy obtains Let's Encrypt certificates for your domain.
 - **Non-root service user** — the panel process runs under a dedicated Linux user (not root) for security isolation.

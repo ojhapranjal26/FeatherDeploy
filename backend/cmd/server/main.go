@@ -209,6 +209,8 @@ func serve() {
 
 	// GitHub App status is public (frontend uses it to show connect button)
 	r.Get("/api/github-app/status", ghAppH.Status)
+	// GitHub App webhook — public (GitHub signs payloads with HMAC-SHA256)
+	r.Post("/api/github-app/webhook", ghAppH.Webhook)
 
 	// Node join flow — the join token serves as the credential
 	r.Get("/api/nodes/{token}/join-script", nodeH.JoinScript)

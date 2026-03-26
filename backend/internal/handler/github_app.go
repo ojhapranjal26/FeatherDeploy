@@ -3,13 +3,17 @@ package handler
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
 	"crypto/rsa"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -278,4 +282,83 @@ func (h *GitHubAppHandler) InjectAppClaims(w http.ResponseWriter, r *http.Reques
 
 // keep compiler happy — exported for use in main.go
 var _ = bytes.NewReader
+
+// ─── POST /api/github-app/webhook (public — GitHub signs with HMAC-SHA256) ──
+//
+// GitHub delivers push/installation/etc. events here.
+// Every delivery is verified using HMAC-SHA256 against the stored webhook_secret.
+// Unknown or unhandled event types are acknowledged with 200 OK and ignored.
+func (h *GitHubAppHandler) Webhook(w http.ResponseWriter, r *http.Request) {
+	// Read body (max 10 MB — GitHub payloads are rarely > 1 MB)
+	body, err := io.ReadAll(io.LimitReader(r.Body, 10<<20))
+	if err != nil {
+		http.Error(w, "read error", http.StatusInternalServerError)
+		return
+	}
+
+	// Load the stored webhook secret
+	var secret string
+	_ = h.db.QueryRowContext(r.Context(),
+		`SELECT webhook_secret FROM github_app_config WHERE id = 1`,
+	).Scan(&secret)
+
+	// Verify signature when a secret is configured
+	if secret != "" {
+		sig := r.Header.Get("X-Hub-Signature-256")
+		if !strings.HasPrefix(sig, "sha256=") {
+			writeJSON(w, http.StatusUnauthorized, errMap("missing X-Hub-Signature-256 header"))
+			return
+		}
+		got, err := hex.DecodeString(strings.TrimPrefix(sig, "sha256="))
+		if err != nil {
+			writeJSON(w, http.StatusUnauthorized, errMap("malformed signature"))
+			return
+		}
+		mac := hmac.New(sha256.New, []byte(secret))
+		mac.Write(body)
+		expected := mac.Sum(nil)
+		if !hmac.Equal(got, expected) {
+			writeJSON(w, http.StatusUnauthorized, errMap("invalid webhook signature"))
+			return
+		}
+	}
+
+	eventType := r.Header.Get("X-GitHub-Event")
+	deliveryID := r.Header.Get("X-GitHub-Delivery")
+	slog.Info("github-app webhook", "event", eventType, "delivery", deliveryID)
+
+	// Parse common fields (repository full name, sender)
+	var payload struct {
+		Ref        string `json:"ref"`         // e.g. refs/heads/main
+		After      string `json:"after"`       // commit SHA after push
+		Repository struct {
+			FullName string `json:"full_name"`
+			HTMLURL  string `json:"html_url"`
+		} `json:"repository"`
+		Sender struct {
+			Login string `json:"login"`
+		} `json:"sender"`
+	}
+	_ = json.Unmarshal(body, &payload)
+
+	switch eventType {
+	case "push":
+		// Future: match repository + branch to services configured to auto-deploy
+		branch := strings.TrimPrefix(payload.Ref, "refs/heads/")
+		slog.Info("github-app push received",
+			"repo", payload.Repository.FullName,
+			"branch", branch,
+			"commit", payload.After,
+			"sender", payload.Sender.Login,
+		)
+	case "ping":
+		// GitHub sends a ping event when a webhook is first created
+		slog.Info("github-app webhook ping received", "delivery", deliveryID)
+	default:
+		// Unhandled event — log and ignore
+		slog.Debug("github-app webhook: unhandled event", "event", eventType)
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
 
