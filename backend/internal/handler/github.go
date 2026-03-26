@@ -48,12 +48,23 @@ func (h *GitHubHandler) AuthURL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Store state in a short-lived HTTP-only cookie
+	// Store state + userID in short-lived HTTP-only cookies.
+	// The callback route is public (no Authorization header on browser redirects),
+	// so we carry identity via a companion cookie set here while auth IS present.
+	claims := mw.GetClaims(r.Context())
 	http.SetCookie(w, &http.Cookie{
 		Name:     "gh_oauth_state",
 		Value:    state,
-		Path:     "/",
-		MaxAge:   300, // 5 minutes
+		Path:     "/api/github/callback",
+		MaxAge:   300,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	})
+	http.SetCookie(w, &http.Cookie{
+		Name:     "gh_oauth_uid",
+		Value:    fmt.Sprintf("%d", claims.UserID),
+		Path:     "/api/github/callback",
+		MaxAge:   300,
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
 	})
@@ -70,24 +81,24 @@ func (h *GitHubHandler) AuthURL(w http.ResponseWriter, r *http.Request) {
 }
 
 // ─── GET /api/github/callback ────────────────────────────────────────────────
-// GitHub redirects here after user authorizes.
-// Exchanges code for access token and stores it on the user record.
-// The frontend must pass its JWT as the "jwt" query param since GitHub's
-// redirect doesn't carry the Authorization header.
+// GitHub redirects here after user authorizes (public route — no Authorization header).
+// User identity is carried via the gh_oauth_uid cookie set during /api/github/auth.
 func (h *GitHubHandler) Callback(w http.ResponseWriter, r *http.Request) {
-	// Validate state
-	cookie, err := r.Cookie("gh_oauth_state")
-	if err != nil || cookie.Value == "" {
+	// Validate CSRF state
+	stateCookie, err := r.Cookie("gh_oauth_state")
+	if err != nil || stateCookie.Value == "" {
 		http.Redirect(w, r, h.origin+"/settings/github?error=state_missing", http.StatusFound)
 		return
 	}
-	if r.URL.Query().Get("state") != cookie.Value {
+	if r.URL.Query().Get("state") != stateCookie.Value {
 		http.Redirect(w, r, h.origin+"/settings/github?error=state_mismatch", http.StatusFound)
 		return
 	}
 
-	// Clear state cookie
-	http.SetCookie(w, &http.Cookie{Name: "gh_oauth_state", Value: "", MaxAge: -1, Path: "/"})
+	// Clear state + uid cookies
+	for _, name := range []string{"gh_oauth_state", "gh_oauth_uid"} {
+		http.SetCookie(w, &http.Cookie{Name: name, Value: "", MaxAge: -1, Path: "/api/github/callback"})
+	}
 
 	code := r.URL.Query().Get("code")
 	if code == "" {
@@ -95,9 +106,14 @@ func (h *GitHubHandler) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get user from context (set by Authenticate middleware on this route)
-	claims := mw.GetClaims(r.Context())
-	if claims == nil {
+	// Recover user identity from companion cookie (set during /api/github/auth while user was authenticated)
+	uidCookie, err := r.Cookie("gh_oauth_uid")
+	if err != nil || uidCookie.Value == "" {
+		http.Redirect(w, r, h.origin+"/settings/github?error=not_logged_in", http.StatusFound)
+		return
+	}
+	var userID int64
+	if _, scanErr := fmt.Sscanf(uidCookie.Value, "%d", &userID); scanErr != nil || userID == 0 {
 		http.Redirect(w, r, h.origin+"/settings/github?error=not_logged_in", http.StatusFound)
 		return
 	}
@@ -113,7 +129,7 @@ func (h *GitHubHandler) Callback(w http.ResponseWriter, r *http.Request) {
 	// Store access token and github_login
 	_, err = h.db.ExecContext(r.Context(),
 		`UPDATE users SET github_access_token = ?, github_login = ?, updated_at = datetime('now') WHERE id = ?`,
-		accessToken, ghLogin, claims.UserID,
+		accessToken, ghLogin, userID,
 	)
 	if err != nil {
 		slog.Error("store github token", "err", err)

@@ -212,6 +212,10 @@ func serve() {
 	// GitHub App webhook — public (GitHub signs payloads with HMAC-SHA256)
 	r.Post("/api/github-app/webhook", ghAppH.Webhook)
 
+	// GitHub OAuth callback — public (browser redirect from GitHub carries no Authorization header).
+	// User identity is verified via the gh_oauth_uid cookie set during /api/github/auth.
+	r.Get("/api/github/callback", ghH.Callback)
+
 	// Node join flow — the join token serves as the credential
 	r.Get("/api/nodes/{token}/join-script", nodeH.JoinScript)
 	r.Post("/api/nodes/{token}/complete-join", nodeH.CompleteJoin)
@@ -266,7 +270,6 @@ func serve() {
 		// and browse repos, branches and folder trees.
 		r.Get("/api/github/status", ghH.Status)
 		r.Get("/api/github/auth", ghH.AuthURL)
-		r.Get("/api/github/callback", ghH.Callback)
 		r.Delete("/api/github/disconnect", ghH.Disconnect)
 		r.Get("/api/github/repos", ghH.ListRepos)
 		r.Get("/api/github/repos/{owner}/{repo}/branches", ghH.ListBranches)
