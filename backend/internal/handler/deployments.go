@@ -151,7 +151,17 @@ func (h *DeploymentHandler) Logs(w http.ResponseWriter, r *http.Request) {
 	// new content on each tick.  A keep-alive SSE comment (": ping") is sent
 	// on every tick even when there are no new log lines — this prevents
 	// Caddy/nginx from closing the connection during long-running steps.
-	sentLines := 0
+	//
+	// The optional ?skip=N query param lets the client tell us how many lines
+	// it already received (e.g. after a network reconnect) so we don't send
+	// duplicates.
+	initialSkip := 0
+	if s := r.URL.Query().Get("skip"); s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n > 0 {
+			initialSkip = n
+		}
+	}
+	sentLines := initialSkip
 	sendLine := func(line string) {
 		fmt.Fprintf(w, "data: %s\n\n", line)
 		flusher.Flush()
@@ -194,10 +204,6 @@ func (h *DeploymentHandler) Logs(w http.ResponseWriter, r *http.Request) {
 				sendLine(line)
 			}
 			sentLines = len(nonEmpty)
-		} else if sentLines == 0 && deployLog == "" {
-			// Nothing yet — send a waiting indicator (not counted in sentLines)
-			sendLine("Waiting for deployment to start...")
-			sendPing()
 		} else {
 			sendPing()
 		}

@@ -36,7 +36,15 @@ export function useDeploymentLogs(
       if (destroyed || doneRef.current) return
 
       const token = localStorage.getItem('token')
-      const url = `/api/projects/${projectId}/services/${serviceId}/deployments/${deploymentId}/logs${token ? `?token=${encodeURIComponent(token)}` : ''}`
+      // Pass skip=N so the server only sends lines the client hasn't seen yet.
+      // On the very first connect linesCountRef.current is 0 (no skip).
+      // On reconnect after a network drop it equals the number of real lines
+      // already displayed, avoiding duplicate lines in the log viewer.
+      const skip = linesCountRef.current
+      const qs = new URLSearchParams()
+      if (skip > 0) qs.set('skip', String(skip))
+      if (token) qs.set('token', token)
+      const url = `/api/projects/${projectId}/services/${serviceId}/deployments/${deploymentId}/logs?${qs.toString()}`
       es = new EventSource(url)
 
       es.onmessage = (e) => {

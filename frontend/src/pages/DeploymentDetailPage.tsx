@@ -8,48 +8,50 @@ import { useDeploymentLogs } from '@/hooks/useDeploymentLogs'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 
-// Deployment pipeline steps — detected from log line prefixes
+// Deployment pipeline steps — detected from log line prefixes.
+// Steps marked optional=true are only shown when their prefix actually appears
+// in the log (so skipped steps don't pollute the UI with false "completed" marks).
 const PIPELINE_STEPS = [
-  { prefix: '[ssh]',                    label: 'Set up SSH key' },
-  { prefix: '[clone]',                  label: 'Clone repository' },
-  { prefix: '[build]',                  label: 'Run build command' },
-  { prefix: '[dockerfile]',             label: 'Prepare Dockerfile' },
-  { prefix: '[podman] building',        label: 'Build container image' },
-  { prefix: '[podman] stopping',        label: 'Stop existing container' },
-  { prefix: '[podman] podman run',      label: 'Start container' },
-  { prefix: '[deploy] deployment suc',  label: 'Deployment complete' },
+  { prefix: '[ssh]',                    label: 'Set up SSH key',         optional: true  },
+  { prefix: '[clone]',                  label: 'Clone repository',       optional: false },
+  { prefix: '[build]',                  label: 'Run build command',      optional: true  },
+  { prefix: '[dockerfile]',             label: 'Prepare Dockerfile',     optional: false },
+  { prefix: '[podman] building',        label: 'Build container image',  optional: false },
+  { prefix: '[podman] stopping',        label: 'Stop existing container',optional: true  },
+  { prefix: '[podman] podman run',      label: 'Start container',        optional: false },
+  { prefix: '[deploy] deployment suc',  label: 'Deployment complete',    optional: false },
 ]
 
 function DeploymentSteps({ lines, done, failed }: { lines: { line?: string }[]; done: boolean; failed: boolean }) {
   const logText = lines.map(l => (l.line ?? '').toLowerCase()).join('\n')
 
-  // Determine which steps have been reached
-  const reachedIdx = PIPELINE_STEPS.reduce((max, step, i) =>
-    logText.includes(step.prefix.toLowerCase()) ? i : max, -1)
+  // Per-step: did this prefix actually appear in the log text?
+  const stepReached = PIPELINE_STEPS.map(s => logText.includes(s.prefix.toLowerCase()))
 
-  // Filter: only show steps that are relevant (skip SSH if not in logs at all and not reached)
-  const visibleSteps = PIPELINE_STEPS.filter((step) => {
-    if (step.prefix === '[ssh]') return logText.includes('[ssh]')
-    return true
-  })
+  // Visible steps: mandatory ones always show; optional ones only when logged
+  const visibleSteps = PIPELINE_STEPS.filter((s, i) => !s.optional || stepReached[i])
+
+  // First visible step index (in visibleSteps array) that hasn't been reached
+  const firstUnreachedVisIdx = visibleSteps.findIndex(
+    (s) => !stepReached[PIPELINE_STEPS.indexOf(s)]
+  )
 
   if (lines.length === 0 && !done) return null
 
   return (
     <div className="mb-4 flex flex-wrap items-center gap-x-0 gap-y-2">
-      {visibleSteps.map((step, i) => {
+      {visibleSteps.map((step, visIdx) => {
         const globalIdx = PIPELINE_STEPS.indexOf(step)
-        const isReached = globalIdx <= reachedIdx
-        const isCurrent = globalIdx === reachedIdx + 1 && !done
-        const isFailed = failed && globalIdx === reachedIdx + 1
+        const isReached = stepReached[globalIdx]
+        const isCurrent = !done && !failed && visIdx === firstUnreachedVisIdx
+        const isFailed  = failed && visIdx === firstUnreachedVisIdx
 
         return (
           <div key={step.label} className="flex items-center">
             <div className={`flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs transition-all ${
-              isReached && done && !failed ? 'text-emerald-600 dark:text-emerald-400' :
-              isReached && !isCurrent ? 'text-emerald-600 dark:text-emerald-400' :
-              isCurrent ? 'text-primary' :
-              isFailed ? 'text-destructive' :
+              isReached  ? 'text-emerald-600 dark:text-emerald-400' :
+              isCurrent  ? 'text-primary' :
+              isFailed   ? 'text-destructive' :
               'text-muted-foreground'
             }`}>
               {isCurrent ? (
@@ -63,8 +65,8 @@ function DeploymentSteps({ lines, done, failed }: { lines: { line?: string }[]; 
               )}
               <span className="hidden sm:inline">{step.label}</span>
             </div>
-            {i < visibleSteps.length - 1 && (
-              <div className={`h-px w-4 mx-0.5 ${globalIdx < reachedIdx ? 'bg-emerald-500' : 'bg-border'}`} />
+            {visIdx < visibleSteps.length - 1 && (
+              <div className={`h-px w-4 mx-0.5 transition-colors ${isReached ? 'bg-emerald-500' : 'bg-border'}`} />
             )}
           </div>
         )
