@@ -221,16 +221,22 @@ func (h *ContainerStatsHandler) Stream(w http.ResponseWriter, r *http.Request) {
 // collectContainerStats runs podman stats --no-stream for cName and returns
 // the parsed event. Returns a "not_found" event if the container is absent.
 func collectContainerStats(cName string) ContainerStatsEvent {
-	cmd := exec.Command("sudo", "-n", "podman", "stats", "--no-stream", "--format", "json", cName)
-	var buf bytes.Buffer
-	cmd.Stdout = &buf
-	cmd.Stderr = &buf
+	cmd := exec.Command("sudo", "-n", "podman", "stats", "--no-stream", "--format", "json", "--no-trunc", cName)
+	var outBuf, errBuf bytes.Buffer
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
 
 	if err := cmd.Run(); err != nil {
+		// Container may not exist, or not be running — normal case
 		return ContainerStatsEvent{Name: cName, Status: "not_found"}
 	}
 
-	raw := strings.TrimSpace(buf.String())
+	// Strip any leading non-JSON content (warnings, TTY noise on stderr leaked
+	// to stdout in some podman configurations).
+	raw := strings.TrimSpace(outBuf.String())
+	if idx := strings.IndexAny(raw, "[{"); idx > 0 {
+		raw = raw[idx:]
+	}
 	if raw == "" || raw == "null" || raw == "[]" {
 		return ContainerStatsEvent{Name: cName, Status: "not_found"}
 	}
@@ -248,8 +254,12 @@ func collectContainerStats(cName string) ContainerStatsEvent {
 	}
 
 	e := entries[0]
+	// If Name came back empty (some podman versions omit it), set it from cName
+	if e.Name == "" {
+		e.Name = cName
+	}
 	return ContainerStatsEvent{
-		Name:     cName,
+		Name:     e.Name,
 		CPUPct:   parsePercent(e.CPUPerc),
 		MemUsed:  e.MemUsage,
 		MemTotal: e.MemLimit,

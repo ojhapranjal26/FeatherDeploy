@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { ChevronLeft, Rocket, Clock, Search, Loader2, CheckCircle2, Plus, Trash2, Eye, EyeOff, ExternalLink, Terminal, Code2, CircleDot, Cpu, MemoryStick, Network, HardDrive, Activity } from 'lucide-react'
+import { ChevronLeft, Rocket, Clock, Search, Loader2, CheckCircle2, Plus, Trash2, Eye, EyeOff, ExternalLink, Terminal, Code2, CircleDot, Cpu, MemoryStick, Network, HardDrive, Activity, Copy, Download, Upload, X, Lock, Globe, Pencil, Check } from 'lucide-react'
 import {
   AreaChart, Area, ResponsiveContainer, Tooltip, XAxis, YAxis, CartesianGrid,
 } from 'recharts'
@@ -25,6 +25,10 @@ import {
   Dialog, DialogContent, DialogDescription, DialogFooter,
   DialogHeader, DialogTitle,
 } from '@/components/ui/dialog'
+import { Textarea } from '@/components/ui/textarea'
+import {
+  Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
+} from '@/components/ui/table'
 
 function formatDuration(start?: string, end?: string) {
   if (!start) return '—'
@@ -158,6 +162,14 @@ export function ServicePage() {
   const [envValue, setEnvValue] = useState('')
   const [envIsSecret, setEnvIsSecret] = useState(true)
   const [revealedIds, setRevealedIds] = useState<Set<number>>(new Set())
+  const [revealedValues, setRevealedValues] = useState<Record<number, string>>({})
+  const [editingId, setEditingId] = useState<number | null>(null)
+  const [editKey, setEditKey] = useState('')
+  const [editValue, setEditValue] = useState('')
+  const [editIsSecret, setEditIsSecret] = useState(true)
+  const [envBulkOpen, setEnvBulkOpen] = useState(false)
+  const [envBulkText, setEnvBulkText] = useState('')
+  const [envPreviewRows, setEnvPreviewRows] = useState<{ id: string; key: string; value: string; isSecret: boolean }[]>([])
 
   const { data: service, isLoading } = useQuery({
     queryKey: ['service', projectId, serviceId],
@@ -204,6 +216,18 @@ export function ServicePage() {
       toast.success('Variable removed.')
     },
     onError: () => toast.error('Failed to remove variable.'),
+  })
+
+  const bulkEnvMutation = useMutation({
+    mutationFn: (vars: UpsertEnvPayload[]) => envApi.bulkUpsert(projectId!, serviceId!, vars),
+    onSuccess: (d) => {
+      qc.invalidateQueries({ queryKey: ['env', serviceId] })
+      setEnvBulkOpen(false)
+      setEnvBulkText('')
+      setEnvPreviewRows([])
+      toast.success(`${d.upserted} variable(s) imported.`)
+    },
+    onError: () => toast.error('Bulk import failed.'),
   })
 
   const deployMutation = useMutation({
@@ -288,6 +312,69 @@ export function ServicePage() {
     } finally {
       setDetecting(false)
     }
+  }
+
+  // ── Env helpers ──────────────────────────────────────────────────────────
+
+  const toggleEnvReveal = async (id: number, key: string, isSecret: boolean) => {
+    const isRevealed = revealedIds.has(id)
+    setRevealedIds(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n })
+    if (isRevealed || !isSecret) return
+    if (revealedValues[id] !== undefined) return
+    try {
+      const value = await envApi.reveal(projectId!, serviceId!, key)
+      setRevealedValues(prev => ({ ...prev, [id]: value }))
+    } catch {
+      toast.error('Failed to reveal secret.')
+      setRevealedIds(prev => { const n = new Set(prev); n.delete(id); return n })
+    }
+  }
+
+  const buildEnvText = () =>
+    (envVars ?? []).map(v => `${v.key}=${v.is_secret ? (revealedValues[v.id] ?? '••••••••') : v.value}`).join('\n')
+
+  const copyEnv = async () => {
+    try { await navigator.clipboard.writeText(buildEnvText()); toast.success('Copied to clipboard.') }
+    catch { toast.error('Clipboard copy failed.') }
+  }
+
+  const downloadEnv = () => {
+    const blob = new Blob([buildEnvText()], { type: 'text/plain' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a'); a.href = url; a.download = '.env'; a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  const envParseLine = (l: string) => {
+    const eq = l.indexOf('=')
+    return { id: `${Math.random()}`, key: l.slice(0, eq).trim(), value: l.slice(eq + 1).trim().replace(/^["']|["']$/g, ''), isSecret: true }
+  }
+
+  const handleEnvBulkText = (text: string) => {
+    setEnvBulkText(text)
+    setEnvPreviewRows(text.split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#') && l.includes('=')).map(envParseLine))
+  }
+
+  const updateEnvPreviewRow = (id: string, field: 'key' | 'value' | 'isSecret', val: string | boolean) =>
+    setEnvPreviewRows(rows => rows.map(r => r.id === id ? { ...r, [field]: val } : r))
+
+  const removeEnvPreviewRow = (id: string) =>
+    setEnvPreviewRows(rows => rows.filter(r => r.id !== id))
+
+  const importEnvPreview = () => {
+    const vars: UpsertEnvPayload[] = envPreviewRows.filter(r => r.key.trim()).map(r => ({ key: r.key.trim(), value: r.value, is_secret: r.isSecret }))
+    bulkEnvMutation.mutate(vars)
+  }
+
+  const startEditEnv = (v: { id: number; key: string; value: string; is_secret: boolean }) => {
+    setEditingId(v.id); setEditKey(v.key)
+    setEditValue(v.is_secret ? (revealedValues[v.id] ?? '') : v.value)
+    setEditIsSecret(v.is_secret)
+  }
+
+  const saveEditEnv = () => {
+    if (!editKey.trim() || !editValue) { toast.error('Key and value are required.'); return }
+    upsertEnvMutation.mutate({ key: editKey, value: editValue, is_secret: editIsSecret }, { onSuccess: () => setEditingId(null) })
   }
 
   if (isLoading) {
@@ -527,9 +614,20 @@ export function ServicePage() {
               <h2 className="font-medium">Environment variables</h2>
               <p className="text-xs text-muted-foreground mt-0.5">Applied to every deployment. Secrets are encrypted at rest.</p>
             </div>
-            <Button size="sm" className="gap-1.5" onClick={() => setAddEnvOpen(true)}>
-              <Plus className="h-3.5 w-3.5" /> Add variable
-            </Button>
+            <div className="flex flex-wrap gap-2">
+              <Button variant="outline" size="sm" className="gap-1.5" onClick={copyEnv} disabled={!envVars?.length}>
+                <Copy className="h-3.5 w-3.5" /> Copy .env
+              </Button>
+              <Button variant="outline" size="sm" className="gap-1.5" onClick={downloadEnv} disabled={!envVars?.length}>
+                <Download className="h-3.5 w-3.5" /> Download .env
+              </Button>
+              <Button variant="outline" size="sm" className="gap-1.5" onClick={() => setEnvBulkOpen(true)}>
+                <Upload className="h-3.5 w-3.5" /> Import .env
+              </Button>
+              <Button size="sm" className="gap-1.5" onClick={() => setAddEnvOpen(true)}>
+                <Plus className="h-3.5 w-3.5" /> Add variable
+              </Button>
+            </div>
           </div>
 
           {envLoading ? (
@@ -538,39 +636,99 @@ export function ServicePage() {
             <div className="flex flex-col items-center justify-center rounded-xl border border-dashed py-12 text-center">
               <p className="text-sm font-medium">No variables yet</p>
               <p className="text-xs text-muted-foreground mt-1">Add environment variables to pass to your container.</p>
-              <Button size="sm" className="mt-3 gap-1.5" onClick={() => setAddEnvOpen(true)}>
-                <Plus className="h-3.5 w-3.5" /> Add variable
-              </Button>
+              <div className="flex gap-2 mt-3">
+                <Button size="sm" variant="outline" className="gap-1.5" onClick={() => setEnvBulkOpen(true)}>
+                  <Upload className="h-3.5 w-3.5" /> Import .env
+                </Button>
+                <Button size="sm" className="gap-1.5" onClick={() => setAddEnvOpen(true)}>
+                  <Plus className="h-3.5 w-3.5" /> Add variable
+                </Button>
+              </div>
             </div>
           ) : (
-            <div className="rounded-lg border divide-y">
-              {envVars?.map((v) => (
-                <div key={v.id} className="flex items-center gap-3 px-4 py-2.5">
-                  <span className="font-mono text-sm font-medium min-w-[140px] shrink-0">{v.key}</span>
-                  <span className="font-mono text-sm text-muted-foreground flex-1 truncate">
-                    {v.is_secret
-                      ? revealedIds.has(v.id) ? (v.value || '••••••••') : '••••••••'
-                      : v.value}
-                  </span>
-                  <Badge variant={v.is_secret ? 'secondary' : 'outline'} className="text-[10px] shrink-0">
-                    {v.is_secret ? 'Secret' : 'Plain'}
-                  </Badge>
-                  <div className="flex items-center gap-1 shrink-0">
-                    {v.is_secret && (
-                      <Button variant="ghost" size="icon" className="h-7 w-7"
-                        onClick={() => setRevealedIds(prev => {
-                          const n = new Set(prev); n.has(v.id) ? n.delete(v.id) : n.add(v.id); return n
-                        })}>
-                        {revealedIds.has(v.id) ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
-                      </Button>
-                    )}
-                    <Button variant="ghost" size="icon" className="h-7 w-7 text-destructive hover:text-destructive"
-                      onClick={() => confirm(`Remove "${v.key}"?`) && deleteEnvMutation.mutate(v.key)}>
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </Button>
-                  </div>
-                </div>
-              ))}
+            <div className="rounded-lg border">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Key</TableHead>
+                    <TableHead>Value</TableHead>
+                    <TableHead className="w-24">Type</TableHead>
+                    <TableHead className="w-28" />
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {envVars?.map((v) =>
+                    editingId === v.id ? (
+                      <TableRow key={v.id}>
+                        <TableCell className="py-1.5">
+                          <Input className="h-7 font-mono text-xs" value={editKey}
+                            onChange={e => setEditKey(e.target.value)} />
+                        </TableCell>
+                        <TableCell className="py-1.5">
+                          <Input className="h-7 font-mono text-xs"
+                            type={editIsSecret ? 'password' : 'text'}
+                            placeholder={editIsSecret && !editValue ? 'Enter new value' : ''}
+                            value={editValue}
+                            onChange={e => setEditValue(e.target.value)} />
+                        </TableCell>
+                        <TableCell className="py-1.5">
+                          <button type="button"
+                            className={`flex items-center gap-1 text-xs rounded-full px-2.5 py-0.5 font-medium transition-colors ${editIsSecret ? 'bg-amber-500/15 text-amber-700 dark:text-amber-400' : 'bg-muted text-muted-foreground'}`}
+                            onClick={() => setEditIsSecret(s => !s)}>
+                            {editIsSecret ? <><Lock className="h-2.5 w-2.5" /> Secret</> : <><Globe className="h-2.5 w-2.5" /> Plain</>}
+                          </button>
+                        </TableCell>
+                        <TableCell className="py-1.5">
+                          <div className="flex justify-end gap-1">
+                            <Button variant="ghost" size="icon" className="h-7 w-7 text-emerald-600 hover:text-emerald-600"
+                              onClick={saveEditEnv} disabled={upsertEnvMutation.isPending}>
+                              <Check className="h-3.5 w-3.5" />
+                            </Button>
+                            <Button variant="ghost" size="icon" className="h-7 w-7"
+                              onClick={() => setEditingId(null)}>
+                              <X className="h-3.5 w-3.5" />
+                            </Button>
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    ) : (
+                      <TableRow key={v.id}>
+                        <TableCell className="font-mono text-sm py-2.5">{v.key}</TableCell>
+                        <TableCell className="font-mono text-sm py-2.5 max-w-xs truncate text-muted-foreground">
+                          {v.is_secret
+                            ? revealedIds.has(v.id)
+                              ? (revealedValues[v.id] ?? <span className="italic text-xs">loading…</span>)
+                              : '••••••••'
+                            : v.value}
+                        </TableCell>
+                        <TableCell className="py-2.5">
+                          <span className={`inline-flex items-center gap-1 text-[10px] rounded-full px-2 py-0.5 font-medium ${v.is_secret ? 'bg-amber-500/15 text-amber-700 dark:text-amber-400' : 'bg-muted text-muted-foreground'}`}>
+                            {v.is_secret ? <><Lock className="h-2.5 w-2.5" /> Secret</> : <><Globe className="h-2.5 w-2.5" /> Plain</>}
+                          </span>
+                        </TableCell>
+                        <TableCell className="py-2.5">
+                          <div className="flex justify-end gap-1">
+                            <Button variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground"
+                              onClick={() => startEditEnv(v)}>
+                              <Pencil className="h-3 w-3" />
+                            </Button>
+                            {v.is_secret && (
+                              <Button variant="ghost" size="icon" className="h-7 w-7"
+                                onClick={() => toggleEnvReveal(v.id, v.key, v.is_secret)}>
+                                {revealedIds.has(v.id) ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+                              </Button>
+                            )}
+                            <Button variant="ghost" size="icon" className="h-7 w-7 text-destructive hover:text-destructive"
+                              onClick={() => confirm(`Remove "${v.key}"?`) && deleteEnvMutation.mutate(v.key)}>
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </Button>
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    )
+                  )}
+                </TableBody>
+              </Table>
             </div>
           )}
 
@@ -606,6 +764,92 @@ export function ServicePage() {
                   {upsertEnvMutation.isPending ? 'Saving…' : 'Save'}
                 </Button>
               </DialogFooter>
+            </DialogContent>
+          </Dialog>
+
+          {/* Bulk import dialog */}
+          <Dialog open={envBulkOpen} onOpenChange={(o) => { setEnvBulkOpen(o); if (!o) { setEnvBulkText(''); setEnvPreviewRows([]) } }}>
+            <DialogContent className="max-w-2xl">
+              <DialogHeader>
+                <DialogTitle>Import .env file</DialogTitle>
+              </DialogHeader>
+              <div className="space-y-4 pt-2">
+                <Textarea rows={5} className="font-mono text-xs"
+                  placeholder={'DATABASE_URL=postgres://user:pass@host/db\nAPI_KEY=supersecret\nDEBUG=false'}
+                  value={envBulkText}
+                  onChange={(e) => handleEnvBulkText(e.target.value)}
+                  autoFocus />
+                <label className="flex items-center gap-1.5 cursor-pointer text-xs text-muted-foreground hover:text-foreground transition-colors w-fit">
+                  <Upload className="h-3.5 w-3.5" />
+                  <span>Or upload a .env file</span>
+                  <input type="file" accept=".env,text/plain" className="hidden"
+                    onChange={(e) => {
+                      const f = e.target.files?.[0]
+                      if (!f) return
+                      const reader = new FileReader()
+                      reader.onload = (ev) => handleEnvBulkText(ev.target?.result as string ?? '')
+                      reader.readAsText(f)
+                      e.target.value = ''
+                    }} />
+                </label>
+                {envPreviewRows.length > 0 && (
+                  <div className="rounded-lg border overflow-hidden">
+                    <div className="bg-muted/40 px-3 py-1.5 text-xs font-medium text-muted-foreground">
+                      {envPreviewRows.length} variable{envPreviewRows.length !== 1 ? 's' : ''} — review &amp; edit before importing
+                    </div>
+                    <div className="max-h-56 overflow-y-auto">
+                      <Table>
+                        <TableHeader>
+                          <TableRow>
+                            <TableHead>Key</TableHead>
+                            <TableHead>Value</TableHead>
+                            <TableHead className="w-24">Type</TableHead>
+                            <TableHead className="w-8" />
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {envPreviewRows.map(row => (
+                            <TableRow key={row.id}>
+                              <TableCell className="py-1">
+                                <Input className="h-7 font-mono text-xs" value={row.key}
+                                  onChange={e => updateEnvPreviewRow(row.id, 'key', e.target.value)} />
+                              </TableCell>
+                              <TableCell className="py-1">
+                                <Input className="h-7 font-mono text-xs"
+                                  type={row.isSecret ? 'password' : 'text'}
+                                  value={row.value}
+                                  onChange={e => updateEnvPreviewRow(row.id, 'value', e.target.value)} />
+                              </TableCell>
+                              <TableCell className="py-1">
+                                <button type="button"
+                                  className={`flex items-center gap-1 text-xs rounded-full px-2.5 py-0.5 font-medium transition-colors ${row.isSecret ? 'bg-amber-500/15 text-amber-700 dark:text-amber-400' : 'bg-muted text-muted-foreground'}`}
+                                  onClick={() => updateEnvPreviewRow(row.id, 'isSecret', !row.isSecret)}>
+                                  {row.isSecret ? <><Lock className="h-2.5 w-2.5" /> Secret</> : <><Globe className="h-2.5 w-2.5" /> Plain</>}
+                                </button>
+                              </TableCell>
+                              <TableCell className="py-1">
+                                <Button variant="ghost" size="icon" className="h-6 w-6 text-muted-foreground"
+                                  onClick={() => removeEnvPreviewRow(row.id)}>
+                                  <X className="h-3 w-3" />
+                                </Button>
+                              </TableCell>
+                            </TableRow>
+                          ))}
+                        </TableBody>
+                      </Table>
+                    </div>
+                  </div>
+                )}
+                <div className="flex justify-end gap-2">
+                  <Button variant="outline" onClick={() => setEnvBulkOpen(false)}>Cancel</Button>
+                  <Button onClick={importEnvPreview}
+                    disabled={!envPreviewRows.filter(r => r.key.trim()).length || bulkEnvMutation.isPending}>
+                    {envPreviewRows.filter(r => r.key.trim()).length > 0
+                      ? `Import ${envPreviewRows.filter(r => r.key.trim()).length} variable${envPreviewRows.filter(r => r.key.trim()).length !== 1 ? 's' : ''}`
+                      : 'Import'}
+                  </Button>
+                </div>
+              </div>
             </DialogContent>
           </Dialog>
         </TabsContent>
