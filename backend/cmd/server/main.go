@@ -237,18 +237,15 @@ func serve() {
 		})
 
 		// ── GitHub OAuth ───────────────────────────────────────────────────
-		// Status is visible to all authenticated users (shows whether their
-		// account is connected; users without the role will see "not configured").
+		// All authenticated users can connect/disconnect their GitHub account
+		// and browse repos, branches and folder trees.
 		r.Get("/api/github/status", ghH.Status)
-		// Connecting/disconnecting GitHub and listing repos requires at least
-		// the admin role — regular users cannot integrate their own GitHub.
-		r.Group(func(r chi.Router) {
-			r.Use(mw.RequireRole(model.RoleSuperAdmin, model.RoleAdmin))
-			r.Get("/api/github/auth", ghH.AuthURL)
-			r.Get("/api/github/callback", ghH.Callback)
-			r.Delete("/api/github/disconnect", ghH.Disconnect)
-			r.Get("/api/github/repos", ghH.ListRepos)
-		})
+		r.Get("/api/github/auth", ghH.AuthURL)
+		r.Get("/api/github/callback", ghH.Callback)
+		r.Delete("/api/github/disconnect", ghH.Disconnect)
+		r.Get("/api/github/repos", ghH.ListRepos)
+		r.Get("/api/github/repos/{owner}/{repo}/branches", ghH.ListBranches)
+		r.Get("/api/github/repos/{owner}/{repo}/tree", ghH.GetTree)
 
 		// ── GitHub App ────────────────────────────────────────────────────
 		r.Get("/api/github-app/repos", ghAppH.ListRepos)

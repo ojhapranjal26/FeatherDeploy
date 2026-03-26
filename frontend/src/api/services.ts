@@ -11,6 +11,7 @@ export interface Service {
   deploy_type: DeployType
   repo_url?: string
   repo_branch: string
+  repo_folder?: string
   framework?: string
   build_command?: string
   start_command?: string
@@ -28,6 +29,7 @@ export interface CreateServicePayload {
   deploy_type: DeployType
   repo_url?: string
   repo_branch?: string
+  repo_folder?: string
   framework?: string
   app_port?: number
   build_command?: string

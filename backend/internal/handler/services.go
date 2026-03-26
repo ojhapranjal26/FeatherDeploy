@@ -25,7 +25,7 @@ func (h *ServiceHandler) List(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows, err := h.db.QueryContext(r.Context(),
-		`SELECT id, project_id, name, description, deploy_type, repo_url, repo_branch,
+		`SELECT id, project_id, name, description, deploy_type, repo_url, repo_branch, repo_folder,
 		        framework, build_command, start_command, app_port, COALESCE(host_port, 0),
 		        status, container_id, created_at, updated_at
 		 FROM services WHERE project_id=? ORDER BY created_at DESC`, projectID)
@@ -64,11 +64,11 @@ func (h *ServiceHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 	res, err := h.db.ExecContext(r.Context(),
 		`INSERT INTO services
-		  (project_id, name, description, deploy_type, repo_url, repo_branch,
+		  (project_id, name, description, deploy_type, repo_url, repo_branch, repo_folder,
 		   framework, build_command, start_command, app_port, host_port)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
 		projectID, req.Name, req.Description, req.DeployType, req.RepoURL,
-		req.RepoBranch, req.Framework, req.BuildCommand, req.StartCommand,
+		req.RepoBranch, req.RepoFolder, req.Framework, req.BuildCommand, req.StartCommand,
 		req.AppPort, nullInt(req.HostPort))
 	if err != nil {
 		if isUnique(err) {
@@ -111,6 +111,7 @@ func (h *ServiceHandler) Update(w http.ResponseWriter, r *http.Request) {
 		   description  = ?,
 		   repo_url     = CASE WHEN ? != '' THEN ? ELSE repo_url END,
 		   repo_branch  = CASE WHEN ? != '' THEN ? ELSE repo_branch END,
+		   repo_folder  = ?,
 		   framework    = ?,
 		   build_command= ?,
 		   start_command= ?,
@@ -122,6 +123,7 @@ func (h *ServiceHandler) Update(w http.ResponseWriter, r *http.Request) {
 		req.Description,
 		req.RepoURL, req.RepoURL,
 		req.RepoBranch, req.RepoBranch,
+		req.RepoFolder,
 		req.Framework, req.BuildCommand, req.StartCommand,
 		req.AppPort, req.AppPort,
 		req.HostPort, req.HostPort,
@@ -231,7 +233,7 @@ func trimString(s string) string {
 
 func (h *ServiceHandler) getByID(w http.ResponseWriter, r *http.Request, id int64) {
 	row := h.db.QueryRowContext(r.Context(),
-		`SELECT id, project_id, name, description, deploy_type, repo_url, repo_branch,
+		`SELECT id, project_id, name, description, deploy_type, repo_url, repo_branch, repo_folder,
 		        framework, build_command, start_command, app_port, COALESCE(host_port, 0),
 		        status, container_id, created_at, updated_at
 		 FROM services WHERE id=?`, id)
@@ -252,14 +254,14 @@ type scanner interface {
 
 func scanService(row scanner, s *model.Service) error {
 	return row.Scan(&s.ID, &s.ProjectID, &s.Name, &s.Description,
-		&s.DeployType, &s.RepoURL, &s.RepoBranch, &s.Framework,
+		&s.DeployType, &s.RepoURL, &s.RepoBranch, &s.RepoFolder, &s.Framework,
 		&s.BuildCommand, &s.StartCommand, &s.AppPort, &s.HostPort,
 		&s.Status, &s.ContainerID, &s.CreatedAt, &s.UpdatedAt)
 }
 
 func scanServiceRow(row *sql.Row, s *model.Service) error {
 	return row.Scan(&s.ID, &s.ProjectID, &s.Name, &s.Description,
-		&s.DeployType, &s.RepoURL, &s.RepoBranch, &s.Framework,
+		&s.DeployType, &s.RepoURL, &s.RepoBranch, &s.RepoFolder, &s.Framework,
 		&s.BuildCommand, &s.StartCommand, &s.AppPort, &s.HostPort,
 		&s.Status, &s.ContainerID, &s.CreatedAt, &s.UpdatedAt)
 }

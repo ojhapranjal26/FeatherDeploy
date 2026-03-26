@@ -6,9 +6,10 @@ import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import {
   Plus, ChevronLeft, Rocket, Settings2, Trash2,
-  ExternalLink, GitBranch, Terminal, GitFork, Package, FileCode2, Info,
+  ExternalLink, GitBranch, Terminal, GitFork, Package, FileCode2,
   Globe, AlertTriangle,
 } from 'lucide-react'
+import { GitHubRepoSelector } from '@/components/GitHubRepoSelector'
 import { toast } from 'sonner'
 import { projectsApi } from '@/api/projects'
 import { servicesApi } from '@/api/services'
@@ -52,6 +53,7 @@ const serviceSchema = z.object({
     { message: 'Must be a valid HTTPS or SSH git URL' },
   ).optional().or(z.literal('')),
   repo_branch: z.string().optional(),
+  repo_folder: z.string().max(512).optional(),
   app_port:    z.number().int().min(1).max(65535).optional(),
 })
 type ServiceFormData = z.infer<typeof serviceSchema>
@@ -262,10 +264,13 @@ export function ProjectPage() {
     formState: { errors, isSubmitting },
   } = useForm<ServiceFormData>({
     resolver: zodResolver(serviceSchema),
-    defaultValues: { deploy_type: 'git', repo_branch: 'main' },
+    defaultValues: { deploy_type: 'git', repo_branch: 'main', repo_folder: '' },
   })
 
-  const deployType = watch('deploy_type')
+  const deployType  = watch('deploy_type')
+  const repoUrl     = watch('repo_url')
+  const repoBranch  = watch('repo_branch')
+  const repoFolder  = watch('repo_folder')
 
   const createSvcMutation = useMutation({
     mutationFn: (data: ServiceFormData) =>
@@ -437,27 +442,21 @@ export function ProjectPage() {
 
             {/* Git-specific fields */}
             {deployType === 'git' && (
-              <div className="rounded-lg border bg-muted/30 p-3.5 space-y-3">
-                <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Repository</p>
-                <div className="space-y-1.5">
-                  <Label htmlFor="svc-repo-url">Repository URL</Label>
-                  <Input
-                    id="svc-repo-url"
-                    placeholder="https://github.com/you/repo  or  git@github.com:you/repo.git"
-                    {...register('repo_url')}
-                  />
-                  <p className="text-xs text-muted-foreground flex items-start gap-1">
-                    <Info className="h-3 w-3 mt-0.5 shrink-0" />
-                    For private repos, add an SSH key in{' '}
-                    <strong className="text-foreground">Settings → SSH Keys</strong>{' '}
-                    and use an SSH URL.
-                  </p>
-                  {errors.repo_url && <p className="text-xs text-destructive">{errors.repo_url.message}</p>}
-                </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="svc-branch">Branch</Label>
-                  <Input id="svc-branch" placeholder="main" {...register('repo_branch')} />
-                </div>
+              <div className="space-y-1.5">
+                <Label>Repository</Label>
+                <GitHubRepoSelector
+                  value={{
+                    repo_url:    repoUrl    ?? '',
+                    repo_branch: repoBranch ?? 'main',
+                    repo_folder: repoFolder ?? '',
+                  }}
+                  onChange={(v) => {
+                    setValue('repo_url',    v.repo_url,    { shouldValidate: true })
+                    setValue('repo_branch', v.repo_branch)
+                    setValue('repo_folder', v.repo_folder)
+                  }}
+                />
+                {errors.repo_url && <p className="text-xs text-destructive">{errors.repo_url.message}</p>}
               </div>
             )}
 

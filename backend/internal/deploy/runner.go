@@ -82,14 +82,14 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 	}()
 
 	// ── 1. Fetch service config ───────────────────────────────────────────────
-	var repoURL, repoBranch, framework, buildCmd, startCmd string
+	var repoURL, repoBranch, repoFolder, framework, buildCmd, startCmd string
 	var appPort int
 	var hostPortNull sql.NullInt64
 	err := db.QueryRow(
-		`SELECT repo_url, repo_branch, framework, build_command, start_command,
+		`SELECT repo_url, repo_branch, repo_folder, framework, build_command, start_command,
 		        app_port, host_port
 		 FROM services WHERE id=?`, svcID,
-	).Scan(&repoURL, &repoBranch, &framework, &buildCmd, &startCmd,
+	).Scan(&repoURL, &repoBranch, &repoFolder, &framework, &buildCmd, &startCmd,
 		&appPort, &hostPortNull)
 	if err != nil {
 		log.add("ERROR: could not load service config: %v", err)
@@ -142,6 +142,25 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 			markFailed(db, depID, svcID, log.text())
 			return
 		}
+	}
+
+	// ── 3b. Apply repo_folder (monorepo / subdirectory deployments) ───────────
+	// When a subfolder is configured, treat that folder as the build root.
+	if strings.TrimSpace(repoFolder) != "" {
+		subDir := filepath.Join(workDir, filepath.Clean(repoFolder))
+		// Security: ensure the resolved path is still inside workDir
+		if !strings.HasPrefix(subDir, workDir) {
+			log.add("ERROR: repo_folder %q escapes the repo root — aborting", repoFolder)
+			markFailed(db, depID, svcID, log.text())
+			return
+		}
+		if _, statErr := os.Stat(subDir); os.IsNotExist(statErr) {
+			log.add("ERROR: folder %q does not exist in the repository", repoFolder)
+			markFailed(db, depID, svcID, log.text())
+			return
+		}
+		log.add("[clone] deploying from subfolder: %s", repoFolder)
+		workDir = subDir
 	}
 
 	// ── 4. Detect Dockerfile presence and fill config gaps ───────────────────

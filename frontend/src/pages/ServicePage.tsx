@@ -526,6 +526,7 @@ export function ServicePage() {
                   <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Repository</p>
                   <p className="font-mono text-xs break-all">{service.repo_url}</p>
                   {service.repo_branch && <p className="text-xs text-muted-foreground">Branch: <span className="font-mono">{service.repo_branch}</span></p>}
+                  {service.repo_folder && <p className="text-xs text-muted-foreground">Folder: <span className="font-mono">/{service.repo_folder}</span></p>}
                 </div>
               )}
               {service.framework && (

@@ -288,3 +288,123 @@ func randomState() (string, error) {
 	return base64.URLEncoding.WithPadding(base64.NoPadding).EncodeToString(b), nil
 }
 
+// ─── GET /api/github/repos/{owner}/{repo}/branches ───────────────────────────
+// Lists branches for owner/repo using the current user's stored access token.
+func (h *GitHubHandler) ListBranches(w http.ResponseWriter, r *http.Request) {
+	claims := mw.GetClaims(r.Context())
+	owner := r.PathValue("owner")
+	repo := r.PathValue("repo")
+	if owner == "" || repo == "" {
+		writeJSON(w, http.StatusBadRequest, errMap("owner and repo are required"))
+		return
+	}
+
+	token, err := h.userToken(r, claims.UserID)
+	if err != nil || token == "" {
+		writeJSON(w, http.StatusBadRequest, errMap("GitHub account not connected"))
+		return
+	}
+
+	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/branches?per_page=100", owner, repo)
+	req, _ := http.NewRequestWithContext(r.Context(), http.MethodGet, apiURL, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, errMap("failed to fetch branches"))
+		return
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode == http.StatusNotFound {
+		writeJSON(w, http.StatusNotFound, errMap("repository not found"))
+		return
+	}
+	if resp.StatusCode != http.StatusOK {
+		writeJSON(w, http.StatusBadGateway, errMap("GitHub API error"))
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write(body) //nolint
+}
+
+// ─── GET /api/github/repos/{owner}/{repo}/tree ───────────────────────────────
+// Lists directory entries (folders only) at the given path & ref.
+// Query params: ref (branch/sha), path (directory path, default "")
+func (h *GitHubHandler) GetTree(w http.ResponseWriter, r *http.Request) {
+	claims := mw.GetClaims(r.Context())
+	owner := r.PathValue("owner")
+	repo := r.PathValue("repo")
+	ref := r.URL.Query().Get("ref")
+	path := r.URL.Query().Get("path")
+	if ref == "" {
+		ref = "HEAD"
+	}
+
+	token, err := h.userToken(r, claims.UserID)
+	if err != nil || token == "" {
+		writeJSON(w, http.StatusBadRequest, errMap("GitHub account not connected"))
+		return
+	}
+
+	// Use GitHub contents API — simpler than trees API, works with branch names
+	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/contents/%s?ref=%s",
+		owner, repo, url.PathEscape(path), url.QueryEscape(ref))
+	req, _ := http.NewRequestWithContext(r.Context(), http.MethodGet, apiURL, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, errMap("failed to fetch tree"))
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		// Empty or not a directory — return empty list
+		writeJSON(w, http.StatusOK, map[string]any{"entries": []any{}})
+		return
+	}
+
+	var items []struct {
+		Name string `json:"name"`
+		Path string `json:"path"`
+		Type string `json:"type"` // "file" | "dir" | "symlink" | "submodule"
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	if err := json.Unmarshal(body, &items); err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"entries": []any{}})
+		return
+	}
+
+	// Return only directories
+	type entry struct {
+		Name string `json:"name"`
+		Path string `json:"path"`
+	}
+	dirs := make([]entry, 0)
+	for _, it := range items {
+		if it.Type == "dir" {
+			dirs = append(dirs, entry{Name: it.Name, Path: it.Path})
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"entries": dirs})
+}
+
+// userToken fetches the GitHub access token for a user ID
+func (h *GitHubHandler) userToken(r *http.Request, userID int64) (string, error) {
+	var token string
+	err := h.db.QueryRowContext(r.Context(),
+		`SELECT github_access_token FROM users WHERE id = ?`, userID,
+	).Scan(&token)
+	return token, err
+}
+

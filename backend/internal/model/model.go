@@ -50,6 +50,7 @@ type Service struct {
 	DeployType   string    `json:"deploy_type"` // git | artifact | dockerfile
 	RepoURL      string    `json:"repo_url"`
 	RepoBranch   string    `json:"repo_branch"`
+	RepoFolder   string    `json:"repo_folder"`   // optional subfolder within the repo to deploy from
 	Framework    string    `json:"framework"`
 	BuildCommand string    `json:"build_command"`
 	StartCommand string    `json:"start_command"`
@@ -132,6 +133,7 @@ type CreateServiceRequest struct {
 	DeployType   string `json:"deploy_type"   validate:"required,oneof=git artifact dockerfile"`
 	RepoURL      string `json:"repo_url"      validate:"omitempty,giturl,max=512"`
 	RepoBranch   string `json:"repo_branch"   validate:"omitempty,max=255"`
+	RepoFolder   string `json:"repo_folder"   validate:"omitempty,max=512"`
 	Framework    string `json:"framework"     validate:"max=64"`
 	BuildCommand string `json:"build_command" validate:"max=512"`
 	StartCommand string `json:"start_command" validate:"max=512"`
@@ -145,6 +147,7 @@ type UpdateServiceRequest struct {
 	Description  string `json:"description"   validate:"max=256"`
 	RepoURL      string `json:"repo_url"      validate:"omitempty,giturl,max=512"`
 	RepoBranch   string `json:"repo_branch"   validate:"omitempty,max=255"`
+	RepoFolder   string `json:"repo_folder"   validate:"omitempty,max=512"`
 	Framework    string `json:"framework"     validate:"max=64"`
 	BuildCommand string `json:"build_command" validate:"max=512"`
 	StartCommand string `json:"start_command" validate:"max=512"`
