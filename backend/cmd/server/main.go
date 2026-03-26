@@ -172,6 +172,7 @@ func serve() {
 	}
 	settingsH := handler.NewSettingsHandler(db)
 	statsH := handler.NewStatsHandler(db)
+	containerStatsH := handler.NewContainerStatsHandler()
 
 	// ─── Router ──────────────────────────────────────────────────────────────
 	r := chi.NewRouter()
@@ -336,6 +337,9 @@ func serve() {
 				r.Get("/api/projects/{projectID}/services/{serviceID}/env", envH.List)
 				r.Put("/api/projects/{projectID}/services/{serviceID}/env", envH.Upsert)
 				r.Delete("/api/projects/{projectID}/services/{serviceID}/env/{key}", envH.Delete)
+
+				// ── Container live stats SSE ──────────────────────────────
+				r.Get("/api/projects/{projectID}/services/{serviceID}/stats/stream", containerStatsH.Stream)
 
 				// ── Domains ──────────────────────────────────────────────
 				r.Get("/api/projects/{projectID}/services/{serviceID}/domains", domainH.List)

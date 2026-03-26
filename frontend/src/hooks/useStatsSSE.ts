@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, useCallback } from 'react'
 import type { ClusterBrain } from '@/api/nodes'
 
 export interface NodeStats {
@@ -21,44 +21,55 @@ export interface LiveStats {
 
 /**
  * useStatsSSE connects to GET /api/stats/stream and returns live brain + node
- * stats.  The browser's native EventSource is used (no external WebSocket lib).
- * JWT is passed as ?token= because EventSource cannot set custom headers.
+ * stats. Reconnects automatically with backoff. Connection stays alive until
+ * the component unmounts (i.e. user leaves the tab).
  */
 export function useStatsSSE(): LiveStats & { connected: boolean } {
   const [stats, setStats] = useState<LiveStats>({ brain: null, nodes: [] })
   const [connected, setConnected] = useState(false)
+  const destroyedRef = useRef(false)
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const esRef = useRef<EventSource | null>(null)
 
-  useEffect(() => {
+  const connect = useCallback(() => {
+    if (destroyedRef.current) return
     const token = localStorage.getItem('token')
     if (!token) return
 
     const url = `/api/stats/stream?token=${encodeURIComponent(token)}`
-
     const es = new EventSource(url)
     esRef.current = es
 
     es.addEventListener('stats', (e: MessageEvent) => {
       try {
         const data = JSON.parse(e.data) as LiveStats
-        // Guard: Go serialises nil slices as JSON null; ensure nodes is always an array.
         setStats({ brain: data.brain ?? null, nodes: Array.isArray(data.nodes) ? data.nodes : [] })
         setConnected(true)
-      } catch {
-        // ignore malformed frames
-      }
+      } catch { /* ignore */ }
     })
 
     es.onerror = () => {
-      setConnected(false)
-    }
-
-    return () => {
       es.close()
       esRef.current = null
       setConnected(false)
+      if (!destroyedRef.current) {
+        timerRef.current = setTimeout(() => connect(), 4000)
+      }
     }
   }, [])
 
+  useEffect(() => {
+    destroyedRef.current = false
+    connect()
+    return () => {
+      destroyedRef.current = true
+      if (timerRef.current) clearTimeout(timerRef.current)
+      esRef.current?.close()
+      esRef.current = null
+      setConnected(false)
+    }
+  }, [connect])
+
   return { ...stats, connected }
 }
+

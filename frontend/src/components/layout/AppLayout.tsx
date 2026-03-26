@@ -12,6 +12,7 @@ import { settingsApi } from '@/api/settings'
 function usePageTitle() {
   const { pathname } = useLocation()
   if (pathname === '/dashboard' || pathname === '/') return 'Dashboard'
+  if (pathname === '/projects') return 'Projects'
   if (/\/services\/[^/]+\/deployments\/[^/]+/.test(pathname)) return 'Deployment'
   if (pathname.endsWith('/deployments')) return 'Deployments'
   if (pathname.endsWith('/env')) return 'Environment'
