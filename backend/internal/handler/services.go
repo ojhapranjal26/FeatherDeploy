@@ -205,20 +205,20 @@ func (h *ServiceHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	// ── Stop and remove the container ─────────────────────────────────────────
 	cName := fmt.Sprintf("fd-svc-%d", svcID)
 	go func() {
-		exec.Command("sudo", "-n", "podman", "stop", "--time", "10", cName).Run() //nolint
-		exec.Command("sudo", "-n", "podman", "rm", "-f", cName).Run()             //nolint
+		exec.Command("podman", "stop", "--time", "10", cName).Run() //nolint
+		exec.Command("podman", "rm", "-f", cName).Run()             //nolint
 		// Remove associated images to free disk space
 		stableImage := fmt.Sprintf("featherdeploy/svc-%d:stable", svcID)
-		exec.Command("sudo", "-n", "podman", "rmi", "-f", stableImage).Run() //nolint
+		exec.Command("podman", "rmi", "-f", stableImage).Run() //nolint
 		// Remove any per-deployment tagged images
-		out, err := exec.Command("sudo", "-n", "podman", "images",
+		out, err := exec.Command("podman", "images",
 			"--format", "{{.Repository}}:{{.Tag}}",
 			"--filter", fmt.Sprintf("reference=featherdeploy/svc-%d", svcID),
 		).Output()
 		if err == nil {
 			for _, img := range splitLines(string(out)) {
 				if img != "" {
-					exec.Command("sudo", "-n", "podman", "rmi", "-f", img).Run() //nolint
+					exec.Command("podman", "rmi", "-f", img).Run() //nolint
 				}
 			}
 		}
@@ -230,7 +230,7 @@ func (h *ServiceHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		// Prune ALL unused images: after the service images are removed above,
 		// base images (node:20-alpine, python:3.12-slim, …) that are no longer
 		// referenced by any container can now be freed.
-		exec.Command("sudo", "-n", "podman", "image", "prune", "-a", "-f").Run() //nolint
+		exec.Command("podman", "image", "prune", "-a", "-f").Run() //nolint
 		slog.Info("service cleanup complete", "svc_id", svcID, "container", cName)
 	}()
 

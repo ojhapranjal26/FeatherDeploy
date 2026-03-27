@@ -950,35 +950,20 @@ func looksLikeNpmInstall(cmd string) bool {
 		strings.HasPrefix(c, "yarn install") || strings.HasPrefix(c, "pnpm install")
 }
 
-// podmanCmd creates a rootful podman command executed via `sudo -n`.
-//
-// Rootless podman (running as the featherdeploy service account) requires the
-// kernel to allow unprivileged user-namespace creation and calls newuidmap,
-// both of which are disabled or broken on many VPS / VM kernels. Running podman
-// as root via sudo sidesteps every user-namespace restriction. Images are
-// stored in /var/lib/containers (root's persistent storage) and are visible to
-// all subsequent sudo podman calls.
-//
-// Prerequisite: build.sh installs the sudoers rule
-//   featherdeploy ALL=(root) NOPASSWD: /usr/bin/podman
+// podmanCmd creates a rootless podman command run as the featherdeploy service
+// user. The service user has /etc/subuid + /etc/subgid entries and the systemd
+// unit provides HOME + XDG_RUNTIME_DIR so rootless podman has a valid user
+// store and networking namespace. No sudo required.
 func podmanCmd(args ...string) *exec.Cmd {
-	// sudo -n: non-interactive mode — fail immediately if a password would be
-	// prompted (should never happen with NOPASSWD in place).
-	full := make([]string, 0, 2+len(args))
-	full = append(full, "-n", "podman")
-	full = append(full, args...)
-	return exec.Command("sudo", full...)
+	return exec.Command("podman", args...)
 }
 
 // podmanCmdCtx is like podmanCmd but accepts a context for timeout control.
 func podmanCmdCtx(ctx context.Context, args ...string) *exec.Cmd {
-	full := make([]string, 0, 2+len(args))
-	full = append(full, "-n", "podman")
-	full = append(full, args...)
-	return exec.CommandContext(ctx, "sudo", full...)
+	return exec.CommandContext(ctx, "podman", args...)
 }
 
-// podmanBuild builds a container image using rootful podman (via sudo).
+// podmanBuild builds a container image using rootless podman.
 // --pull=missing tells podman to use the locally-cached base image when it
 // already exists, and only contact the registry when the image is absent.
 // This avoids re-pulling node:20-alpine / python:3.12-slim on every build,
@@ -999,7 +984,7 @@ func podmanBuild(dir string, log *logBuf, imageName string) error {
 	return err
 }
 
-// podmanImageExists returns true if the named image exists in the rootful podman store.
+// podmanImageExists returns true if the named image exists in the rootless podman store.
 func podmanImageExists(image string) bool {
 	return podmanCmd("image", "exists", image).Run() == nil
 }

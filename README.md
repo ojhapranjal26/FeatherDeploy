@@ -22,7 +22,7 @@
   - GitHub App — organisation-wide repo access via RS256 JWT installation tokens
   - SSH Keys — generate or import ED25519 deploy keys (private keys stored AES-256-GCM encrypted)
   - 📖 [Full GitHub setup guide →](docs/github-setup.md)
-- **Podman containers** — deploy services as rootful OCI containers (via `sudo -n podman`) for maximum kernel compatibility on low-cost VPS hosts.
+- **Podman containers** — deploy services as rootless OCI containers using user namespaces (no root, no sudo required for the container runtime).
 - **Automatic TLS** — Caddy reverse proxy obtains Let's Encrypt certificates for your domain.
 - **Non-root service user** — the panel process runs under a dedicated Linux user (not root) for security isolation.
 - **Systemd managed** — installs as a persistent systemd service with automatic restarts.
@@ -36,7 +36,7 @@
 | Frontend  | React 19, TypeScript, Vite 7, Tailwind CSS v4, shadcn/ui, TanStack Query v5, recharts, react-hook-form, zod, lucide-react |
 | Backend   | Go 1.26, chi v5 router, JWT (HS256 + RS256), bcrypt                       |
 | Database  | rqlite v8 (distributed SQLite — no CGO, no external DB binary required)   |
-| Container | Podman (rootful OCI — builds and runs containers via `sudo -n podman`)    |
+| Container | Podman (rootless OCI — runs as the service user via user namespaces)       |
 | Proxy     | Caddy 2 (automatic HTTPS via Let's Encrypt)                               |
 | Infra     | systemd, rqlite                                                           |
 
@@ -56,7 +56,7 @@ That single command will:
    - `git`, `curl`, `ca-certificates`
    - **Node.js 20** (via NodeSource)
    - **Go 1.26** (via official tarball if not already installed)
-   - **Podman** (container runtime, used in rootful mode via `sudo`)
+   - **Podman** (container runtime, rootless via user namespaces)
    - **rqlite v8** (embedded distributed SQLite — no CGO or libsqlite3 needed)
    - **Caddy** (reverse proxy + automatic TLS)
 2. **Clone** the FeatherDeploy source from GitHub into `/opt/featherdeploy-src`
@@ -159,10 +159,10 @@ After editing, restart the service: `sudo systemctl restart featherdeploy`
 ## 🔒 Security Model
 
 The panel process **never runs as root**. The installer creates a dedicated Linux user (default: `featherdeploy`) with no direct sudo access.
-- The only elevated permission granted is a locked-down sudoers rule: `NOPASSWD: /usr/bin/podman` (rootful containers) and `NOPASSWD: /usr/local/bin/featherdeploy-update` (one-click updates). Nothing else.
+- The only elevated permission granted is a locked-down sudoers rule: `NOPASSWD: /usr/local/bin/featherdeploy-update` (one-click updates) and `NOPASSWD: /bin/systemctl reload caddy`. Nothing else. Podman runs rootlessly — no sudo required for container builds or runs.
 - The binary is owned by `root` and executable, but all data (`/var/lib/featherdeploy/`) is owned by the service user only.
 - The env file (`/etc/featherdeploy/featherdeploy.env`) containing the JWT secret has mode `640` (readable only by root and the service group).
-- The systemd unit sets `PrivateTmp=yes`. `NoNewPrivileges` is intentionally **not** set because the service must invoke `sudo -n podman` for container builds and runs.
+- The systemd unit sets `PrivateTmp=yes` and `NoNewPrivileges=yes`. Rootless Podman uses user namespaces (the service user has entries in `/etc/subuid` and `/etc/subgid`).
 - Passwords are hashed with **bcrypt** (cost 14). SSH private keys are encrypted with **AES-256-GCM** before storage.
 - HTTPS is enforced by Caddy with automatic certificate renewal. Security headers (`HSTS`, `X-Frame-Options`, `X-Content-Type-Options`) are set on all responses.
 

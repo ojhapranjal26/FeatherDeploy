@@ -707,6 +707,13 @@ Type=simple
 User={{.User}}
 Group={{.User}}
 EnvironmentFile={{.EnvFile}}
+# Rootless podman needs HOME to locate its image store (~/.local/share/containers)
+# and XDG_RUNTIME_DIR for its socket / networking namespace.
+# RuntimeDirectory creates /run/featherdeploy-runtime owned by the service user
+# before the process starts, making it available as a stable XDG runtime dir.
+Environment=HOME={{.DataDir}}
+RuntimeDirectory=featherdeploy-runtime
+Environment=XDG_RUNTIME_DIR=/run/featherdeploy-runtime
 ExecStart={{.Bin}} serve
 Restart=always
 RestartSec=5s
@@ -714,12 +721,7 @@ StartLimitIntervalSec=120
 StartLimitBurst=5
 StandardOutput=journal
 StandardError=journal
-
-# PrivateTmp gives each deployment a clean /tmp namespace.
-# NoNewPrivileges is intentionally NOT set: the service needs to invoke
-# "sudo -n podman" (rootful podman) for container builds and runs.
-# The only elevated permission granted is NOPASSWD: /usr/bin/podman via
-# /etc/sudoers.d/featherdeploy-podman, installed by build.sh.
+NoNewPrivileges=yes
 PrivateTmp=yes
 
 [Install]

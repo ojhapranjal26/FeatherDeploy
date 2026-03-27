@@ -346,7 +346,7 @@ func (h *DeploymentHandler) ContainerLogs(w http.ResponseWriter, r *http.Request
 	// exec.CommandContext sends SIGKILL to the process when ctx is cancelled
 	// (i.e. client disconnects), which closes the child's write end of the pipe.
 	cmd := exec.CommandContext(r.Context(),
-		"sudo", "-n", "podman", "logs", "-f", "--tail=100", cName)
+		"podman", "logs", "-f", "--tail=100", cName)
 	cmd.Stdout = wp
 	cmd.Stderr = wp
 

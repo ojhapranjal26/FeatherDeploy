@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
-	"runtime"
 	"time"
 )
 
@@ -84,10 +83,12 @@ func (h *SystemHandler) VersionCheck(w http.ResponseWriter, r *http.Request) {
 
 // TriggerUpdate validates the remote manifest, responds with 202 Accepted,
 // then runs /usr/local/bin/featherdeploy-update in a background goroutine.
-// The update script downloads the release binary, replaces the current binary,
-// and restarts the service via `featherdeploy update`.
+// The update script does a source-based rebuild: git pull + npm build + go build,
+// installs the new binary to /usr/local/bin/featherdeploy, then calls
+// `featherdeploy update` to apply DB migrations and restart the service.
 //
 // Requirements (installed by build.sh):
+//   - /opt/featherdeploy-src          (git clone of the repository)
 //   - /usr/local/bin/featherdeploy-update  (the update shell script)
 //   - sudoers entry allowing featherdeploy to run it as root without a password
 func (h *SystemHandler) TriggerUpdate(w http.ResponseWriter, r *http.Request) {
@@ -138,14 +139,6 @@ func (h *SystemHandler) TriggerUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	arch := runtime.GOARCH
-	if arch != "amd64" && arch != "arm64" {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusNotImplemented)
-		fmt.Fprintf(w, `{"error":"unsupported architecture: %s"}`, arch)
-		return
-	}
-
 	// Send the 202 before launching the goroutine; once the service restarts
 	// the process is killed, so nothing can be written to w afterwards.
 	w.Header().Set("Content-Type", "application/json")
@@ -159,12 +152,12 @@ func (h *SystemHandler) TriggerUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	go func() {
-		slog.Info("self-update triggered", "from", AppVersion, "to", remote.Version, "arch", arch)
-		cmd := exec.Command("sudo", "-n", updateScript, remote.Version, arch)
+		slog.Info("self-update triggered", "from", AppVersion, "to", remote.Version)
+		cmd := exec.Command("sudo", "-n", updateScript)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
-			slog.Error("self-update failed", "err", err, "version", remote.Version, "arch", arch)
+			slog.Error("self-update failed", "err", err, "version", remote.Version)
 		}
 	}()
 }

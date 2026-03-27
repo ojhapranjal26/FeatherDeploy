@@ -512,13 +512,9 @@ if [ -f /proc/sys/user/max_user_namespaces ]; then
   fi
 fi
 
-# -- 8d. sudo rule: allow featherdeploy to run rootful podman without a password
-# This gives the service account access to rootful podman, which avoids all
-# rootless user-namespace requirements (newuidmap failures, kernel restrictions).
-echo "==> Installing sudo rule for featherdeploy → podman + caddy + self-update..."
+# -- 8d. sudo rule: allow featherdeploy to run caddy reload + self-update as root
+echo "==> Installing sudo rule for featherdeploy → caddy + self-update..."
 cat > /etc/sudoers.d/featherdeploy-podman << 'SUDOEOF'
-Defaults!/usr/bin/podman !requiretty
-featherdeploy ALL=(root) NOPASSWD: /usr/bin/podman
 featherdeploy ALL=(root) NOPASSWD: /bin/systemctl reload caddy
 featherdeploy ALL=(root) NOPASSWD: /usr/bin/systemctl reload caddy
 featherdeploy ALL=(root) NOPASSWD: /usr/bin/tee /etc/caddy/featherdeploy-services.caddy
@@ -531,23 +527,34 @@ echo "  /etc/sudoers.d/featherdeploy-podman installed"
 echo "==> Installing featherdeploy-update helper script..."
 cat > /usr/local/bin/featherdeploy-update << 'UPDATEEOF'
 #!/usr/bin/env bash
-# featherdeploy-update <VERSION> <ARCH>
-# Downloads the release binary for the given version, replaces the running
-# binary, then delegates to "featherdeploy update" for DB migrations and
-# service restart.  Must be run as root (via sudo -n from the panel service).
+# featherdeploy-update
+# Source-based one-click update: git pull + npm build + go build + restart.
+# Must be run as root (via sudo -n from the panel service).
 set -euo pipefail
-VERSION="${1:?Usage: featherdeploy-update <version> <arch>}"
-ARCH="${2:?Usage: featherdeploy-update <version> <arch>}"
-URL="https://github.com/ojhapranjal26/FeatherDeploy/releases/download/v${VERSION}/featherdeploy-linux-${ARCH}"
-TMP=$(mktemp /tmp/featherdeploy-update-XXXXXX)
-trap 'rm -f "$TMP"' EXIT
-echo "==> Downloading FeatherDeploy v${VERSION} (${ARCH})..."
-curl -fsSL --retry 3 --retry-delay 5 --connect-timeout 30 --max-time 300 "$URL" -o "$TMP"
-chmod +x "$TMP"
-echo "==> Installing new binary to /usr/local/bin/featherdeploy..."
-cp -f "$TMP" /usr/local/bin/featherdeploy
-echo "==> Running migration + service restart..."
-exec /usr/local/bin/featherdeploy update
+INSTALL_DIR="/opt/featherdeploy-src"
+BINARY="/usr/local/bin/featherdeploy"
+export PATH="/usr/local/go/bin:$PATH"
+
+echo "==> Fetching latest source from main branch..."
+git -C "$INSTALL_DIR" fetch origin main
+git -C "$INSTALL_DIR" reset --hard origin/main
+
+echo "==> Building frontend..."
+cd "$INSTALL_DIR/frontend"
+npm ci --prefer-offline --silent
+npm run build
+
+echo "==> Embedding frontend assets..."
+rm -rf "$INSTALL_DIR/backend/web/dist"
+mkdir -p "$INSTALL_DIR/backend/web/dist"
+cp -r "$INSTALL_DIR/frontend/dist/." "$INSTALL_DIR/backend/web/dist/"
+
+echo "==> Building FeatherDeploy binary..."
+cd "$INSTALL_DIR/backend"
+CGO_ENABLED=0 go build -ldflags="-s -w" -o "$BINARY" ./cmd/server/
+
+echo "==> Running database migrations + restarting service..."
+exec "$BINARY" update
 UPDATEEOF
 chmod 755 /usr/local/bin/featherdeploy-update
 echo "  featherdeploy-update installed"

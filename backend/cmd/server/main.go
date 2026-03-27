@@ -479,7 +479,7 @@ func reconcileServiceStates(db *sql.DB) {
 
 	for _, svcID := range ids {
 		cName := fmt.Sprintf("fd-svc-%d", svcID)
-		out, inspErr := exec.Command("sudo", "-n", "podman", "inspect",
+		out, inspErr := exec.Command("podman", "inspect",
 			"--format", "{{.State.Status}}", cName).Output()
 		if inspErr != nil {
 			// Container doesn't exist — mark service as error.

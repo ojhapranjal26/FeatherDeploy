@@ -221,7 +221,7 @@ func (h *ContainerStatsHandler) Stream(w http.ResponseWriter, r *http.Request) {
 // collectContainerStats runs podman stats --no-stream for cName and returns
 // the parsed event. Returns a "not_found" event if the container is absent.
 func collectContainerStats(cName string) ContainerStatsEvent {
-	cmd := exec.Command("sudo", "-n", "podman", "stats", "--no-stream", "--format", "json", cName)
+	cmd := exec.Command("podman", "stats", "--no-stream", "--format", "json", cName)
 	var outBuf, errBuf bytes.Buffer
 	cmd.Stdout = &outBuf
 	cmd.Stderr = &errBuf
@@ -274,7 +274,7 @@ func collectContainerStats(cName string) ContainerStatsEvent {
 	// exits non-zero even for running containers. Never rely solely on
 	// runErr here — inspect is the ground truth.
 	_ = runErr // already attempted parse above; outcome doesn't matter now
-	inspCmd := exec.Command("sudo", "-n", "podman", "inspect", "--format", "{{.State.Status}}", cName)
+	inspCmd := exec.Command("podman", "inspect", "--format", "{{.State.Status}}", cName)
 	out, _ := inspCmd.Output()
 	state := strings.TrimSpace(string(out))
 	if state == "running" {
