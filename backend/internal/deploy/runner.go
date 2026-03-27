@@ -15,8 +15,11 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,6 +31,7 @@ import (
 	appCrypto "github.com/ojhapranjal26/featherdeploy/backend/internal/crypto"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/caddy"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/detect"
+	"github.com/golang-jwt/jwt/v5"
 )
 
 // ─── SSH URL detection ────────────────────────────────────────────────────────
@@ -106,7 +110,10 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 		repoBranch = "main"
 	}
 
-	// ── 2. SSH key setup for private / SSH repos ──────────────────────────────
+	// ── 2. Inject GitHub App installation token for HTTPS GitHub repos ──────────
+	repoURL = injectGitHubAppToken(context.Background(), db, repoURL, log)
+
+	// ── 3. SSH key setup for private / SSH repos ──────────────────────────────
 	var sshKeyFile string // path to temp private key file, empty if not needed
 	if IsSSHURL(repoURL) {
 		kf, cleanup, keyErr := FetchSSHKey(db, jwtSecret, userID)
@@ -142,6 +149,12 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 			markFailed(db, depID, svcID, log.text())
 			return
 		}
+	}
+
+	// Capture the actual commit SHA and update the deployment record
+	if sha, err := gitRevParse(workDir); err == nil && sha != "" {
+		db.Exec(`UPDATE deployments SET commit_sha=? WHERE id=?`, sha, depID) //nolint
+		log.add("[clone] commit %s", sha)
 	}
 
 	// ── 3b. Apply repo_folder (monorepo / subdirectory deployments) ───────────
@@ -454,6 +467,87 @@ func runCaptureWithSSH(dir, sshKeyFile string, log *logBuf, name string, args ..
 // runShell runs a shell command string (like build_command) in dir.
 func runShell(dir, sshKeyFile, command string, log *logBuf) error {
 	return runCaptureWithSSH(dir, sshKeyFile, log, "/bin/sh", "-c", command)
+}
+
+// gitRevParse returns the full commit SHA (HEAD) of the cloned repo.
+func gitRevParse(workDir string) (string, error) {
+	out, err := exec.Command("git", "-C", workDir, "rev-parse", "HEAD").Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// ─── GitHub App installation token ───────────────────────────────────────────
+// injectGitHubAppToken rewrites an https://github.com/... URL to include an
+// installation access token so git clone can authenticate to private repos.
+// Returns the original URL unchanged if GitHub App is not configured or if
+// the token exchange fails.
+func injectGitHubAppToken(ctx context.Context, db *sql.DB, repoURL string, log *logBuf) string {
+	if !strings.HasPrefix(repoURL, "https://github.com/") {
+		return repoURL // SSH or non-GitHub URL — skip
+	}
+	var appID, pkPEM, installID string
+	err := db.QueryRowContext(ctx,
+		`SELECT app_id, private_key_pem, installation_id FROM github_app_config WHERE id = 1`,
+	).Scan(&appID, &pkPEM, &installID)
+	if err != nil {
+		return repoURL // GitHub App not configured — try unauthenticated
+	}
+	if appID == "" || pkPEM == "" || installID == "" {
+		return repoURL
+	}
+	token, err := githubAppInstallToken(ctx, appID, pkPEM, installID)
+	if err != nil {
+		log.add("[clone] WARNING: GitHub App token unavailable (%v) — trying unauthenticated clone", err)
+		return repoURL
+	}
+	// https://github.com/owner/repo.git → https://x-access-token:<token>@github.com/owner/repo.git
+	rest := strings.TrimPrefix(repoURL, "https://github.com/")
+	authedURL := "https://x-access-token:" + token + "@github.com/" + rest
+	log.add("[clone] using GitHub App installation token for authentication")
+	return authedURL
+}
+
+// githubAppInstallToken exchanges the App JWT for a short-lived installation token.
+func githubAppInstallToken(ctx context.Context, appID, privateKeyPEM, installID string) (string, error) {
+	privKey, err := jwt.ParseRSAPrivateKeyFromPEM([]byte(privateKeyPEM))
+	if err != nil {
+		return "", fmt.Errorf("invalid RSA private key: %w", err)
+	}
+	now := time.Now()
+	appTok, err := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
+		"iat": now.Add(-60 * time.Second).Unix(), // 60s backdate for clock skew
+		"exp": now.Add(9 * time.Minute).Unix(),
+		"iss": appID,
+	}).SignedString(privKey)
+	if err != nil {
+		return "", fmt.Errorf("sign app JWT: %w", err)
+	}
+	apiURL := fmt.Sprintf("https://api.github.com/app/installations/%s/access_tokens", installID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+appTok)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode != http.StatusCreated {
+		return "", fmt.Errorf("GitHub returned %d: %s", resp.StatusCode, body)
+	}
+	var result struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil || result.Token == "" {
+		return "", fmt.Errorf("unexpected GitHub response: %s", body)
+	}
+	return result.Token, nil
 }
 
 func containerExists(name string) bool {

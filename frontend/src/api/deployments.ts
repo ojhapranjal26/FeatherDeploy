@@ -1,6 +1,6 @@
 import client from './client'
 
-export type DeploymentStatus = 'queued' | 'building' | 'running' | 'success' | 'failed'
+export type DeploymentStatus = 'pending' | 'running' | 'success' | 'failed'
 
 export interface Deployment {
   id: number
@@ -9,6 +9,7 @@ export interface Deployment {
   deploy_type: string
   repo_url?: string
   commit_sha?: string
+  branch?: string
   artifact_path?: string
   status: DeploymentStatus
   error_message?: string
@@ -26,6 +27,7 @@ export interface TriggerDeploymentPayload {
   deploy_type: string
   repo_url?: string
   repo_branch?: string
+  branch?: string
   commit_sha?: string
 }
 

@@ -224,14 +224,14 @@ export function DeploymentDetailPage() {
     queryFn: () => deploymentsApi.get(projectId!, serviceId!, deploymentId!),
     refetchInterval: (query) => {
       const s = query.state.data?.status
-      return s === 'queued' || s === 'building' ? 2000 : false
+      return s === 'pending' || s === 'running' ? 2000 : false
     },
     enabled: !!projectId && !!serviceId && !!deploymentId,
   })
 
   const { lines, done } = useDeploymentLogs(projectId!, serviceId!, deploymentId!)
 
-  const isActive = deployment?.status === 'queued' || deployment?.status === 'building'
+  const isActive = deployment?.status === 'pending' || deployment?.status === 'running'
   const isFailed = deployment?.status === 'failed'
   const isSuccess = deployment?.status === 'success'
 

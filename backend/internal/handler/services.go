@@ -27,7 +27,7 @@ func (h *ServiceHandler) List(w http.ResponseWriter, r *http.Request) {
 	rows, err := h.db.QueryContext(r.Context(),
 		`SELECT id, project_id, name, description, deploy_type, repo_url, repo_branch, repo_folder,
 		        framework, build_command, start_command, app_port, COALESCE(host_port, 0),
-		        status, container_id, created_at, updated_at
+		        status, container_id, auto_deploy, created_at, updated_at
 		 FROM services WHERE project_id=? ORDER BY created_at DESC`, projectID)
 	if err != nil {
 		slog.Error("list services", "err", err)
@@ -62,11 +62,14 @@ func (h *ServiceHandler) Create(w http.ResponseWriter, r *http.Request) {
 	if req.RepoBranch == "" {
 		req.RepoBranch = "main"
 	}
+	if req.DeployType == "" {
+		req.DeployType = "git"
+	}
 	res, err := h.db.ExecContext(r.Context(),
 		`INSERT INTO services
 		  (project_id, name, description, deploy_type, repo_url, repo_branch, repo_folder,
-		   framework, build_command, start_command, app_port, host_port)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+		   framework, build_command, start_command, app_port, host_port, auto_deploy)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,0)`,
 		projectID, req.Name, req.Description, req.DeployType, req.RepoURL,
 		req.RepoBranch, req.RepoFolder, req.Framework, req.BuildCommand, req.StartCommand,
 		req.AppPort, nullInt(req.HostPort))
@@ -105,13 +108,21 @@ func (h *ServiceHandler) Update(w http.ResponseWriter, r *http.Request) {
 	if !v.DecodeAndValidate(w, r, &req) {
 		return
 	}
+
+	// Handle ClearRepo: explicitly disconnect from Git source
+	clearRepo := 0
+	if req.ClearRepo {
+		clearRepo = 1
+	}
+
 	_, err = h.db.ExecContext(r.Context(),
 		`UPDATE services SET
 		   name         = CASE WHEN ? != '' THEN ? ELSE name END,
 		   description  = ?,
-		   repo_url     = CASE WHEN ? != '' THEN ? ELSE repo_url END,
-		   repo_branch  = CASE WHEN ? != '' THEN ? ELSE repo_branch END,
-		   repo_folder  = ?,
+		   deploy_type  = CASE WHEN ? != '' THEN ? ELSE deploy_type END,
+		   repo_url     = CASE WHEN ? = 1 THEN '' WHEN ? != '' THEN ? ELSE repo_url END,
+		   repo_branch  = CASE WHEN ? = 1 THEN 'main' WHEN ? != '' THEN ? ELSE repo_branch END,
+		   repo_folder  = CASE WHEN ? = 1 THEN '' ELSE ? END,
 		   framework    = ?,
 		   build_command= ?,
 		   start_command= ?,
@@ -121,9 +132,10 @@ func (h *ServiceHandler) Update(w http.ResponseWriter, r *http.Request) {
 		 WHERE id=? AND project_id=?`,
 		req.Name, req.Name,
 		req.Description,
-		req.RepoURL, req.RepoURL,
-		req.RepoBranch, req.RepoBranch,
-		req.RepoFolder,
+		req.DeployType, req.DeployType,
+		clearRepo, req.RepoURL, req.RepoURL,
+		clearRepo, req.RepoBranch, req.RepoBranch,
+		clearRepo, req.RepoFolder,
 		req.Framework, req.BuildCommand, req.StartCommand,
 		req.AppPort, req.AppPort,
 		req.HostPort, req.HostPort,
@@ -133,6 +145,27 @@ func (h *ServiceHandler) Update(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, errMap("internal error"))
 		return
 	}
+
+	// AutoDeploy: nil = unchanged, true/false = set
+	if req.AutoDeploy != nil {
+		autoDeployVal := 0
+		if *req.AutoDeploy {
+			autoDeployVal = 1
+		}
+		// Also clear auto_deploy when disconnecting repo
+		if req.ClearRepo {
+			autoDeployVal = 0
+		}
+		h.db.ExecContext(r.Context(), //nolint
+			`UPDATE services SET auto_deploy=? WHERE id=? AND project_id=?`,
+			autoDeployVal, svcID, projectID)
+	} else if req.ClearRepo {
+		// Always disable auto_deploy when disconnecting
+		h.db.ExecContext(r.Context(), //nolint
+			`UPDATE services SET auto_deploy=0 WHERE id=? AND project_id=?`,
+			svcID, projectID)
+	}
+
 	h.getByID(w, r, svcID)
 }
 
@@ -235,7 +268,7 @@ func (h *ServiceHandler) getByID(w http.ResponseWriter, r *http.Request, id int6
 	row := h.db.QueryRowContext(r.Context(),
 		`SELECT id, project_id, name, description, deploy_type, repo_url, repo_branch, repo_folder,
 		        framework, build_command, start_command, app_port, COALESCE(host_port, 0),
-		        status, container_id, created_at, updated_at
+		        status, container_id, auto_deploy, created_at, updated_at
 		 FROM services WHERE id=?`, id)
 	var s model.Service
 	if err := scanServiceRow(row, &s); err == sql.ErrNoRows {
@@ -253,17 +286,27 @@ type scanner interface {
 }
 
 func scanService(row scanner, s *model.Service) error {
-	return row.Scan(&s.ID, &s.ProjectID, &s.Name, &s.Description,
+	var autoDeployInt int
+	err := row.Scan(&s.ID, &s.ProjectID, &s.Name, &s.Description,
 		&s.DeployType, &s.RepoURL, &s.RepoBranch, &s.RepoFolder, &s.Framework,
 		&s.BuildCommand, &s.StartCommand, &s.AppPort, &s.HostPort,
-		&s.Status, &s.ContainerID, &s.CreatedAt, &s.UpdatedAt)
+		&s.Status, &s.ContainerID, &autoDeployInt, &s.CreatedAt, &s.UpdatedAt)
+	if err == nil {
+		s.AutoDeploy = autoDeployInt == 1
+	}
+	return err
 }
 
 func scanServiceRow(row *sql.Row, s *model.Service) error {
-	return row.Scan(&s.ID, &s.ProjectID, &s.Name, &s.Description,
+	var autoDeployInt int
+	err := row.Scan(&s.ID, &s.ProjectID, &s.Name, &s.Description,
 		&s.DeployType, &s.RepoURL, &s.RepoBranch, &s.RepoFolder, &s.Framework,
 		&s.BuildCommand, &s.StartCommand, &s.AppPort, &s.HostPort,
-		&s.Status, &s.ContainerID, &s.CreatedAt, &s.UpdatedAt)
+		&s.Status, &s.ContainerID, &autoDeployInt, &s.CreatedAt, &s.UpdatedAt)
+	if err == nil {
+		s.AutoDeploy = autoDeployInt == 1
+	}
+	return err
 }
 
 func parseServiceID(r *http.Request) (int64, error) {

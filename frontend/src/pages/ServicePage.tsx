@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { ChevronLeft, Rocket, Clock, Search, Loader2, CheckCircle2, Plus, Trash2, Eye, EyeOff, ExternalLink, Terminal, Code2, CircleDot, Cpu, MemoryStick, Network, HardDrive, Activity, Copy, Download, Upload, X, Lock, Globe, Pencil, Check } from 'lucide-react'
+import { ChevronLeft, Rocket, Clock, Search, Loader2, CheckCircle2, Plus, Trash2, Eye, EyeOff, ExternalLink, Terminal, Code2, CircleDot, Cpu, MemoryStick, Network, HardDrive, Activity, Copy, Download, Upload, X, Lock, Globe, Pencil, Check, GitBranch, GitFork, Settings2, Unlink } from 'lucide-react'
 import {
   AreaChart, Area, ResponsiveContainer, Tooltip, XAxis, YAxis, CartesianGrid,
 } from 'recharts'
 import { toast } from 'sonner'
-import { servicesApi, type DetectionResult } from '@/api/services'
+import { servicesApi, type DetectionResult, type UpdateServicePayload } from '@/api/services'
+import { GitHubRepoSelector, type RepoSelection } from '@/components/GitHubRepoSelector'
 import { useContainerLogs } from '@/hooks/useContainerLogs'
 import { useContainerStatsSSE } from '@/hooks/useContainerStatsSSE'
 import { deploymentsApi } from '@/api/deployments'
@@ -156,6 +157,13 @@ export function ServicePage() {
   // Tab state — track active tab so the container-logs SSE only connects when visible
   const [activeTab, setActiveTab] = useState('overview')
 
+  // Settings state
+  const [settingsRepo, setSettingsRepo] = useState<RepoSelection | null>(null)
+  const [settingsBuildCmd, setSettingsBuildCmd] = useState('')
+  const [settingsStartCmd, setSettingsStartCmd] = useState('')
+  const [settingsPort, setSettingsPort] = useState('')
+  const [initSettings, setInitSettings] = useState(false)
+
   // Env state
   const [addEnvOpen, setAddEnvOpen] = useState(false)
   const [envKey, setEnvKey] = useState('')
@@ -236,6 +244,7 @@ export function ServicePage() {
         deploy_type: service!.deploy_type,
         repo_url: service?.repo_url,
         repo_branch: service?.repo_branch,
+        branch: service?.repo_branch,
       }),
     onSuccess: (data) => {
       toast.success('Deployment triggered.')
@@ -473,6 +482,15 @@ export function ServicePage() {
         <TabsList className="mb-6">
           <TabsTrigger value="overview">Overview</TabsTrigger>
           <TabsTrigger value="deployments">Deployments</TabsTrigger>
+          <TabsTrigger value="settings" onClick={() => {
+            if (!initSettings && service) {
+              setSettingsRepo(service.repo_url ? { repo_url: service.repo_url, repo_branch: service.repo_branch ?? 'main', repo_folder: service.repo_folder ?? '' } : null)
+              setSettingsBuildCmd(service.build_command ?? '')
+              setSettingsStartCmd(service.start_command ?? '')
+              setSettingsPort(service.app_port ? String(service.app_port) : '')
+              setInitSettings(true)
+            }
+          }}>Settings</TabsTrigger>
           <TabsTrigger value="env">Environment</TabsTrigger>
           <TabsTrigger value="logs">Live Logs</TabsTrigger>
           <TabsTrigger value="stats">Stats</TabsTrigger>
@@ -580,6 +598,11 @@ export function ServicePage() {
               >
                 <DeploymentStatusBadge status={d.status} />
                 <span className="font-mono text-xs text-muted-foreground">{d.commit_sha?.slice(0, 7) ?? d.deploy_type}</span>
+                {d.branch && (
+                  <span className="flex items-center gap-0.5 text-[10px] text-muted-foreground font-mono">
+                    <GitBranch className="h-2.5 w-2.5" />{d.branch}
+                  </span>
+                )}
                 <div className="ml-auto flex items-center gap-1 text-xs text-muted-foreground">
                   <Clock className="h-3 w-3" />
                   {formatDuration(d.started_at, d.finished_at)}
@@ -613,8 +636,13 @@ export function ServicePage() {
               >
                 <DeploymentStatusBadge status={d.status} />
                 <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 flex-wrap">
                     <span className="font-mono text-xs">{d.commit_sha?.slice(0, 7) ?? `#${d.id}`}</span>
+                    {d.branch && (
+                      <span className="flex items-center gap-0.5 text-[10px] text-muted-foreground font-mono">
+                        <GitBranch className="h-2.5 w-2.5" />{d.branch}
+                      </span>
+                    )}
                     <Badge variant="outline" className="text-[10px]">{d.deploy_type}</Badge>
                   </div>
                   {d.started_at && (
@@ -628,6 +656,163 @@ export function ServicePage() {
                 <ExternalLink className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
               </div>
             ))}
+          </div>
+        </TabsContent>
+
+        {/* ── Settings ─────────────────────────────────────────────────────── */}
+        <TabsContent value="settings" className="space-y-8">
+
+          {/* Repository section */}
+          <div className="space-y-4">
+            <div className="flex items-center gap-2">
+              <GitFork className="h-4 w-4 text-muted-foreground" />
+              <h2 className="font-medium">Repository</h2>
+            </div>
+
+            {service.repo_url ? (
+              <div className="rounded-lg border p-4 space-y-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="space-y-1 min-w-0">
+                    <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Connected repository</p>
+                    <p className="font-mono text-sm break-all">{service.repo_url}</p>
+                    {service.repo_branch && (
+                      <p className="flex items-center gap-1 text-xs text-muted-foreground">
+                        <GitBranch className="h-3 w-3" /> {service.repo_branch}
+                        {service.repo_folder ? ` · /${service.repo_folder}` : ''}
+                      </p>
+                    )}
+                  </div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="shrink-0 gap-1.5 text-destructive border-destructive/30 hover:bg-destructive/10 hover:text-destructive"
+                    disabled={updateMutation.isPending}
+                    onClick={() => {
+                      updateMutation.mutate({ clear_repo: true }, {
+                        onSuccess: () => {
+                          setSettingsRepo(null)
+                          setInitSettings(false)
+                          toast.success('Repository disconnected.')
+                        },
+                      })
+                    }}
+                  >
+                    <Unlink className="h-3.5 w-3.5" /> Disconnect
+                  </Button>
+                </div>
+
+                {/* Auto-deploy toggle */}
+                <Separator />
+                <div className="flex items-center justify-between gap-4">
+                  <div>
+                    <p className="text-sm font-medium">Auto-deploy on push</p>
+                    <p className="text-xs text-muted-foreground">Automatically deploy when code is pushed to the connected branch via your GitHub App.</p>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={service.auto_deploy}
+                    disabled={updateMutation.isPending}
+                    onClick={() => updateMutation.mutate(
+                      { auto_deploy: !service.auto_deploy },
+                      { onSuccess: () => toast.success(service.auto_deploy ? 'Auto-deploy disabled.' : 'Auto-deploy enabled.') }
+                    )}
+                    className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 ${service.auto_deploy ? 'bg-primary' : 'bg-input'}`}
+                  >
+                    <span className={`pointer-events-none block h-5 w-5 rounded-full bg-background shadow-lg ring-0 transition-transform ${service.auto_deploy ? 'translate-x-5' : 'translate-x-0'}`} />
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="rounded-lg border p-4 space-y-4">
+                <p className="text-sm text-muted-foreground">No repository connected. Select one below to enable Git deployments.</p>
+                <GitHubRepoSelector
+                  value={settingsRepo ?? { repo_url: '', repo_branch: 'main', repo_folder: '' }}
+                  onChange={setSettingsRepo}
+                />
+                {settingsRepo?.repo_url && (
+                  <div className="flex justify-end">
+                    <Button
+                      size="sm"
+                      className="gap-1.5"
+                      disabled={updateMutation.isPending}
+                      onClick={() => {
+                        updateMutation.mutate(
+                          {
+                            deploy_type: 'git',
+                            repo_url: settingsRepo.repo_url,
+                            repo_branch: settingsRepo.repo_branch,
+                            repo_folder: settingsRepo.repo_folder,
+                          },
+                          { onSuccess: () => toast.success('Repository connected.') }
+                        )
+                      }}
+                    >
+                      {updateMutation.isPending ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Saving…</> : 'Connect repository'}
+                    </Button>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          <Separator />
+
+          {/* Build configuration section */}
+          <div className="space-y-4">
+            <div className="flex items-center gap-2">
+              <Settings2 className="h-4 w-4 text-muted-foreground" />
+              <h2 className="font-medium">Build configuration</h2>
+            </div>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-1.5">
+                <Label htmlFor="cfg-build" className="text-xs">Build command</Label>
+                <Input
+                  id="cfg-build"
+                  className="font-mono text-xs"
+                  placeholder="npm ci && npm run build"
+                  value={settingsBuildCmd}
+                  onChange={e => setSettingsBuildCmd(e.target.value)}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="cfg-start" className="text-xs">Start command</Label>
+                <Input
+                  id="cfg-start"
+                  className="font-mono text-xs"
+                  placeholder="node dist/index.js"
+                  value={settingsStartCmd}
+                  onChange={e => setSettingsStartCmd(e.target.value)}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="cfg-port" className="text-xs">App port</Label>
+                <Input
+                  id="cfg-port"
+                  type="number"
+                  className="font-mono text-xs w-32"
+                  placeholder="8080"
+                  value={settingsPort}
+                  onChange={e => setSettingsPort(e.target.value)}
+                />
+              </div>
+            </div>
+            <div className="flex justify-end">
+              <Button
+                size="sm"
+                className="gap-1.5"
+                disabled={updateMutation.isPending}
+                onClick={() => {
+                  const payload: UpdateServicePayload = {}
+                  if (settingsBuildCmd) payload.build_command = settingsBuildCmd
+                  if (settingsStartCmd) payload.start_command = settingsStartCmd
+                  if (settingsPort) payload.app_port = parseInt(settingsPort, 10)
+                  updateMutation.mutate(payload, { onSuccess: () => toast.success('Build configuration saved.') })
+                }}
+              >
+                {updateMutation.isPending ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Saving…</> : 'Save configuration'}
+              </Button>
+            </div>
           </div>
         </TabsContent>
 

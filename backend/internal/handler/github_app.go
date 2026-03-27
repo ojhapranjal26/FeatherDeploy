@@ -18,6 +18,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/deploy"
 	mw "github.com/ojhapranjal26/featherdeploy/backend/internal/middleware"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/model"
 	v "github.com/ojhapranjal26/featherdeploy/backend/internal/validator"
@@ -34,11 +35,12 @@ import (
 //     from the URL: github.com/organizations/{org}/settings/installations/{id}
 //  4. POST /api/github-app/config with app_id, private_key_pem, installation_id
 type GitHubAppHandler struct {
-	db *sql.DB
+	db        *sql.DB
+	jwtSecret string
 }
 
-func NewGitHubAppHandler(db *sql.DB) *GitHubAppHandler {
-	return &GitHubAppHandler{db: db}
+func NewGitHubAppHandler(db *sql.DB, jwtSecret string) *GitHubAppHandler {
+	return &GitHubAppHandler{db: db, jwtSecret: jwtSecret}
 }
 
 // ─── GET /api/github-app/status ─────────────────────────────────────────────
@@ -343,14 +345,19 @@ func (h *GitHubAppHandler) Webhook(w http.ResponseWriter, r *http.Request) {
 
 	switch eventType {
 	case "push":
-		// Future: match repository + branch to services configured to auto-deploy
+		// Trigger auto-deployment for services configured to auto-deploy on push
 		branch := strings.TrimPrefix(payload.Ref, "refs/heads/")
-		slog.Info("github-app push received",
-			"repo", payload.Repository.FullName,
-			"branch", branch,
-			"commit", payload.After,
-			"sender", payload.Sender.Login,
-		)
+		repoFull := payload.Repository.FullName
+		commitSHA := payload.After
+		// Skip "delete branch" pushes (all-zero SHA)
+		if branch != "" && repoFull != "" && commitSHA != "" &&
+			commitSHA != "0000000000000000000000000000000000000000" {
+			slog.Info("github-app push received",
+				"repo", repoFull, "branch", branch, "commit", commitSHA[:7],
+				"sender", payload.Sender.Login,
+			)
+			go h.triggerAutoDeployments(repoFull, branch, commitSHA)
+		}
 	case "ping":
 		// GitHub sends a ping event when a webhook is first created
 		slog.Info("github-app webhook ping received", "delivery", deliveryID)
@@ -360,5 +367,52 @@ func (h *GitHubAppHandler) Webhook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// triggerAutoDeployments finds services with auto_deploy=1 that match the pushed
+// repo+branch and starts a deployment goroutine for each.
+func (h *GitHubAppHandler) triggerAutoDeployments(repoFullName, branch, commitSHA string) {
+	// Match services whose repo_url contains the repo's full name (handles .git suffix too)
+	rows, err := h.db.Query(`
+		SELECT s.id, s.project_id, p.owner_id, s.deploy_type, s.repo_url
+		FROM services s
+		JOIN projects p ON s.project_id = p.id
+		WHERE s.auto_deploy = 1
+		  AND s.repo_branch = ?
+		  AND (s.repo_url LIKE ? OR s.repo_url LIKE ?)`,
+		branch,
+		"%"+repoFullName+"%",
+		"%"+repoFullName+".git%",
+	)
+	if err != nil {
+		slog.Error("github-app auto-deploy: query services", "err", err)
+		return
+	}
+	defer rows.Close()
+
+	now := time.Now().UTC()
+	for rows.Next() {
+		var svcID, projectID, ownerID int64
+		var deployType, repoURL string
+		if err := rows.Scan(&svcID, &projectID, &ownerID, &deployType, &repoURL); err != nil {
+			continue
+		}
+		// Insert deployment record
+		res, err := h.db.Exec(`
+			INSERT INTO deployments
+			  (service_id, triggered_by, deploy_type, repo_url, commit_sha, branch, artifact_path, status, started_at)
+			VALUES (?,?,?,?,?,?,?,?,?)`,
+			svcID, ownerID, deployType, repoURL, commitSHA, branch, "", "running", now)
+		if err != nil {
+			slog.Error("github-app auto-deploy: insert deployment", "svc_id", svcID, "err", err)
+			continue
+		}
+		depID, _ := res.LastInsertId()
+		h.db.Exec(`UPDATE services SET status='deploying', updated_at=datetime('now') WHERE id=?`, svcID) //nolint
+		go deploy.Run(h.db, h.jwtSecret, depID, svcID, ownerID)
+		slog.Info("github-app auto-deploy triggered",
+			"svc_id", svcID, "branch", branch, "commit", commitSHA[:7],
+		)
+	}
 }
 

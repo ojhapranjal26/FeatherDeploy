@@ -19,6 +19,7 @@ export interface Service {
   host_port?: number
   status: ServiceStatus
   container_id?: string
+  auto_deploy: boolean
   created_at: string
   updated_at: string
 }
@@ -26,7 +27,7 @@ export interface Service {
 export interface CreateServicePayload {
   name: string
   description?: string
-  deploy_type: DeployType
+  deploy_type?: DeployType
   repo_url?: string
   repo_branch?: string
   repo_folder?: string
@@ -35,6 +36,22 @@ export interface CreateServicePayload {
   build_command?: string
   start_command?: string
   domain?: string
+}
+
+export interface UpdateServicePayload {
+  name?: string
+  description?: string
+  deploy_type?: DeployType
+  repo_url?: string
+  repo_branch?: string
+  repo_folder?: string
+  framework?: string
+  build_command?: string
+  start_command?: string
+  app_port?: number
+  host_port?: number
+  auto_deploy?: boolean
+  clear_repo?: boolean
 }
 
 export interface DetectionResult {
@@ -57,7 +74,7 @@ export const servicesApi = {
   create: (projectId: string | number, data: CreateServicePayload): Promise<Service> =>
     client.post<Service>(`/projects/${projectId}/services`, data).then((r) => r.data),
 
-  update: (projectId: string | number, serviceId: string | number, data: Partial<CreateServicePayload>): Promise<Service> =>
+  update: (projectId: string | number, serviceId: string | number, data: UpdateServicePayload): Promise<Service> =>
     client.patch<Service>(`/projects/${projectId}/services/${serviceId}`, data).then((r) => r.data),
 
   delete: (projectId: string | number, serviceId: string | number): Promise<void> =>

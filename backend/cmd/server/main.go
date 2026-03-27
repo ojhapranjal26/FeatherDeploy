@@ -167,7 +167,7 @@ func serve() {
 	domainH := handler.NewDomainHandler(db)
 	inviteH := handler.NewInvitationHandler(db, cfgStore, *jwtSecret, 24*time.Hour, *origin)
 	ghH := handler.NewGitHubHandler(db, cfgStore, *origin)
-	ghAppH := handler.NewGitHubAppHandler(db)
+	ghAppH := handler.NewGitHubAppHandler(db, *jwtSecret)
 	sshH := handler.NewSSHKeyHandler(db, *jwtSecret)
 	dashH := handler.NewDashboardHandler(db)
 	detectH := handler.NewDetectHandler(db, *jwtSecret)

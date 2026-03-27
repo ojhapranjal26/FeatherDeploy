@@ -41,7 +41,7 @@ func (h *DeploymentHandler) List(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	rows, err := h.db.QueryContext(r.Context(),
-		`SELECT id, service_id, triggered_by, deploy_type, repo_url, commit_sha,
+		`SELECT id, service_id, triggered_by, deploy_type, repo_url, commit_sha, branch,
 		        artifact_path, status, error_message, started_at, finished_at, created_at
 		 FROM deployments WHERE service_id=? ORDER BY created_at DESC LIMIT ?`,
 		svcID, limit)
@@ -74,13 +74,19 @@ func (h *DeploymentHandler) Trigger(w http.ResponseWriter, r *http.Request) {
 	}
 	claims := middleware.GetClaims(r.Context())
 
+	// Determine branch from request or service config
+	branch := req.Branch
+	if branch == "" {
+		branch = req.RepoBranch
+	}
+
 	// Insert deployment record
 	now := time.Now().UTC()
 	res, err := h.db.ExecContext(r.Context(),
 		`INSERT INTO deployments
-		  (service_id, triggered_by, deploy_type, repo_url, commit_sha, artifact_path, status, started_at)
-		 VALUES (?,?,?,?,?,?,?,?)`,
-		svcID, claims.UserID, req.DeployType, req.RepoURL, req.CommitSHA, req.ArtifactPath,
+		  (service_id, triggered_by, deploy_type, repo_url, commit_sha, branch, artifact_path, status, started_at)
+		 VALUES (?,?,?,?,?,?,?,?,?)`,
+		svcID, claims.UserID, req.DeployType, req.RepoURL, req.CommitSHA, branch, req.ArtifactPath,
 		"running", now)
 	if err != nil {
 		slog.Error("trigger deployment", "err", err)
@@ -106,7 +112,7 @@ func (h *DeploymentHandler) Get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	row := h.db.QueryRowContext(r.Context(),
-		`SELECT id, service_id, triggered_by, deploy_type, repo_url, commit_sha,
+		`SELECT id, service_id, triggered_by, deploy_type, repo_url, commit_sha, branch,
 		        artifact_path, status, error_message, started_at, finished_at, created_at
 		 FROM deployments WHERE id=?`, depID)
 	var d model.Deployment
@@ -298,7 +304,7 @@ func (h *DeploymentHandler) ContainerLogs(w http.ResponseWriter, r *http.Request
 func scanDeployment(row scanner, d *model.Deployment) error {
 	var finishedAt sql.NullTime
 	err := row.Scan(&d.ID, &d.ServiceID, &d.TriggeredBy, &d.DeployType,
-		&d.RepoURL, &d.CommitSHA, &d.ArtifactPath, &d.Status,
+		&d.RepoURL, &d.CommitSHA, &d.Branch, &d.ArtifactPath, &d.Status,
 		&d.ErrorMessage, &d.StartedAt, &finishedAt, &d.CreatedAt)
 	if err != nil {
 		return err
@@ -313,7 +319,7 @@ func scanDeployment(row scanner, d *model.Deployment) error {
 func scanDeploymentRow(row *sql.Row, d *model.Deployment) error {
 	var finishedAt sql.NullTime
 	err := row.Scan(&d.ID, &d.ServiceID, &d.TriggeredBy, &d.DeployType,
-		&d.RepoURL, &d.CommitSHA, &d.ArtifactPath, &d.Status,
+		&d.RepoURL, &d.CommitSHA, &d.Branch, &d.ArtifactPath, &d.Status,
 		&d.ErrorMessage, &d.StartedAt, &finishedAt, &d.CreatedAt)
 	if err != nil {
 		return err

@@ -58,6 +58,7 @@ type Service struct {
 	HostPort     int       `json:"host_port,omitempty"`
 	Status       string    `json:"status"` // inactive | deploying | running | error | stopped
 	ContainerID  string    `json:"container_id,omitempty"`
+	AutoDeploy   bool      `json:"auto_deploy"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
 }
@@ -70,6 +71,7 @@ type Deployment struct {
 	DeployType   string     `json:"deploy_type"`
 	RepoURL      string     `json:"repo_url,omitempty"`
 	CommitSHA    string     `json:"commit_sha,omitempty"`
+	Branch       string     `json:"branch,omitempty"`
 	ArtifactPath string     `json:"artifact_path,omitempty"`
 	Status       string     `json:"status"` // pending | running | success | failed
 	ErrorMessage string     `json:"error_message,omitempty"`
@@ -130,7 +132,7 @@ type UpdateProjectRequest struct {
 type CreateServiceRequest struct {
 	Name         string `json:"name"          validate:"required,min=2,max=63,slug"`
 	Description  string `json:"description"   validate:"max=256"`
-	DeployType   string `json:"deploy_type"   validate:"required,oneof=git artifact dockerfile"`
+	DeployType   string `json:"deploy_type"   validate:"omitempty,oneof=git artifact dockerfile"`
 	RepoURL      string `json:"repo_url"      validate:"omitempty,giturl,max=512"`
 	RepoBranch   string `json:"repo_branch"   validate:"omitempty,max=255"`
 	RepoFolder   string `json:"repo_folder"   validate:"omitempty,max=512"`
@@ -145,6 +147,7 @@ type CreateServiceRequest struct {
 type UpdateServiceRequest struct {
 	Name         string `json:"name"          validate:"omitempty,min=2,max=63,slug"`
 	Description  string `json:"description"   validate:"max=256"`
+	DeployType   string `json:"deploy_type"   validate:"omitempty,oneof=git artifact dockerfile"`
 	RepoURL      string `json:"repo_url"      validate:"omitempty,giturl,max=512"`
 	RepoBranch   string `json:"repo_branch"   validate:"omitempty,max=255"`
 	RepoFolder   string `json:"repo_folder"   validate:"omitempty,max=512"`
@@ -153,6 +156,10 @@ type UpdateServiceRequest struct {
 	StartCommand string `json:"start_command" validate:"max=512"`
 	AppPort      int    `json:"app_port"      validate:"omitempty,min=1,max=65535"`
 	HostPort     int    `json:"host_port"     validate:"omitempty,min=1,max=65535"`
+	// AutoDeploy: nil = don't change, true/false = enable/disable auto-deploy
+	AutoDeploy *bool `json:"auto_deploy"`
+	// ClearRepo: true = disconnect from Git (clears repo_url, repo_branch, repo_folder)
+	ClearRepo bool `json:"clear_repo"`
 }
 
 type TriggerDeployRequest struct {
@@ -161,6 +168,7 @@ type TriggerDeployRequest struct {
 	RepoBranch   string `json:"repo_branch"   validate:"omitempty,max=255"`
 	CommitSHA    string `json:"commit_sha"    validate:"omitempty,hexadecimal,max=64"`
 	ArtifactPath string `json:"artifact_path" validate:"omitempty,max=512"`
+	Branch       string `json:"branch"        validate:"omitempty,max=255"`
 }
 
 type UpsertEnvVarRequest struct {
