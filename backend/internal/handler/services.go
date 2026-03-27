@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 
 	caddypkg "github.com/ojhapranjal26/featherdeploy/backend/internal/caddy"
@@ -220,6 +222,13 @@ func (h *ServiceHandler) Delete(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+		// Remove uploaded artifact archives for this service
+		artifactDir := filepath.Join("/var/lib/featherdeploy/artifacts", fmt.Sprintf("svc-%d", svcID))
+		if removeErr := os.RemoveAll(artifactDir); removeErr != nil {
+			slog.Warn("service cleanup: remove artifacts", "svc_id", svcID, "err", removeErr)
+		}
+		// Prune dangling podman layers from this service's builds
+		exec.Command("sudo", "-n", "podman", "image", "prune", "-f").Run() //nolint
 		slog.Info("service cleanup complete", "svc_id", svcID, "container", cName)
 	}()
 

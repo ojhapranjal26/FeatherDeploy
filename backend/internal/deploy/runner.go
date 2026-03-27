@@ -430,7 +430,12 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 		// Prune old deployment-tagged images for this service (dep-N tags that
 		// are no longer needed). Keep only the current dep-N and :stable.
 		// This reclaims disk space after every successful deployment.
-		go pruneOldDepImages(svcID, depID)
+		go func() {
+			pruneOldDepImages(svcID, depID)
+			// Prune dangling image layers left over from multi-stage builds.
+			// "Dangling" = layers with no tag, produced by intermediate stages.
+			podmanCmd("image", "prune", "-f").Run() //nolint
+		}()
 	}
 
 	slog.Info("deployment succeeded", "dep_id", depID, "svc_id", svcID, "container", shortID)
@@ -445,6 +450,8 @@ func markFailed(db *sql.DB, depID, svcID int64, logText string) {
 		now, logText, lastLine(logText), depID)
 	db.Exec(
 		`UPDATE services SET status='error', updated_at=datetime('now') WHERE id=?`, svcID)
+	// Prune dangling build layers so failed builds don't waste disk space.
+	go podmanCmd("image", "prune", "-f").Run() //nolint
 	slog.Error("deployment failed", "dep_id", depID, "svc_id", svcID)
 }
 

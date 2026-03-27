@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -126,9 +125,18 @@ func serve() {
 	// Seed default superadmin on first run (no users in DB yet)
 	seedSuperAdmin(db)
 
-	// Start deployment worker pool — concurrency = number of CPU cores.
-	// Workers pick up 'pending' deployments from the queue and run them.
-	deploy.InitQueue(runtime.NumCPU())
+	// Start deployment worker pool.
+	// One worker = fully sequential deployments: when two services are deployed
+	// simultaneously they queue up rather than running in parallel. This prevents
+	// the build process (npm install, podman build, …) from saturating CPU/RAM
+	// on small VPS hosts. Increase via DEPLOY_WORKERS env var if needed.
+	workers := 1
+	if w := os.Getenv("DEPLOY_WORKERS"); w != "" {
+		if n, err := strconv.Atoi(w); err == nil && n > 0 {
+			workers = n
+		}
+	}
+	deploy.InitQueue(workers)
 
 	// ─── Brain heartbeat + SSH key ──────────────────────────────────────
 	// Generate / load cluster SSH keypair (for passwordless node access)
