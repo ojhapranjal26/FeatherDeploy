@@ -644,18 +644,18 @@ func generateDockerfile(workDir, framework, buildCmd, startCmd string, appPort i
 		// Remove devDependencies after build to shrink node_modules before copy
 		sb.WriteString("RUN npm prune --production 2>/dev/null || true\n")
 
-		// Final stage: copy only the production artefacts
+		// Final stage: copy the entire /app from the pruned builder.
+		// A single COPY is safe for every Node output layout:
+		//   .next       → Next.js
+		//   dist        → Vite / Angular / NestJS / most CJS TypeScript compilers
+		//   build       → Create React App / Remix
+		//   public      → Gatsby static output
+		//   (in-place)  → plain Express/Fastify/Koa — no build output dir
+		// Selective per-directory copies are avoided because Dockerfile COPY
+		// fails with "no such file or directory" when the source path doesn't
+		// exist in the builder stage (e.g. /app/dist on a Next.js build).
 		sb.WriteString("\nFROM " + baseImage + "\n")
 		sb.WriteString("WORKDIR /app\n")
-		// Detect common build output dirs; copy whichever exist (Dockerfile COPY
-		// is fine even if the src doesn't exist when using a wildcard glob).
-		sb.WriteString("COPY --from=builder /app/node_modules ./node_modules\n")
-		sb.WriteString("COPY --from=builder /app/package.json ./package.json\n")
-		// Always copy .next / dist / build / public if they exist
-		sb.WriteString("COPY --from=builder /app/.next ./.next\n")
-		sb.WriteString("COPY --from=builder /app/dist ./dist\n")
-		// Fallback: copy the whole app (handles cases where build output is in-place)
-		// The above COPYs will override if specific dirs exist.
 		sb.WriteString("COPY --from=builder /app .\n")
 		sb.WriteString(fmt.Sprintf("EXPOSE %d\n", appPort))
 		sb.WriteString(`CMD ["/bin/sh", "-c", "` + strings.ReplaceAll(startCmd, `"`, `\"`) + `"]` + "\n")
