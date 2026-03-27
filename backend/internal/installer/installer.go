@@ -721,8 +721,10 @@ StartLimitIntervalSec=120
 StartLimitBurst=5
 StandardOutput=journal
 StandardError=journal
-NoNewPrivileges=yes
 PrivateTmp=yes
+# NoNewPrivileges must NOT be set: rootless podman forks newuidmap/newgidmap which
+# are setuid-root binaries. NoNewPrivileges blocks their setuid bit, causing
+# "write to uid_map failed: Operation not permitted" errors on every build/run.
 
 [Install]
 WantedBy=multi-user.target

@@ -356,7 +356,8 @@ install_deps_apt() {
 }
 
 install_deps_dnf() {
-  dnf install -y curl git gcc make ca-certificates
+  # shadow-utils provides newuidmap/newgidmap (required for rootless podman)
+  dnf install -y curl git gcc make ca-certificates shadow-utils
   command -v podman >/dev/null 2>&1 || dnf install -y podman
   command -v crun   >/dev/null 2>&1 || dnf install -y crun 2>/dev/null || echo '  WARNING: crun not available via dnf'
   command -v caddy  >/dev/null 2>&1 || dnf install -y caddy 2>/dev/null || \
@@ -366,7 +367,8 @@ install_deps_dnf() {
 }
 
 install_deps_yum() {
-  yum install -y curl git gcc make ca-certificates
+  # shadow-utils provides newuidmap/newgidmap (required for rootless podman)
+  yum install -y curl git gcc make ca-certificates shadow-utils
   command -v podman >/dev/null 2>&1 || yum install -y podman
   command -v crun   >/dev/null 2>&1 || yum install -y crun 2>/dev/null || echo '  WARNING: crun not available via yum'
   command -v caddy  >/dev/null 2>&1 || (yum install -y yum-plugin-copr && yum copr enable -y @caddy/caddy && yum install -y caddy) || echo '  WARNING: caddy not via yum'
@@ -488,6 +490,11 @@ for _subfile in /etc/subuid /etc/subgid; do
   else
     echo "  ${_subfile} already has an entry for ${SVC_USER} — skipping"
   fi
+done
+# Ensure newuidmap/newgidmap are setuid root — required for rootless podman user
+# namespaces. Some distros install them without the setuid bit; set it explicitly.
+for _newmap in /usr/bin/newuidmap /usr/bin/newgidmap /usr/sbin/newuidmap /usr/sbin/newgidmap; do
+  [ -f "$_newmap" ] && chmod u+s "$_newmap" && echo "  setuid on $_newmap" || true
 done
 if command -v podman >/dev/null 2>&1; then
   su -s /bin/sh -c "podman system migrate" "${SVC_USER}" 2>/dev/null || true
