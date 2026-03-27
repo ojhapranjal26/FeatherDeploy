@@ -390,12 +390,14 @@ func (h *GitHubAppHandler) triggerAutoDeployments(repoFullName, branch, commitSH
 	}
 	defer rows.Close()
 
+	matched := 0
 	for rows.Next() {
 		var svcID, projectID, ownerID int64
 		var deployType, repoURL string
 		if err := rows.Scan(&svcID, &projectID, &ownerID, &deployType, &repoURL); err != nil {
 			continue
 		}
+		matched++
 		// Insert deployment record as 'pending'; the worker pool starts it.
 		res, err := h.db.Exec(`
 			INSERT INTO deployments
@@ -412,5 +414,56 @@ func (h *GitHubAppHandler) triggerAutoDeployments(repoFullName, branch, commitSH
 			"svc_id", svcID, "branch", branch, "commit", commitSHA[:7],
 		)
 	}
+	if matched == 0 {
+		slog.Warn("github-app auto-deploy: no services matched",
+			"repo", repoFullName, "branch", branch,
+			"hint", "check service auto_deploy=1 and repo_branch matches pushed branch")
+	}
+}
+
+// ─── GET /api/github-app/webhook-deliveries  (superadmin) ───────────────────
+// Fetches the last 20 webhook deliveries from the GitHub API so the admin can
+// see whether GitHub is successfully delivering events and what responses we
+// returned.  Requires the App to be configured with a valid private key.
+func (h *GitHubAppHandler) WebhookDeliveries(w http.ResponseWriter, r *http.Request) {
+	cfg, err := h.loadConfig(r.Context())
+	if err == sql.ErrNoRows {
+		writeJSON(w, http.StatusServiceUnavailable, errMap("GitHub App not configured"))
+		return
+	}
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errMap("internal error"))
+		return
+	}
+
+	appTok, err := appJWT(cfg.AppID, cfg.PrivateKeyPEM)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errMap("could not sign app JWT: "+err.Error()))
+		return
+	}
+
+	req, _ := http.NewRequestWithContext(r.Context(), http.MethodGet,
+		"https://api.github.com/app/hook/deliveries?per_page=20", nil)
+	req.Header.Set("Authorization", "Bearer "+appTok)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, errMap("could not reach GitHub API: "+err.Error()))
+		return
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+
+	if resp.StatusCode != http.StatusOK {
+		writeJSON(w, http.StatusBadGateway, errMap(fmt.Sprintf("GitHub API %d: %s", resp.StatusCode, body)))
+		return
+	}
+
+	// Forward the raw GitHub JSON array directly to the client.
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write(body) //nolint
 }
 

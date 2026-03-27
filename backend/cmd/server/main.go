@@ -306,7 +306,7 @@ func serve() {
 			r.Get("/api/github-app/config", ghAppH.GetConfig)
 			r.Post("/api/github-app/config", ghAppH.SetConfig)
 			r.Delete("/api/github-app/config", ghAppH.DeleteConfig)
-
+			r.Get("/api/github-app/webhook-deliveries", ghAppH.WebhookDeliveries)
 		})
 
 		// ── Cluster brain info (any authenticated user) ───────────────────

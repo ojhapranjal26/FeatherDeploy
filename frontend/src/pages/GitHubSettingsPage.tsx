@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import {
   Github, CheckCircle2, AlertCircle, Loader2, Key, Plus, Trash2,
-  Download, Copy, Check, AppWindow,
+  Download, Copy, Check, AppWindow, RefreshCw, XCircle, Clock,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
@@ -197,6 +197,19 @@ function OAuthTab() {
 }
 
 // ─── GitHub App Tab ─────────────────────────────────────────────────────────
+interface WebhookDelivery {
+  id: number
+  guid: string
+  delivered_at: string
+  redelivery: boolean
+  duration: number
+  status: string
+  status_code: number
+  event: string
+  action: string | null
+  repository_id: number | null
+}
+
 function GitHubAppTab({ isSuperAdmin }: { isSuperAdmin: boolean }) {
   const [status, setStatus] = useState<GitHubAppStatus | null>(null)
   const [loading, setLoading] = useState(true)
@@ -205,8 +218,13 @@ function GitHubAppTab({ isSuperAdmin }: { isSuperAdmin: boolean }) {
   const [deleting, setDeleting] = useState(false)
   const [repos, setRepos] = useState<{ full_name: string; private: boolean }[]>([])
   const [reposLoading, setReposLoading] = useState(false)
+  const [deliveries, setDeliveries] = useState<WebhookDelivery[] | null>(null)
+  const [deliveriesLoading, setDeliveriesLoading] = useState(false)
+  const [copied, setCopied] = useState(false)
 
   const [form, setForm] = useState<Partial<GitHubAppConfig>>({})
+
+  const webhookURL = `${window.location.origin}/api/github-app/webhook`
 
   const loadStatus = () => {
     apiFetch<GitHubAppStatus>('/api/github-app/status')
@@ -275,6 +293,25 @@ function GitHubAppTab({ isSuperAdmin }: { isSuperAdmin: boolean }) {
     }
   }
 
+  const handleLoadDeliveries = async () => {
+    setDeliveriesLoading(true)
+    try {
+      const data = await apiFetch<WebhookDelivery[]>('/api/github-app/webhook-deliveries')
+      setDeliveries(Array.isArray(data) ? data : [])
+    } catch (e: unknown) {
+      toast.error(e instanceof Error ? e.message : 'Failed to fetch deliveries.')
+    } finally {
+      setDeliveriesLoading(false)
+    }
+  }
+
+  const copyWebhookURL = () => {
+    navigator.clipboard.writeText(webhookURL).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    })
+  }
+
   const f = (k: keyof GitHubAppConfig) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) =>
     setForm(prev => ({ ...prev, [k]: e.target.value }))
 
@@ -285,6 +322,7 @@ function GitHubAppTab({ isSuperAdmin }: { isSuperAdmin: boolean }) {
         can access all repositories granted during installation — no per-user tokens needed.
       </p>
 
+      {/* ── App status card ─────────────────────────────────────────── */}
       <div className="rounded-xl border border-border bg-card p-6">
         <div className="flex items-start gap-4">
           <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border border-border bg-muted">
@@ -409,6 +447,111 @@ function GitHubAppTab({ isSuperAdmin }: { isSuperAdmin: boolean }) {
             </ul>
           ) : reposLoading ? null : (
             <p className="text-sm text-muted-foreground">Click "Load repos" to fetch the list.</p>
+          )}
+        </div>
+      )}
+
+      {/* ── Webhook setup guide ──────────────────────────────────────── */}
+      <div className="rounded-xl border border-border bg-card p-6 space-y-4">
+        <h3 className="text-sm font-medium">Webhook &amp; Auto-Deploy Setup</h3>
+
+        <div className="space-y-1.5">
+          <p className="text-xs text-muted-foreground font-medium uppercase tracking-wide">Step 1 — Set this URL in your GitHub App settings → Webhook URL</p>
+          <div className="flex items-center gap-2">
+            <code className="flex-1 rounded-md border border-border bg-muted px-3 py-2 text-xs font-mono break-all">
+              {webhookURL}
+            </code>
+            <Button variant="outline" size="sm" className="shrink-0" onClick={copyWebhookURL}>
+              {copied ? <Check className="h-3.5 w-3.5 text-emerald-500" /> : <Copy className="h-3.5 w-3.5" />}
+            </Button>
+          </div>
+        </div>
+
+        <div className="space-y-2">
+          <p className="text-xs text-muted-foreground font-medium uppercase tracking-wide">Step 2 — Required GitHub App permissions</p>
+          <ul className="space-y-1 text-sm">
+            <li className="flex items-center gap-2 text-emerald-600 dark:text-emerald-400"><CheckCircle2 className="h-3.5 w-3.5 shrink-0" /><span><strong>Repository permissions → Contents:</strong> Read-only</span></li>
+            <li className="flex items-center gap-2 text-emerald-600 dark:text-emerald-400"><CheckCircle2 className="h-3.5 w-3.5 shrink-0" /><span><strong>Repository permissions → Metadata:</strong> Read-only (mandatory)</span></li>
+          </ul>
+        </div>
+
+        <div className="space-y-2">
+          <p className="text-xs text-muted-foreground font-medium uppercase tracking-wide">Step 3 — Subscribe to events</p>
+          <ul className="space-y-1 text-sm">
+            <li className="flex items-center gap-2 text-emerald-600 dark:text-emerald-400"><CheckCircle2 className="h-3.5 w-3.5 shrink-0" /><span><strong>Push</strong> — triggers auto-deploy when you push to a branch</span></li>
+          </ul>
+          <p className="text-xs text-muted-foreground pt-1">In your GitHub App settings → <em>Permissions &amp; events</em> → scroll to <em>Subscribe to events</em> → tick <strong>Push</strong>.</p>
+        </div>
+
+        <div className="space-y-2">
+          <p className="text-xs text-muted-foreground font-medium uppercase tracking-wide">Step 4 — Enable auto-deploy on the service</p>
+          <p className="text-sm text-muted-foreground">On the service page → Overview tab → toggle <strong>Auto-deploy</strong> on and ensure <strong>Repo URL</strong> and <strong>Branch</strong> are set.</p>
+        </div>
+      </div>
+
+      {/* ── Recent webhook deliveries ────────────────────────────────── */}
+      {isSuperAdmin && status?.configured && (
+        <div className="rounded-xl border border-border bg-card p-6 space-y-3">
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="text-sm font-medium">Recent Webhook Deliveries</h3>
+              <p className="text-xs text-muted-foreground mt-0.5">Shows the last 20 events GitHub attempted to deliver — use this to diagnose why auto-deploy isn't triggering.</p>
+            </div>
+            <Button variant="outline" size="sm" onClick={handleLoadDeliveries} disabled={deliveriesLoading}>
+              {deliveriesLoading
+                ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                : <><RefreshCw className="h-3.5 w-3.5 mr-1.5" />Fetch</>}
+            </Button>
+          </div>
+
+          {deliveries === null ? (
+            <p className="text-sm text-muted-foreground">Click "Fetch" to load recent deliveries from GitHub.</p>
+          ) : deliveries.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No deliveries found. Make sure the Webhook URL above is set in your GitHub App settings and at least one push event has been sent.</p>
+          ) : (
+            <div className="divide-y divide-border text-sm">
+              {deliveries.map(d => {
+                const ok = d.status_code >= 200 && d.status_code < 300
+                const isPush = d.event === 'push'
+                return (
+                  <div key={d.id} className="flex items-center gap-3 py-2.5">
+                    {ok
+                      ? <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-500" />
+                      : <XCircle className="h-4 w-4 shrink-0 text-red-500" />}
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className={`font-medium ${isPush ? 'text-foreground' : 'text-muted-foreground'}`}>{d.event}</span>
+                        <span className={`text-xs px-1.5 py-0.5 rounded-full border ${ok ? 'border-emerald-500/30 text-emerald-600 dark:text-emerald-400 bg-emerald-500/10' : 'border-red-500/30 text-red-600 dark:text-red-400 bg-red-500/10'}`}>
+                          {d.status_code}
+                        </span>
+                        {d.redelivery && <span className="text-xs text-muted-foreground">(redelivery)</span>}
+                      </div>
+                      <p className="text-xs text-muted-foreground truncate">{d.status}</p>
+                    </div>
+                    <div className="text-right shrink-0">
+                      <p className="text-xs text-muted-foreground flex items-center gap-1">
+                        <Clock className="h-3 w-3" />
+                        {new Date(d.delivered_at).toLocaleTimeString()}
+                      </p>
+                      <p className="text-xs text-muted-foreground">{new Date(d.delivered_at).toLocaleDateString()}</p>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+
+          {deliveries !== null && deliveries.filter(d => d.event === 'push').length === 0 && deliveries.length > 0 && (
+            <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-700 dark:text-amber-400">
+              <strong>No push events found</strong> in the last 20 deliveries. GitHub is not sending Push events to this app.
+              Check: <em>GitHub App Settings → Permissions &amp; events → Subscribe to events → Push</em> must be ticked.
+            </div>
+          )}
+          {deliveries !== null && deliveries.some(d => d.event === 'push' && (d.status_code < 200 || d.status_code >= 300)) && (
+            <div className="rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-700 dark:text-red-400">
+              <strong>Push delivery failed.</strong> GitHub delivered the push event but got a non-200 response.
+              Check that the Webhook URL is correct and the server is reachable.
+            </div>
           )}
         </div>
       )}
