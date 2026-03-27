@@ -4,7 +4,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"log/slog"
+	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/auth"
@@ -12,6 +14,46 @@ import (
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/model"
 	v "github.com/ojhapranjal26/featherdeploy/backend/internal/validator"
 )
+
+// ─── Login rate limiter ───────────────────────────────────────────────────────
+// Simple fixed-window rate limiter keyed by client IP.
+// Limit: 10 attempts per IP per minute. Protects the bcrypt verify path.
+
+const (
+	loginRateMax    = 10
+	loginRatePeriod = time.Minute
+)
+
+var (
+	loginMu  sync.Mutex
+	loginWin = make(map[string]*loginWindow)
+)
+
+type loginWindow struct {
+	count   int
+	resetAt time.Time
+}
+
+func loginRateCheck(ip string) bool {
+	loginMu.Lock()
+	defer loginMu.Unlock()
+	now := time.Now()
+	// Evict expired entries when the map grows large to prevent unbounded memory use.
+	if len(loginWin) > 5000 {
+		for k, w := range loginWin {
+			if now.After(w.resetAt) {
+				delete(loginWin, k)
+			}
+		}
+	}
+	w, ok := loginWin[ip]
+	if !ok || now.After(w.resetAt) {
+		loginWin[ip] = &loginWindow{count: 1, resetAt: now.Add(loginRatePeriod)}
+		return true
+	}
+	w.count++
+	return w.count <= loginRateMax
+}
 
 type AuthHandler struct {
 	db        *sql.DB
@@ -25,23 +67,33 @@ func NewAuthHandler(db *sql.DB, jwtSecret string, tokenTTL time.Duration) *AuthH
 
 // POST /api/auth/login
 func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
+	// Rate-limit by client IP (10 attempts/minute) to prevent brute-force attacks.
+	ip, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		ip = r.RemoteAddr // RealIP middleware may have already stripped the port
+	}
+	if !loginRateCheck(ip) {
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "too many login attempts — wait 1 minute and try again"})
+		return
+	}
+
 	var req model.LoginRequest
 	if !v.DecodeAndValidate(w, r, &req) {
 		return
 	}
 
 	var user model.User
-	err := h.db.QueryRowContext(r.Context(),
+	dbErr := h.db.QueryRowContext(r.Context(),
 		`SELECT id, email, name, password_hash, role, github_login FROM users WHERE email=?`, req.Email,
 	).Scan(&user.ID, &user.Email, &user.Name, &user.PasswordHash, &user.Role, &user.GitHubLogin)
-	if err == sql.ErrNoRows {
+	if dbErr == sql.ErrNoRows {
 		// Timing-safe: hash even on not-found to prevent timing attacks
 		auth.CheckPassword("$2a$12$dummy", req.Password) //nolint
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid credentials"})
 		return
 	}
-	if err != nil {
-		slog.Error("query user", "err", err)
+	if dbErr != nil {
+		slog.Error("query user", "err", dbErr)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}

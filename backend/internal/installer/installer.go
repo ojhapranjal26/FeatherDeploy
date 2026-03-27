@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"text/template"
@@ -300,7 +301,40 @@ func setupPodmanRootless(username string) {
 	fmt.Printf("\n── Configuring rootless Podman for %s ──────────────────\n", username)
 	ensureSubIDEntry(username, "/etc/subuid", "100000", "65536")
 	ensureSubIDEntry(username, "/etc/subgid", "100000", "65536")
-	// Tell Podman to migrate its storage to use the new mapping.
+
+	// Ensure newuidmap/newgidmap have setuid root so user namespace mapping works.
+	for _, p := range []string{"/usr/bin/newuidmap", "/usr/bin/newgidmap", "/usr/sbin/newuidmap", "/usr/sbin/newgidmap"} {
+		if fi, err := os.Stat(p); err == nil {
+			// Set setuid bit (04000) plus existing permission bits.
+			_ = os.Chmod(p, fi.Mode()|0o4000)
+		}
+	}
+
+	// Enable linger so the service user gets a persistent systemd user session
+	// (creates /run/user/<uid>/ with a dbus socket even with no login session).
+	if out, err := exec.Command("loginctl", "enable-linger", username).CombinedOutput(); err != nil {
+		slog.Warn("loginctl enable-linger failed (non-fatal)", "err", err, "out", string(out))
+	} else {
+		fmt.Printf("  ✓ loginctl enable-linger %s\n", username)
+	}
+
+	// Write a per-user containers.conf forcing cgroupfs cgroup manager.
+	// Without this, crun calls sd-bus to ask systemd to create a cgroup scope,
+	// which fails with "Interactive authentication required" when no user
+	// session dbus socket is available.
+	homedir := userHomeDir(username)
+	confDir := filepath.Join(homedir, ".config", "containers")
+	if err := os.MkdirAll(confDir, 0755); err == nil {
+		confFile := filepath.Join(confDir, "containers.conf")
+		const userConf = "[engine]\ncgroup_manager = \"cgroupfs\"\n"
+		if err2 := os.WriteFile(confFile, []byte(userConf), 0644); err2 == nil {
+			fmt.Printf("  ✓ per-user containers.conf (cgroupfs) written to %s\n", confFile)
+		}
+		// Ensure the service user owns the entire .config tree.
+		mustRun("chown", "-R", username+":"+username, filepath.Join(homedir, ".config"))
+	}
+
+	// Tell Podman to migrate its storage to use the new UID mapping.
 	cmd := exec.Command("su", "-s", "/bin/sh", username, "-c", "podman system migrate")
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -308,6 +342,19 @@ func setupPodmanRootless(username string) {
 		slog.Warn("podman system migrate failed (non-fatal)", "err", err)
 	}
 	fmt.Printf("  ✓ rootless Podman configured for %s\n", username)
+}
+
+// userHomeDir returns the home directory for username from /etc/passwd,
+// falling back to /var/lib/featherdeploy.
+func userHomeDir(username string) string {
+	out, err := exec.Command("getent", "passwd", username).Output()
+	if err == nil {
+		fields := strings.Split(strings.TrimSpace(string(out)), ":")
+		if len(fields) >= 6 && fields[5] != "" {
+			return fields[5]
+		}
+	}
+	return "/var/lib/featherdeploy"
 }
 
 // ensureSubIDEntry appends a subuid/subgid range entry for username to file
@@ -448,7 +495,14 @@ var pkgManagers = map[string]pkgCmd{
 const rqliteVer = "8.36.5"
 const rqliteSystemdUnit = "/etc/systemd/system/rqlite.service"
 
-// configureCrun sets up crun as the default Podman OCI runtime.
+// configureCrun sets up crun as the default Podman OCI runtime and forces
+// cgroupfs cgroup management.
+//
+// cgroup_manager=cgroupfs is critical: the service user runs under a systemd
+// *system* unit with no interactive user session, so there is no dbus socket.
+// If the cgroup manager is "systemd", crun calls sd-bus to create a cgroup
+// scope and fails with "Interactive authentication required."  cgroupfs
+// bypasses dbus entirely.
 func configureCrun() {
 	if _, err := exec.LookPath("crun"); err != nil {
 		fmt.Println("  WARNING: crun not found — skipping Podman runtime config")
@@ -457,18 +511,31 @@ func configureCrun() {
 	confDir := "/etc/containers"
 	confFile := filepath.Join(confDir, "containers.conf")
 	mustMkdir(confDir)
-	engineSection := "[engine]\nruntime = \"crun\"\n"
+
+	var s string
 	if data, err := os.ReadFile(confFile); err == nil {
-		s := string(data)
-		if strings.Contains(s, "runtime") {
-			fmt.Println("  crun: containers.conf already configures a runtime")
-			return
-		}
-		writeFile(confFile, s+"\n"+engineSection, 0644)
-	} else {
-		writeFile(confFile, engineSection, 0644)
+		s = string(data)
 	}
-	fmt.Println("  ✓ crun configured as Podman OCI runtime")
+
+	// Ensure [engine] section exists.
+	if !strings.Contains(s, "[engine]") {
+		s += "\n[engine]\n"
+	}
+	// Set or replace runtime = "crun".
+	if strings.Contains(s, "runtime") {
+		s = regexp.MustCompile(`(?m)^\s*runtime\s*=.*$`).ReplaceAllString(s, `runtime = "crun"`)
+	} else {
+		s = strings.Replace(s, "[engine]", "[engine]\nruntime = \"crun\"", 1)
+	}
+	// Set or replace cgroup_manager = "cgroupfs".
+	if strings.Contains(s, "cgroup_manager") {
+		s = regexp.MustCompile(`(?m)^\s*cgroup_manager\s*=.*$`).ReplaceAllString(s, `cgroup_manager = "cgroupfs"`)
+	} else {
+		s = strings.Replace(s, "[engine]", "[engine]\ncgroup_manager = \"cgroupfs\"", 1)
+	}
+
+	writeFile(confFile, s, 0644)
+	fmt.Println("  ✓ crun + cgroupfs configured in", confFile)
 }
 
 // installRqlite downloads and installs the rqlite binary if not already present.

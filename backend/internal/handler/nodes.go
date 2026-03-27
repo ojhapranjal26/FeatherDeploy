@@ -224,7 +224,7 @@ func (h *NodeHandler) BinaryDownload(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		claims := middleware.GetClaims(r.Context())
-		if claims.Role != model.RoleSuperAdmin && claims.Role != model.RoleAdmin {
+		if claims == nil || (claims.Role != model.RoleSuperAdmin && claims.Role != model.RoleAdmin) {
 			writeJSON(w, http.StatusForbidden, errMap("forbidden"))
 			return
 		}
@@ -400,7 +400,7 @@ func (h *NodeHandler) ServerBinaryDownload(w http.ResponseWriter, r *http.Reques
 		}
 	} else {
 		claims := middleware.GetClaims(r.Context())
-		if claims.Role != model.RoleSuperAdmin && claims.Role != model.RoleAdmin {
+		if claims == nil || (claims.Role != model.RoleSuperAdmin && claims.Role != model.RoleAdmin) {
 			writeJSON(w, http.StatusForbidden, errMap("forbidden"))
 			return
 		}

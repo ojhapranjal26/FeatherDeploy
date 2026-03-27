@@ -167,7 +167,10 @@ func (h *DeploymentHandler) Logs(w http.ResponseWriter, r *http.Request) {
 	}
 	sentLines := initialSkip
 	sendLine := func(line string) {
-		fmt.Fprintf(w, "data: %s\n\n", line)
+		// Strip CR characters: SSE parsers treat \r as a field terminator; a
+		// build log with Windows line endings could inject spurious SSE events.
+		safe := strings.ReplaceAll(line, "\r", "")
+		fmt.Fprintf(w, "data: %s\n\n", safe)
 		flusher.Flush()
 	}
 	sendPing := func() {

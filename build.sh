@@ -82,21 +82,30 @@ configure_crun() {
     echo "  WARNING: crun not found -- skipping Podman runtime config"
     return
   fi
-  echo "==> Configuring crun as Podman OCI runtime..."
+  echo "==> Configuring crun as Podman OCI runtime with cgroupfs manager..."
   mkdir -p /etc/containers
   local conf="/etc/containers/containers.conf"
-  if [ -f "$conf" ]; then
+  # Write (or replace) a known-good system-wide [engine] section.
+  # cgroup_manager=cgroupfs: the service user has no interactive systemd user
+  # session, so using the systemd cgroup manager makes crun call sd-bus and
+  # fail with "Interactive authentication required".  cgroupfs bypasses dbus.
+  if grep -q '\[engine\]' "$conf" 2>/dev/null; then
+    # Update or insert both settings inside the existing [engine] block.
     if grep -qE '^\s*runtime\s*=' "$conf"; then
       sed -i 's|^\s*runtime\s*=.*|runtime = "crun"|' "$conf"
-    elif grep -q '\[engine\]' "$conf"; then
-      sed -i '/\[engine\]/a runtime = "crun"' "$conf"
     else
-      printf '\n[engine]\nruntime = "crun"\n' >> "$conf"
+      sed -i '/\[engine\]/a runtime = "crun"' "$conf"
+    fi
+    if grep -qE '^\s*cgroup_manager\s*=' "$conf"; then
+      sed -i 's|^\s*cgroup_manager\s*=.*|cgroup_manager = "cgroupfs"|' "$conf"
+    else
+      sed -i '/\[engine\]/a cgroup_manager = "cgroupfs"' "$conf"
     fi
   else
-    printf '[engine]\nruntime = "crun"\n' > "$conf"
+    # No [engine] section yet — write a clean one.
+    printf '\n[engine]\nruntime = "crun"\ncgroup_manager = "cgroupfs"\n' >> "$conf"
   fi
-  echo "  crun configured as Podman OCI runtime"
+  echo "  crun + cgroupfs configured in $conf"
 }
 
 # -- Helper: install rqlite binary
@@ -496,6 +505,24 @@ done
 for _newmap in /usr/bin/newuidmap /usr/bin/newgidmap /usr/sbin/newuidmap /usr/sbin/newgidmap; do
   [ -f "$_newmap" ] && chmod u+s "$_newmap" && echo "  setuid on $_newmap" || true
 done
+# Enable linger so the service user has a persistent systemd user session.
+# This creates /run/user/<uid>/ and a dbus socket even when nobody is logged in.
+if command -v loginctl >/dev/null 2>&1; then
+  loginctl enable-linger "${SVC_USER}" 2>/dev/null && echo "  loginctl enable-linger ${SVC_USER}" || true
+fi
+
+# Write a per-user containers.conf that forces cgroupfs.
+# This is the decisive setting: even if /etc/containers/containers.conf is
+# overridden by a distro update, the user-level config will always win.
+_svc_home=$(getent passwd "${SVC_USER}" | cut -d: -f6 || echo "/var/lib/featherdeploy")
+mkdir -p "${_svc_home}/.config/containers"
+cat > "${_svc_home}/.config/containers/containers.conf" << 'USERCONF'
+[engine]
+cgroup_manager = "cgroupfs"
+USERCONF
+chown -R "${SVC_USER}:${SVC_USER}" "${_svc_home}/.config"
+echo "  per-user containers.conf (cgroupfs) written for ${SVC_USER}"
+
 if command -v podman >/dev/null 2>&1; then
   su -s /bin/sh -c "podman system migrate" "${SVC_USER}" 2>/dev/null || true
   echo "  Podman storage migrated for ${SVC_USER}"

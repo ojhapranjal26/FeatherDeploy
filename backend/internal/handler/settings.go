@@ -156,11 +156,13 @@ func (h *SettingsHandler) UploadLogo(w http.ResponseWriter, r *http.Request) {
 		// DetectContentType returns text/plain for SVG; check raw bytes.
 		snippet := strings.TrimSpace(string(raw[:min(512, len(raw))]))
 		if strings.HasPrefix(snippet, "<svg") || strings.HasPrefix(snippet, "<?xml") {
-			contentType = "image/svg+xml"
-		} else {
-			writeJSON(w, http.StatusBadRequest, errMap("unsupported file type — use JPEG, PNG, GIF, WebP, or SVG"))
+			// SVG can embed <script> and event handlers; reject to prevent stored XSS.
+			// A superadmin-uploaded SVG served from the same origin would execute
+			// JavaScript in any user's browser who navigates directly to /api/settings/branding/logo.
+			writeJSON(w, http.StatusBadRequest, errMap("SVG images are not accepted — use JPEG, PNG, GIF, or WebP"))
 			return
 		}
+		writeJSON(w, http.StatusBadRequest, errMap("unsupported file type — use JPEG, PNG, GIF, or WebP"))
 	}
 
 	encoded := base64.StdEncoding.EncodeToString(raw)
