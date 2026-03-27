@@ -432,10 +432,11 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 		// This reclaims disk space after every successful deployment.
 		go func() {
 			pruneOldDepImages(svcID, depID)
-			// Prune ALL unused images (not just dangling) to reclaim disk space
-			// from base images (node:20-alpine, python:3.12-slim, …) that are no
-			// longer referenced by any running container.
-			podmanCmd("image", "prune", "-a", "-f").Run() //nolint
+			// Prune only dangling (untagged) images left over from multi-stage
+			// builds. We intentionally do NOT use -a so that base images like
+			// node:20-alpine and python:3.12-slim remain cached for the next
+			// deployment; they would otherwise be re-pulled every build.
+			podmanCmd("image", "prune", "-f").Run() //nolint
 		}()
 	}
 
@@ -452,9 +453,9 @@ func markFailed(db *sql.DB, depID, svcID int64, logText string) {
 		now, logText, lastLine(logText), depID)
 	db.Exec(
 		`UPDATE services SET status='error', updated_at=datetime('now') WHERE id=?`, svcID)
-	// Prune ALL unused images — failed builds leave behind pulled base images
-	// (e.g. node:20-alpine) that are never referenced by a container.
-	go podmanCmd("image", "prune", "-a", "-f").Run() //nolint
+	// Prune dangling (untagged) images left behind by the failed build.
+	// Use -f only (not -a) so cached base images are not evicted.
+	go podmanCmd("image", "prune", "-f").Run() //nolint
 	go trimOldDeployLogs(db, svcID)
 	slog.Error("deployment failed", "dep_id", depID, "svc_id", svcID)
 }
@@ -978,8 +979,12 @@ func podmanCmdCtx(ctx context.Context, args ...string) *exec.Cmd {
 }
 
 // podmanBuild builds a container image using rootful podman (via sudo).
+// --pull=missing tells podman to use the locally-cached base image when it
+// already exists, and only contact the registry when the image is absent.
+// This avoids re-pulling node:20-alpine / python:3.12-slim on every build,
+// which saves bandwidth and minutes per deployment.
 func podmanBuild(dir string, log *logBuf, imageName string) error {
-	cmd := podmanCmd("build", "-t", imageName, ".")
+	cmd := podmanCmd("build", "--pull=missing", "-t", imageName, ".")
 	cmd.Dir = dir
 	var buf bytes.Buffer
 	cmd.Stdout = &buf
