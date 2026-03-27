@@ -71,15 +71,15 @@ export function LoginPage() {
             <img
               src={branding.logo_url}
               alt={platformName}
-              className="h-12 w-auto max-w-[180px] object-contain"
+              className="h-16 w-auto max-w-[220px] object-contain"
             />
           ) : (
             <>
-              <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-primary text-primary-foreground shadow-2xl shadow-primary/40 ring-1 ring-white/10">
-                <Feather className="h-6 w-6" />
+              <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-primary text-primary-foreground shadow-2xl shadow-primary/40 ring-1 ring-white/10">
+                <Feather className="h-8 w-8" />
               </div>
               <div>
-                <span className="text-xl font-bold text-white tracking-tight">{platformName}</span>
+                <span className="text-2xl font-bold text-white tracking-tight">{platformName}</span>
                 <p className="text-xs text-white/40 font-medium mt-0.5">Self-hosted PaaS</p>
               </div>
             </>
@@ -142,14 +142,14 @@ export function LoginPage() {
             <img
               src={branding.logo_url}
               alt={platformName}
-              className="h-12 w-auto max-w-[160px] object-contain"
+              className="h-16 w-auto max-w-[200px] object-contain"
             />
           ) : (
             <>
-              <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-primary text-primary-foreground shadow-xl shadow-primary/30">
-                <Feather className="h-7 w-7" />
+              <div className="flex h-[72px] w-[72px] items-center justify-center rounded-2xl bg-primary text-primary-foreground shadow-xl shadow-primary/30">
+                <Feather className="h-9 w-9" />
               </div>
-              <span className="text-xl font-bold tracking-tight">{platformName}</span>
+              <span className="text-2xl font-bold tracking-tight">{platformName}</span>
             </>
           )}
         </div>

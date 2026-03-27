@@ -22,7 +22,7 @@
   - GitHub App — organisation-wide repo access via RS256 JWT installation tokens
   - SSH Keys — generate or import ED25519 deploy keys (private keys stored AES-256-GCM encrypted)
   - 📖 [Full GitHub setup guide →](docs/github-setup.md)
-- **Podman containers** — deploy services as rootless OCI containers.
+- **Podman containers** — deploy services as rootful OCI containers (via `sudo -n podman`) for maximum kernel compatibility on low-cost VPS hosts.
 - **Automatic TLS** — Caddy reverse proxy obtains Let's Encrypt certificates for your domain.
 - **Non-root service user** — the panel process runs under a dedicated Linux user (not root) for security isolation.
 - **Systemd managed** — installs as a persistent systemd service with automatic restarts.
@@ -31,14 +31,14 @@
 
 ## 🖥️ Tech Stack
 
-| Layer     | Technology                                          |
-|-----------|-----------------------------------------------------|
-| Frontend  | React 18, TypeScript, Vite, Tailwind CSS v4, shadcn/ui |
-| Backend   | Go 1.22, chi router, JWT (HS256 + RS256), bcrypt    |
-| Database  | SQLite (via CGO + go-sqlite3)                       |
-| Container | Podman (rootless OCI)                               |
-| Proxy     | Caddy 2 (automatic HTTPS via Let's Encrypt)         |
-| Service   | systemd                                             |
+| Layer     | Technology                                                                |
+|-----------|---------------------------------------------------------------------------|
+| Frontend  | React 19, TypeScript, Vite 7, Tailwind CSS v4, shadcn/ui, TanStack Query v5, recharts, react-hook-form, zod, lucide-react |
+| Backend   | Go 1.26, chi v5 router, JWT (HS256 + RS256), bcrypt                       |
+| Database  | rqlite v8 (distributed SQLite — no CGO, no external DB binary required)   |
+| Container | Podman (rootful OCI — builds and runs containers via `sudo -n podman`)    |
+| Proxy     | Caddy 2 (automatic HTTPS via Let's Encrypt)                               |
+| Infra     | systemd, rqlite                                                           |
 
 ---
 
@@ -53,10 +53,11 @@ curl -fsSL https://raw.githubusercontent.com/ojhapranjal26/FeatherDeploy/main/bu
 That single command will:
 
 1. **Install all dependencies automatically:**
-   - `git`, `gcc`, `make`, `curl`, `ca-certificates`, `libsqlite3-dev`
+   - `git`, `curl`, `ca-certificates`
    - **Node.js 20** (via NodeSource)
-   - **Go 1.22** (via official tarball if not already installed)
-   - **Podman** (container runtime)
+   - **Go 1.26** (via official tarball if not already installed)
+   - **Podman** (container runtime, used in rootful mode via `sudo`)
+   - **rqlite v8** (embedded distributed SQLite — no CGO or libsqlite3 needed)
    - **Caddy** (reverse proxy + automatic TLS)
 2. **Clone** the FeatherDeploy source from GitHub into `/opt/featherdeploy-src`
 3. **Build** the React frontend (`npm ci && npm run build`)
@@ -157,10 +158,11 @@ After editing, restart the service: `sudo systemctl restart featherdeploy`
 
 ## 🔒 Security Model
 
-- The panel process **never runs as root**. The installer creates a dedicated Linux user (default: `featherdeploy`) with a home directory and bash shell, but no sudo access.
-- The binary is owned by `root` and executable, but data (`/var/lib/featherdeploy/`) is owned by the service user only.
+The panel process **never runs as root**. The installer creates a dedicated Linux user (default: `featherdeploy`) with no direct sudo access.
+- The only elevated permission granted is a locked-down sudoers rule: `NOPASSWD: /usr/bin/podman` (rootful containers) and `NOPASSWD: /usr/local/bin/featherdeploy-update` (one-click updates). Nothing else.
+- The binary is owned by `root` and executable, but all data (`/var/lib/featherdeploy/`) is owned by the service user only.
 - The env file (`/etc/featherdeploy/featherdeploy.env`) containing the JWT secret has mode `640` (readable only by root and the service group).
-- The systemd unit sets `NoNewPrivileges=yes`, `PrivateTmp=yes`, and `ProtectSystem=strict`.
+- The systemd unit sets `PrivateTmp=yes`. `NoNewPrivileges` is intentionally **not** set because the service must invoke `sudo -n podman` for container builds and runs.
 - Passwords are hashed with **bcrypt** (cost 14). SSH private keys are encrypted with **AES-256-GCM** before storage.
 - HTTPS is enforced by Caddy with automatic certificate renewal. Security headers (`HSTS`, `X-Frame-Options`, `X-Content-Type-Options`) are set on all responses.
 
@@ -205,26 +207,35 @@ sudo bash build.sh
 
 ```
 FeatherDeploy/
-├── build.sh                    # One-shot Linux install script
+├── build.sh                    # One-shot Linux install / update script
 ├── build.ps1                   # Windows wrapper (runs build.sh via WSL2)
-├── frontend/                   # React + Vite + TypeScript frontend
+├── VERSION.json                # Version manifest — checked by the dashboard update banner
+├── frontend/                   # React 19 + Vite + TypeScript frontend
 │   └── src/
 │       ├── pages/              # Page components
-│       ├── components/         # UI + layout components
+│       ├── components/         # UI + layout components (shadcn/ui)
 │       ├── context/            # Auth + Theme contexts
-│       └── api/                # API client helpers
+│       ├── hooks/              # SSE hooks (stats, deployment logs)
+│       └── api/                # Typed API client helpers (axios)
 └── backend/
-    ├── cmd/server/main.go      # Entry point (serve / install subcommands)
-    ├── web/                    # go:embed target for built frontend
+    ├── cmd/
+    │   ├── server/main.go      # Entry point (serve / install / update subcommands)
+    │   └── node/main.go        # Worker-node binary entry point
+    ├── web/                    # go:embed target for built frontend assets
     ├── internal/
     │   ├── auth/               # bcrypt + JWT helpers
     │   ├── crypto/             # AES-256-GCM encrypt/decrypt
-    │   ├── db/                 # SQLite open + schema migrations
-    │   ├── handler/            # HTTP handlers (auth, users, projects, github, ssh…)
-    │   ├── installer/          # Interactive Linux setup wizard
+    │   ├── db/                 # rqlite open + schema migrations
+    │   ├── deploy/             # Deployment queue, runner, Dockerfile generator
+    │   ├── detect/             # Framework + language auto-detection
+    │   ├── handler/            # HTTP handlers (auth, projects, github, ssh, system…)
+    │   ├── heartbeat/          # Brain/node heartbeat + cluster state
+    │   ├── installer/          # Interactive Linux setup wizard + update logic
     │   ├── mailer/             # SMTP email sender
     │   ├── middleware/         # JWT auth + RBAC middleware
     │   ├── model/              # Shared data types + DTOs
+    │   ├── pki/                # Internal CA, TLS cert generation for nodes
+    │   ├── rqlitedrv/          # rqlite database/sql driver
     │   └── validator/          # Input validation
     └── migrations/
         └── schema.sql          # Full database schema
