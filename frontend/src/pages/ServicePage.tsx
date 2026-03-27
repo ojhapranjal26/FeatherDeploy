@@ -157,6 +157,14 @@ export function ServicePage() {
   // Tab state — track active tab so the container-logs SSE only connects when visible
   const [activeTab, setActiveTab] = useState('overview')
 
+  // Artifact upload dialog (for services with deploy_type='artifact')
+  const [artifactDialogOpen, setArtifactDialogOpen] = useState(false)
+  const [artifactFile, setArtifactFile] = useState<File | null>(null)
+
+  // Overview source connector (shown when no source has been configured yet)
+  const [overviewSourceType, setOverviewSourceType] = useState<'git' | 'artifact'>('git')
+  const [overviewRepo, setOverviewRepo] = useState<RepoSelection | null>(null)
+
   // Settings state
   const [settingsRepo, setSettingsRepo] = useState<RepoSelection | null>(null)
   const [settingsBuildCmd, setSettingsBuildCmd] = useState('')
@@ -247,13 +255,32 @@ export function ServicePage() {
         branch: service?.repo_branch,
       }),
     onSuccess: (data) => {
-      toast.success('Deployment triggered.')
+      toast.success('Deployment queued.')
       qc.invalidateQueries({ queryKey: ['deployments', serviceId] })
       navigate(
         `/projects/${projectId}/services/${serviceId}/deployments/${data.deployment_id}`
       )
     },
     onError: (err: unknown) => toast.error((err as any)?.response?.data?.error ?? 'Failed to trigger deployment.'),
+  })
+
+  // Artifact: upload file then trigger deployment
+  const artifactDeployMutation = useMutation({
+    mutationFn: async (file: File) => {
+      const { artifact_path } = await deploymentsApi.uploadArtifact(projectId!, serviceId!, file)
+      return deploymentsApi.trigger(projectId!, serviceId!, {
+        deploy_type: 'artifact',
+        artifact_path,
+      })
+    },
+    onSuccess: (data) => {
+      setArtifactFile(null)
+      setArtifactDialogOpen(false)
+      toast.success('Artifact uploaded — deployment queued.')
+      qc.invalidateQueries({ queryKey: ['deployments', serviceId] })
+      navigate(`/projects/${projectId}/services/${serviceId}/deployments/${data.deployment_id}`)
+    },
+    onError: (err: unknown) => toast.error((err as any)?.response?.data?.error ?? 'Artifact upload failed.'),
   })
 
   // needsDetection: true when deploy_type is git but framework/commands not set
@@ -263,6 +290,11 @@ export function ServicePage() {
 
   const handleDeployClick = async () => {
     if (!service) return
+    // Artifact-type services require a file to be uploaded first
+    if (service.deploy_type === 'artifact') {
+      setArtifactDialogOpen(true)
+      return
+    }
     if (needsDetection) {
       // Open modal and start detection
       setDetectOpen(true)
@@ -420,7 +452,7 @@ export function ServicePage() {
 
   if (!service) return null
 
-  const isDeploying = deployMutation.isPending || service.status === 'deploying'
+  const isDeploying = deployMutation.isPending || artifactDeployMutation.isPending || service.status === 'deploying'
 
   return (
     <div className="space-y-0">
@@ -478,6 +510,46 @@ export function ServicePage() {
         onClose={() => setDetectOpen(false)}
       />
 
+      {/* Artifact upload dialog — for services with deploy_type='artifact' */}
+      <Dialog open={artifactDialogOpen} onOpenChange={(o) => { setArtifactDialogOpen(o); if (!o) setArtifactFile(null) }}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Upload artifact &amp; deploy</DialogTitle>
+            <DialogDescription>
+              Upload a pre-built archive (<code>.zip</code>, <code>.tar.gz</code>, or <code>.tgz</code>).
+              The archive will be extracted and a container image built from its contents.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="py-2 space-y-3">
+            <label className="flex flex-col items-center gap-2 rounded-lg border-2 border-dashed p-6 cursor-pointer hover:border-primary/50 transition-colors">
+              <Upload className="h-6 w-6 text-muted-foreground" />
+              {artifactFile
+                ? <span className="text-sm font-medium">{artifactFile.name}</span>
+                : <span className="text-sm text-muted-foreground">Click to select archive file</span>}
+              <input
+                type="file"
+                accept=".zip,.tar.gz,.tgz"
+                className="hidden"
+                onChange={(e) => setArtifactFile(e.target.files?.[0] ?? null)}
+              />
+            </label>
+          </div>
+          <DialogFooter>
+            <Button variant="ghost" size="sm" onClick={() => { setArtifactDialogOpen(false); setArtifactFile(null) }}>Cancel</Button>
+            <Button
+              size="sm"
+              className="gap-1.5"
+              disabled={!artifactFile || artifactDeployMutation.isPending}
+              onClick={() => artifactFile && artifactDeployMutation.mutate(artifactFile)}
+            >
+              {artifactDeployMutation.isPending
+                ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Uploading…</>
+                : <><Upload className="h-3.5 w-3.5" /> Upload &amp; Deploy</>}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <Tabs value={activeTab} onValueChange={setActiveTab}>
         <TabsList className="mb-6">
           <TabsTrigger value="overview">Overview</TabsTrigger>
@@ -527,58 +599,174 @@ export function ServicePage() {
 
           <Separator />
 
-          {/* Build configuration */}
-          <div>
-            <h2 className="mb-4 font-medium flex items-center gap-2">
-              <Code2 className="h-4 w-4 text-muted-foreground" /> Build configuration
-            </h2>
-            {needsDetection && (
-              <div className="mb-4 flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-800 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200">
-                <Search className="h-3.5 w-3.5 shrink-0" />
-                Framework not detected yet — click <strong className="mx-1">Detect stack</strong> or <strong className="mx-1">Deploy now</strong> to auto-analyse your repo.
+          {/* Source connector — shown when no source is configured yet */}
+          {!service.repo_url && service.deploy_type !== 'artifact' ? (
+            <div className="rounded-lg border-2 border-dashed p-6 space-y-5">
+              <div>
+                <h2 className="font-medium">Connect a deployment source</h2>
+                <p className="text-sm text-muted-foreground mt-1">
+                  Choose how you want to deploy this service. You can change this later in Settings.
+                </p>
               </div>
-            )}
-            <div className="grid gap-3 sm:grid-cols-2">
-              {service.repo_url && (
-                <div className="rounded-lg border bg-muted/30 p-3 space-y-0.5">
-                  <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Repository</p>
-                  <p className="font-mono text-xs break-all">{service.repo_url}</p>
-                  {service.repo_branch && <p className="text-xs text-muted-foreground">Branch: <span className="font-mono">{service.repo_branch}</span></p>}
-                  {service.repo_folder && <p className="text-xs text-muted-foreground">Folder: <span className="font-mono">/{service.repo_folder}</span></p>}
+              {/* Source type selector */}
+              <div className="grid grid-cols-2 gap-3">
+                <button
+                  type="button"
+                  onClick={() => setOverviewSourceType('git')}
+                  className={`flex flex-col items-center gap-2 rounded-lg border-2 p-4 text-center transition-colors ${overviewSourceType === 'git' ? 'border-primary bg-primary/5' : 'border-border hover:border-muted-foreground/40'}`}
+                >
+                  <GitFork className="h-5 w-5" />
+                  <span className="text-sm font-medium">Git repository</span>
+                  <span className="text-xs text-muted-foreground">Connect a GitHub repo and auto-deploy on push</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setOverviewSourceType('artifact')}
+                  className={`flex flex-col items-center gap-2 rounded-lg border-2 p-4 text-center transition-colors ${overviewSourceType === 'artifact' ? 'border-primary bg-primary/5' : 'border-border hover:border-muted-foreground/40'}`}
+                >
+                  <Upload className="h-5 w-5" />
+                  <span className="text-sm font-medium">Upload artifact</span>
+                  <span className="text-xs text-muted-foreground">Deploy a pre-built <code>.zip</code> or <code>.tar.gz</code></span>
+                </button>
+              </div>
+
+              {/* Git path */}
+              {overviewSourceType === 'git' && (
+                <div className="space-y-3">
+                  <GitHubRepoSelector
+                    value={overviewRepo ?? { repo_url: '', repo_branch: 'main', repo_folder: '' }}
+                    onChange={setOverviewRepo}
+                  />
+                  {overviewRepo?.repo_url && (
+                    <div className="flex justify-end">
+                      <Button
+                        size="sm"
+                        className="gap-1.5"
+                        disabled={updateMutation.isPending}
+                        onClick={() =>
+                          updateMutation.mutate(
+                            {
+                              deploy_type: 'git',
+                              repo_url: overviewRepo.repo_url,
+                              repo_branch: overviewRepo.repo_branch,
+                              repo_folder: overviewRepo.repo_folder,
+                            },
+                            { onSuccess: () => { toast.success('Repository connected.'); setOverviewRepo(null) } }
+                          )
+                        }
+                      >
+                        {updateMutation.isPending
+                          ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Connecting…</>
+                          : 'Connect repository'}
+                      </Button>
+                    </div>
+                  )}
                 </div>
               )}
-              {service.framework && (
-                <div className="rounded-lg border bg-muted/30 p-3 space-y-0.5">
-                  <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Detected stack</p>
-                  <Badge variant="secondary" className="text-xs">{service.framework}</Badge>
-                </div>
-              )}
-              {service.build_command && (
-                <div className="rounded-lg border bg-muted/30 p-3 space-y-0.5">
-                  <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Build command</p>
-                  <pre className="font-mono text-xs whitespace-pre-wrap break-all text-foreground">{service.build_command}</pre>
-                </div>
-              )}
-              {service.start_command && (
-                <div className="rounded-lg border bg-muted/30 p-3 space-y-0.5">
-                  <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Start command</p>
-                  <pre className="font-mono text-xs whitespace-pre-wrap break-all text-foreground">{service.start_command}</pre>
-                </div>
-              )}
-              {service.app_port ? (
-                <div className="rounded-lg border bg-muted/30 p-3 space-y-0.5">
-                  <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">App port (inside container)</p>
-                  <p className="font-mono text-sm">{service.app_port}</p>
-                </div>
-              ) : null}
-              {service.container_id && (
-                <div className="rounded-lg border bg-muted/30 p-3 space-y-0.5">
-                  <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Container ID</p>
-                  <p className="font-mono text-xs break-all">{service.container_id}</p>
+
+              {/* Artifact path */}
+              {overviewSourceType === 'artifact' && (
+                <div className="space-y-3">
+                  <label className="flex flex-col items-center gap-2 rounded-lg border-2 border-dashed p-6 cursor-pointer hover:border-primary/50 transition-colors">
+                    <Upload className="h-6 w-6 text-muted-foreground" />
+                    {artifactFile
+                      ? <span className="text-sm font-medium">{artifactFile.name}</span>
+                      : <span className="text-sm text-muted-foreground">Click to select <code>.zip</code>, <code>.tar.gz</code>, or <code>.tgz</code></span>}
+                    <input
+                      type="file"
+                      accept=".zip,.tar.gz,.tgz"
+                      className="hidden"
+                      onChange={(e) => setArtifactFile(e.target.files?.[0] ?? null)}
+                    />
+                  </label>
+                  {artifactFile && (
+                    <div className="flex justify-end gap-2">
+                      <Button variant="outline" size="sm" onClick={() => setArtifactFile(null)}>Clear</Button>
+                      <Button
+                        size="sm"
+                        className="gap-1.5"
+                        disabled={artifactDeployMutation.isPending || updateMutation.isPending}
+                        onClick={() =>
+                          updateMutation.mutate(
+                            { deploy_type: 'artifact' },
+                            { onSuccess: () => artifactDeployMutation.mutate(artifactFile!) }
+                          )
+                        }
+                      >
+                        {artifactDeployMutation.isPending
+                          ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Uploading…</>
+                          : <><Upload className="h-3.5 w-3.5" /> Upload &amp; Deploy</>}
+                      </Button>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
-          </div>
+          ) : (
+            /* Build configuration (when source is connected) */
+            <div>
+              <h2 className="mb-4 font-medium flex items-center gap-2">
+                <Code2 className="h-4 w-4 text-muted-foreground" /> Build configuration
+              </h2>
+              {needsDetection && (
+                <div className="mb-4 flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-800 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200">
+                  <Search className="h-3.5 w-3.5 shrink-0" />
+                  Framework not detected yet — click <strong className="mx-1">Detect stack</strong> or <strong className="mx-1">Deploy now</strong> to auto-analyse your repo.
+                </div>
+              )}
+              <div className="grid gap-3 sm:grid-cols-2">
+                {service.repo_url && (
+                  <div className="rounded-lg border bg-muted/30 p-3 space-y-0.5">
+                    <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Repository</p>
+                    <p className="font-mono text-xs break-all">{service.repo_url}</p>
+                    {service.repo_branch && <p className="text-xs text-muted-foreground">Branch: <span className="font-mono">{service.repo_branch}</span></p>}
+                    {service.repo_folder && <p className="text-xs text-muted-foreground">Folder: <span className="font-mono">/{service.repo_folder}</span></p>}
+                  </div>
+                )}
+                {service.deploy_type === 'artifact' && (
+                  <div className="rounded-lg border bg-muted/30 p-3 space-y-0.5">
+                    <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Deploy type</p>
+                    <div className="flex items-center gap-2">
+                      <Badge variant="secondary">artifact</Badge>
+                      <Button variant="ghost" size="sm" className="h-6 text-xs gap-1" onClick={() => setArtifactDialogOpen(true)}>
+                        <Upload className="h-3 w-3" /> Upload new
+                      </Button>
+                    </div>
+                  </div>
+                )}
+                {service.framework && (
+                  <div className="rounded-lg border bg-muted/30 p-3 space-y-0.5">
+                    <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Detected stack</p>
+                    <Badge variant="secondary" className="text-xs">{service.framework}</Badge>
+                  </div>
+                )}
+                {service.build_command && (
+                  <div className="rounded-lg border bg-muted/30 p-3 space-y-0.5">
+                    <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Build command</p>
+                    <pre className="font-mono text-xs whitespace-pre-wrap break-all text-foreground">{service.build_command}</pre>
+                  </div>
+                )}
+                {service.start_command && (
+                  <div className="rounded-lg border bg-muted/30 p-3 space-y-0.5">
+                    <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Start command</p>
+                    <pre className="font-mono text-xs whitespace-pre-wrap break-all text-foreground">{service.start_command}</pre>
+                  </div>
+                )}
+                {service.app_port ? (
+                  <div className="rounded-lg border bg-muted/30 p-3 space-y-0.5">
+                    <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">App port (inside container)</p>
+                    <p className="font-mono text-sm">{service.app_port}</p>
+                  </div>
+                ) : null}
+                {service.container_id && (
+                  <div className="rounded-lg border bg-muted/30 p-3 space-y-0.5">
+                    <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Container ID</p>
+                    <p className="font-mono text-xs break-all">{service.container_id}</p>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
 
           <Separator />
 

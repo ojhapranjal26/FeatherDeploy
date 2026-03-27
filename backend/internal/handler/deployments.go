@@ -4,10 +4,12 @@ import (
 	"bufio"
 	"database/sql"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -80,14 +82,14 @@ func (h *DeploymentHandler) Trigger(w http.ResponseWriter, r *http.Request) {
 		branch = req.RepoBranch
 	}
 
-	// Insert deployment record
-	now := time.Now().UTC()
+	// Insert deployment record with 'pending' status.
+	// The worker pool will transition it to 'running' when a worker picks it up.
 	res, err := h.db.ExecContext(r.Context(),
 		`INSERT INTO deployments
-		  (service_id, triggered_by, deploy_type, repo_url, commit_sha, branch, artifact_path, status, started_at)
-		 VALUES (?,?,?,?,?,?,?,?,?)`,
+		  (service_id, triggered_by, deploy_type, repo_url, commit_sha, branch, artifact_path, status)
+		 VALUES (?,?,?,?,?,?,?,?)`,
 		svcID, claims.UserID, req.DeployType, req.RepoURL, req.CommitSHA, branch, req.ArtifactPath,
-		"running", now)
+		"pending")
 	if err != nil {
 		slog.Error("trigger deployment", "err", err)
 		writeJSON(w, http.StatusInternalServerError, errMap("internal error"))
@@ -95,13 +97,9 @@ func (h *DeploymentHandler) Trigger(w http.ResponseWriter, r *http.Request) {
 	}
 	depID, _ := res.LastInsertId()
 
-	// Mark service as deploying
-	h.db.ExecContext(r.Context(),
-		`UPDATE services SET status='deploying', updated_at=datetime('now') WHERE id=?`, svcID)
+	deploy.Enqueue(h.db, h.jwtSecret, depID, svcID, claims.UserID)
 
-	go deploy.Run(h.db, h.jwtSecret, depID, svcID, claims.UserID)
-
-	writeJSON(w, http.StatusCreated, map[string]any{"deployment_id": depID, "status": "running"})
+	writeJSON(w, http.StatusCreated, map[string]any{"deployment_id": depID, "status": "pending"})
 }
 
 // GET /api/projects/{projectID}/services/{serviceID}/deployments/{deploymentID}
@@ -195,6 +193,17 @@ func (h *DeploymentHandler) Logs(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// While queued, show a waiting message and keep the connection alive.
+		if status == "pending" {
+			if sentLines == 0 {
+				sendLine("⏳ Deployment is queued — waiting for an available worker...")
+				sentLines = 1
+			} else {
+				sendPing()
+			}
+			continue
+		}
+
 		// Collect all non-empty lines
 		allLines := strings.Split(deployLog, "\n")
 		var nonEmpty []string
@@ -214,8 +223,8 @@ func (h *DeploymentHandler) Logs(w http.ResponseWriter, r *http.Request) {
 			sendPing()
 		}
 
-		// Done when not still running
-		if status != "running" {
+		// Done when deployment reaches a terminal state
+		if status == "success" || status == "failed" {
 			fmt.Fprint(w, "event: done\ndata: \n\n")
 			flusher.Flush()
 			return
@@ -223,7 +232,68 @@ func (h *DeploymentHandler) Logs(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// ─── scanner helpers ─────────────────────────────────────────────────────────
+// POST /api/projects/{projectID}/services/{serviceID}/upload-artifact
+// Accepts a multipart upload of a .zip, .tar.gz, or .tgz build artifact.
+// Returns the saved path which can be passed to Trigger as artifact_path.
+func (h *DeploymentHandler) UploadArtifact(w http.ResponseWriter, r *http.Request) {
+	svcID, err := strconv.ParseInt(r.PathValue("serviceID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errMap("invalid serviceID"))
+		return
+	}
+
+	// Limit to 500 MB
+	if err := r.ParseMultipartForm(500 << 20); err != nil {
+		writeJSON(w, http.StatusBadRequest, errMap("failed to parse upload: "+err.Error()))
+		return
+	}
+
+	f, header, err := r.FormFile("artifact")
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errMap("artifact file is required"))
+		return
+	}
+	defer f.Close()
+
+	// Validate extension
+	baseName := filepath.Base(header.Filename)
+	lower := strings.ToLower(baseName)
+	if !strings.HasSuffix(lower, ".zip") && !strings.HasSuffix(lower, ".tar.gz") && !strings.HasSuffix(lower, ".tgz") {
+		writeJSON(w, http.StatusBadRequest, errMap("unsupported file type: only .zip, .tar.gz, .tgz allowed"))
+		return
+	}
+
+	artifactDir := filepath.Join("/var/lib/featherdeploy/artifacts", fmt.Sprintf("svc-%d", svcID))
+	if err := os.MkdirAll(artifactDir, 0755); err != nil {
+		slog.Error("upload artifact: mkdir", "err", err)
+		writeJSON(w, http.StatusInternalServerError, errMap("internal error"))
+		return
+	}
+
+	// Timestamp-prefix to avoid clashes between concurrent uploads
+	destPath := filepath.Join(artifactDir, fmt.Sprintf("%d-%s", time.Now().UnixNano(), baseName))
+	// Security: verify dest is inside artifactDir (baseName is already Base-cleaned)
+	if !strings.HasPrefix(destPath, artifactDir+string(filepath.Separator)) {
+		writeJSON(w, http.StatusBadRequest, errMap("invalid filename"))
+		return
+	}
+
+	dest, err := os.Create(destPath)
+	if err != nil {
+		slog.Error("upload artifact: create", "err", err)
+		writeJSON(w, http.StatusInternalServerError, errMap("internal error"))
+		return
+	}
+	defer dest.Close()
+
+	if _, err := io.Copy(dest, f); err != nil {
+		slog.Error("upload artifact: write", "err", err)
+		writeJSON(w, http.StatusInternalServerError, errMap("internal error"))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"artifact_path": destPath})
+}
 
 // GET /api/projects/{projectID}/services/{serviceID}/container-logs
 // Streams live stdout+stderr of the running container via Server-Sent Events.

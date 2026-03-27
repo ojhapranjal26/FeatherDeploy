@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/auth"
 	appDb "github.com/ojhapranjal26/featherdeploy/backend/internal/db"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/deploy"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/handler"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/heartbeat"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/installer"
@@ -124,6 +126,10 @@ func serve() {
 	// Seed default superadmin on first run (no users in DB yet)
 	seedSuperAdmin(db)
 
+	// Start deployment worker pool — concurrency = number of CPU cores.
+	// Workers pick up 'pending' deployments from the queue and run them.
+	deploy.InitQueue(runtime.NumCPU())
+
 	// ─── Brain heartbeat + SSH key ──────────────────────────────────────
 	// Generate / load cluster SSH keypair (for passwordless node access)
 	if err := ensureSSHKey(db); err != nil {
@@ -186,7 +192,8 @@ func serve() {
 	r.Use(chiMiddleware.RequestID)
 	r.Use(chiMiddleware.Logger)
 	r.Use(chiMiddleware.Recoverer)
-	r.Use(chiMiddleware.Timeout(30 * time.Second))
+	// NOTE: Timeout is NOT applied globally — it is added per-group so that
+	// long-lived SSE streaming routes can opt out. See authenticated groups below.
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   splitOrigins(*origin),
 		AllowedMethods:   []string{"GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"},
@@ -223,9 +230,12 @@ func serve() {
 	r.Get("/api/nodes/server-binary", nodeH.ServerBinaryDownload)
 	r.Get("/api/nodes/ca-cert", nodeH.CACert)
 
-	// ─── Authenticated routes ─────────────────────────────────────────────────
+	// ─── Authenticated routes (with 30s request timeout) ─────────────────────────
+	// SSE streaming routes are registered in a separate group below WITHOUT this
+	// timeout so long-running builds don't get killed at 30s.
 	r.Group(func(r chi.Router) {
 		r.Use(mw.Authenticate(*jwtSecret))
+		r.Use(chiMiddleware.Timeout(30 * time.Second))
 
 		// Self
 		r.Get("/api/auth/me", authH.Me)
@@ -284,15 +294,6 @@ func serve() {
 			r.Delete("/api/github-app/config", ghAppH.DeleteConfig)
 
 		})
-
-		// ── Live stats SSE stream (no 30s timeout — long-lived connection) ──
-		// Use a dedicated sub-router so we can remove the Timeout middleware.
-		r.With(func(next http.Handler) http.Handler {
-			return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-				// Strip request context deadline set by chi Timeout middleware
-				next.ServeHTTP(w, req)
-			})
-		}).Get("/api/stats/stream", statsH.Stream)
 
 		// ── Cluster brain info (any authenticated user) ───────────────────
 		r.Get("/api/cluster/brain", nodeH.ClusterBrain)
@@ -354,16 +355,19 @@ func serve() {
 				r.Get("/api/projects/{projectID}/services/{serviceID}/deployments", depH.List)
 				r.Post("/api/projects/{projectID}/services/{serviceID}/deployments", depH.Trigger)
 				r.Get("/api/projects/{projectID}/services/{serviceID}/deployments/{deploymentID}", depH.Get)
-				r.Get("/api/projects/{projectID}/services/{serviceID}/deployments/{deploymentID}/logs", depH.Logs)
-				r.Get("/api/projects/{projectID}/services/{serviceID}/container-logs", depH.ContainerLogs)
+				// NOTE: /logs, /container-logs, and /stats/stream are SSE routes registered
+				// in the no-timeout group below.
+
+				// ── Artifact upload ─────────────────────────────────────
+				r.Post("/api/projects/{projectID}/services/{serviceID}/upload-artifact", depH.UploadArtifact)
 
 				// ── Env vars ─────────────────────────────────────────────
 				r.Get("/api/projects/{projectID}/services/{serviceID}/env", envH.List)
 				r.Put("/api/projects/{projectID}/services/{serviceID}/env", envH.Upsert)
 				r.Delete("/api/projects/{projectID}/services/{serviceID}/env/{key}", envH.Delete)
 				r.Get("/api/projects/{projectID}/services/{serviceID}/env/{key}/reveal", envH.Reveal)
-				// ── Container live stats SSE ──────────────────────────────
-				r.Get("/api/projects/{projectID}/services/{serviceID}/stats/stream", containerStatsH.Stream)
+				// ── Container live stats SSE and Domains ─────────────────
+				// NOTE: /stats/stream is an SSE route; registered in no-timeout group below.
 
 				// ── Domains ──────────────────────────────────────────────
 				r.Get("/api/projects/{projectID}/services/{serviceID}/domains", domainH.List)
@@ -372,6 +376,25 @@ func serve() {
 				r.Post("/api/projects/{projectID}/services/{serviceID}/domains/{domainID}/verify", domainH.Verify)
 			})
 		})
+	})
+
+	// ─── Authenticated SSE routes (NO timeout — long-lived streaming connections) ──
+	// Deployment logs, container logs, and stats streams must not be subject to
+	// the 30s timeout applied to regular API routes.  A long build (e.g. Next.js
+	// with npm install + tsc + next build) takes several minutes; killing the
+	// request context at 30s terminates the SSE stream and causes Caddy to return
+	// a 502 to the browser.
+	r.Group(func(r chi.Router) {
+		r.Use(mw.Authenticate(*jwtSecret))
+		// Global node stats stream
+		r.Get("/api/stats/stream", statsH.Stream)
+		// Per-service SSE streams (require at least editor project access)
+		r.With(mw.RequireProjectAccess(db, "editor")).
+			Get("/api/projects/{projectID}/services/{serviceID}/deployments/{deploymentID}/logs", depH.Logs)
+		r.With(mw.RequireProjectAccess(db, "editor")).
+			Get("/api/projects/{projectID}/services/{serviceID}/container-logs", depH.ContainerLogs)
+		r.With(mw.RequireProjectAccess(db, "editor")).
+			Get("/api/projects/{projectID}/services/{serviceID}/stats/stream", containerStatsH.Stream)
 	})
 
 	// ─── Health check (no auth) ───────────────────────────────────────────────

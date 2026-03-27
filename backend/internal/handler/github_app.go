@@ -390,27 +390,25 @@ func (h *GitHubAppHandler) triggerAutoDeployments(repoFullName, branch, commitSH
 	}
 	defer rows.Close()
 
-	now := time.Now().UTC()
 	for rows.Next() {
 		var svcID, projectID, ownerID int64
 		var deployType, repoURL string
 		if err := rows.Scan(&svcID, &projectID, &ownerID, &deployType, &repoURL); err != nil {
 			continue
 		}
-		// Insert deployment record
+		// Insert deployment record as 'pending'; the worker pool starts it.
 		res, err := h.db.Exec(`
 			INSERT INTO deployments
-			  (service_id, triggered_by, deploy_type, repo_url, commit_sha, branch, artifact_path, status, started_at)
-			VALUES (?,?,?,?,?,?,?,?,?)`,
-			svcID, ownerID, deployType, repoURL, commitSHA, branch, "", "running", now)
+			  (service_id, triggered_by, deploy_type, repo_url, commit_sha, branch, artifact_path, status)
+			VALUES (?,?,?,?,?,?,?,?)`,
+			svcID, ownerID, deployType, repoURL, commitSHA, branch, "", "pending")
 		if err != nil {
 			slog.Error("github-app auto-deploy: insert deployment", "svc_id", svcID, "err", err)
 			continue
 		}
 		depID, _ := res.LastInsertId()
-		h.db.Exec(`UPDATE services SET status='deploying', updated_at=datetime('now') WHERE id=?`, svcID) //nolint
-		go deploy.Run(h.db, h.jwtSecret, depID, svcID, ownerID)
-		slog.Info("github-app auto-deploy triggered",
+		deploy.Enqueue(h.db, h.jwtSecret, depID, svcID, ownerID)
+		slog.Info("github-app auto-deploy queued",
 			"svc_id", svcID, "branch", branch, "commit", commitSHA[:7],
 		)
 	}

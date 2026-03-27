@@ -12,7 +12,10 @@
 package deploy
 
 import (
+	"archive/tar"
+	"archive/zip"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -24,6 +27,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -60,6 +64,80 @@ func (l *logBuf) text() string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return strings.Join(l.lines, "\n")
+}
+
+// ─── Deployment queue ─────────────────────────────────────────────────────────
+// A fixed-size worker pool limits concurrent deployments based on available CPU
+// cores, preventing the server from being overwhelmed when multiple users trigger
+// deployments simultaneously.
+
+type deployJob struct {
+	db        *sql.DB
+	jwtSecret string
+	depID     int64
+	svcID     int64
+	userID    int64
+}
+
+var (
+	queueOnce sync.Once
+	jobCh     chan deployJob
+)
+
+// InitQueue starts the deployment worker pool. concurrency defaults to
+// runtime.NumCPU() when <= 0. Call once at server startup.
+func InitQueue(concurrency int) {
+	queueOnce.Do(func() {
+		if concurrency <= 0 {
+			concurrency = runtime.NumCPU()
+		}
+		if concurrency < 1 {
+			concurrency = 1
+		}
+		// Buffer 512 pending jobs; beyond that Enqueue fails the deployment immediately
+		jobCh = make(chan deployJob, 512)
+		for i := 0; i < concurrency; i++ {
+			go deployWorker()
+		}
+		slog.Info("deployment queue started", "workers", concurrency)
+	})
+}
+
+func deployWorker() {
+	for job := range jobCh {
+		// Transition: pending → running
+		job.db.Exec( //nolint
+			`UPDATE deployments SET status='running', started_at=datetime('now') WHERE id=?`, job.depID)
+		job.db.Exec( //nolint
+			`UPDATE services SET status='deploying', updated_at=datetime('now') WHERE id=?`, job.svcID)
+		Run(job.db, job.jwtSecret, job.depID, job.svcID, job.userID)
+	}
+}
+
+// Enqueue queues a deployment for execution. The deployment must already exist in
+// the DB with status='pending'. A worker transitions it to 'running' when it is
+// picked up. If the queue channel is full, the deployment is failed immediately.
+func Enqueue(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
+	if jobCh == nil {
+		// Fallback: queue not initialised — run directly in a goroutine
+		go func() {
+			db.Exec(`UPDATE deployments SET status='running', started_at=datetime('now') WHERE id=?`, depID) //nolint
+			db.Exec(`UPDATE services SET status='deploying', updated_at=datetime('now') WHERE id=?`, svcID) //nolint
+			Run(db, jwtSecret, depID, svcID, userID)
+		}()
+		return
+	}
+	select {
+	case jobCh <- deployJob{db: db, jwtSecret: jwtSecret, depID: depID, svcID: svcID, userID: userID}:
+		// successfully queued
+	default:
+		// Queue full — fail the deployment so the user gets immediate feedback
+		db.Exec( //nolint
+			`UPDATE deployments SET status='failed',
+			  error_message='deployment queue is full — please wait for current deployments to complete',
+			  finished_at=datetime('now') WHERE id=?`, depID)
+		slog.Warn("deployment queue full", "dep_id", depID)
+	}
 }
 
 // ─── Public entry point ───────────────────────────────────────────────────────
@@ -110,24 +188,13 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 		repoBranch = "main"
 	}
 
-	// ── 2. Inject GitHub App installation token for HTTPS GitHub repos ──────────
-	repoURL = injectGitHubAppToken(context.Background(), db, repoURL, log)
+	// ── 1b. Fetch deployment-level deploy_type and artifact_path ─────────────
+	var deployType, artifactPath string
+	db.QueryRow(`SELECT deploy_type, artifact_path FROM deployments WHERE id=?`, depID). //nolint
+		Scan(&deployType, &artifactPath)
+	isArtifact := deployType == "artifact" && artifactPath != ""
 
-	// ── 3. SSH key setup for private / SSH repos ──────────────────────────────
-	var sshKeyFile string // path to temp private key file, empty if not needed
-	if IsSSHURL(repoURL) {
-		kf, cleanup, keyErr := FetchSSHKey(db, jwtSecret, userID)
-		if keyErr != nil {
-			log.add("WARNING: SSH repo detected but no server-managed private key found for your user: %v", keyErr)
-			log.add("  → Generate an SSH key in the dashboard (Settings → SSH Keys), copy the public key to GitHub, then retry.")
-		} else {
-			sshKeyFile = kf
-			defer cleanup()
-			log.add("[ssh] using key %s", kf)
-		}
-	}
-
-	// ── 3. Clone ──────────────────────────────────────────────────────────────
+	// ── 2. Source: either git clone or artifact extraction ───────────────────
 	workDir, err := os.MkdirTemp("", fmt.Sprintf("fd-dep-%d-*", depID))
 	if err != nil {
 		log.add("ERROR: create work dir: %v", err)
@@ -136,44 +203,72 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 	}
 	defer os.RemoveAll(workDir)
 
-	log.add("[clone] git clone --depth 1 --branch %s %s", repoBranch, maskURL(repoURL))
-	cloneErr := gitClone(workDir, sshKeyFile, repoURL, repoBranch, log)
-	if cloneErr != nil {
-		// Retry without explicit branch (use repo default)
-		log.add("[clone] branch %q not found — retrying with default branch", repoBranch)
-		os.RemoveAll(workDir)
-		workDir2, _ := os.MkdirTemp("", fmt.Sprintf("fd-dep-%d-*", depID))
-		workDir = workDir2
-		if err2 := gitCloneDefault(workDir, sshKeyFile, repoURL, log); err2 != nil {
-			log.add("ERROR: git clone failed: %v", err2)
-			markFailed(db, depID, svcID, log.text())
-			return
-		}
-	}
+	var sshKeyFile string // used only for git path
 
-	// Capture the actual commit SHA and update the deployment record
-	if sha, err := gitRevParse(workDir); err == nil && sha != "" {
-		db.Exec(`UPDATE deployments SET commit_sha=? WHERE id=?`, sha, depID) //nolint
-		log.add("[clone] commit %s", sha)
-	}
+	if isArtifact {
+		log.add("[artifact] extracting %s", filepath.Base(artifactPath))
+		if extractErr := extractArtifact(artifactPath, workDir, log); extractErr != nil {
+			log.add("ERROR: artifact extraction failed: %v", extractErr)
+			markFailed(db, depID, svcID, log.text())
+			return
+		}
+		log.add("[artifact] extracted successfully")
+	} else {
+		// ── 2a. Inject GitHub App installation token for HTTPS GitHub repos ──────
+		repoURL = injectGitHubAppToken(context.Background(), db, repoURL, log)
 
-	// ── 3b. Apply repo_folder (monorepo / subdirectory deployments) ───────────
-	// When a subfolder is configured, treat that folder as the build root.
-	if strings.TrimSpace(repoFolder) != "" {
-		subDir := filepath.Join(workDir, filepath.Clean(repoFolder))
-		// Security: ensure the resolved path is still inside workDir
-		if !strings.HasPrefix(subDir, workDir) {
-			log.add("ERROR: repo_folder %q escapes the repo root — aborting", repoFolder)
-			markFailed(db, depID, svcID, log.text())
-			return
+		// ── 2b. SSH key setup for private / SSH repos ─────────────────────────
+		if IsSSHURL(repoURL) {
+			kf, cleanup, keyErr := FetchSSHKey(db, jwtSecret, userID)
+			if keyErr != nil {
+				log.add("WARNING: SSH repo detected but no server-managed private key found for your user: %v", keyErr)
+				log.add("  → Generate an SSH key in the dashboard (Settings → SSH Keys), copy the public key to GitHub, then retry.")
+			} else {
+				sshKeyFile = kf
+				defer cleanup()
+				log.add("[ssh] using key %s", kf)
+			}
 		}
-		if _, statErr := os.Stat(subDir); os.IsNotExist(statErr) {
-			log.add("ERROR: folder %q does not exist in the repository", repoFolder)
-			markFailed(db, depID, svcID, log.text())
-			return
+
+		// ── 2c. Clone ────────────────────────────────────────────────────────────
+		log.add("[clone] git clone --depth 1 --branch %s %s", repoBranch, maskURL(repoURL))
+		cloneErr := gitClone(workDir, sshKeyFile, repoURL, repoBranch, log)
+		if cloneErr != nil {
+			// Retry without explicit branch (use repo default)
+			log.add("[clone] branch %q not found — retrying with default branch", repoBranch)
+			os.RemoveAll(workDir)
+			workDir2, _ := os.MkdirTemp("", fmt.Sprintf("fd-dep-%d-*", depID))
+			workDir = workDir2
+			if err2 := gitCloneDefault(workDir, sshKeyFile, repoURL, log); err2 != nil {
+				log.add("ERROR: git clone failed: %v", err2)
+				markFailed(db, depID, svcID, log.text())
+				return
+			}
 		}
-		log.add("[clone] deploying from subfolder: %s", repoFolder)
-		workDir = subDir
+
+		// Capture the actual commit SHA and update the deployment record
+		if sha, err := gitRevParse(workDir); err == nil && sha != "" {
+			db.Exec(`UPDATE deployments SET commit_sha=? WHERE id=?`, sha, depID) //nolint
+			log.add("[clone] commit %s", sha)
+		}
+
+		// ── 2d. Apply repo_folder (monorepo / subdirectory deployments) ──────────
+		if strings.TrimSpace(repoFolder) != "" {
+			subDir := filepath.Join(workDir, filepath.Clean(repoFolder))
+			// Security: ensure the resolved path is still inside workDir
+			if !strings.HasPrefix(subDir, workDir) {
+				log.add("ERROR: repo_folder %q escapes the repo root — aborting", repoFolder)
+				markFailed(db, depID, svcID, log.text())
+				return
+			}
+			if _, statErr := os.Stat(subDir); os.IsNotExist(statErr) {
+				log.add("ERROR: folder %q does not exist in the repository", repoFolder)
+				markFailed(db, depID, svcID, log.text())
+				return
+			}
+			log.add("[clone] deploying from subfolder: %s", repoFolder)
+			workDir = subDir
+		}
 	}
 
 	// ── 4. Detect Dockerfile presence and fill config gaps ───────────────────
@@ -980,5 +1075,116 @@ func writeEnvFileForBuild(db *sql.DB, svcID int64, jwtSecret, workDir string) er
 	// Write both .env and .env.local (Next.js prefers .env.local)
 	os.WriteFile(filepath.Join(workDir, ".env"), content, 0600)        //nolint
 	os.WriteFile(filepath.Join(workDir, ".env.local"), content, 0600)  //nolint
+	return nil
+}
+
+// extractArtifact extracts a .zip, .tar.gz, or .tgz archive into destDir.
+// Files are extracted with path sanitisation to prevent zip-slip attacks.
+func extractArtifact(archivePath, destDir string, log *logBuf) error {
+	name := strings.ToLower(filepath.Base(archivePath))
+	switch {
+	case strings.HasSuffix(name, ".zip"):
+		return extractZip(archivePath, destDir, log)
+	case strings.HasSuffix(name, ".tar.gz"), strings.HasSuffix(name, ".tgz"):
+		return extractTarGz(archivePath, destDir, log)
+	default:
+		return fmt.Errorf("unsupported archive format: %s (only .zip, .tar.gz, .tgz are supported)", name)
+	}
+}
+
+func extractZip(archivePath, destDir string, log *logBuf) error {
+	r, err := zip.OpenReader(archivePath)
+	if err != nil {
+		return fmt.Errorf("open zip: %w", err)
+	}
+	defer r.Close()
+	for _, f := range r.File {
+		// Sanitise path: strip ../ sequences and absolute paths
+		cleanName := filepath.ToSlash(f.Name)
+		if strings.Contains(cleanName, "..") {
+			log.add("[artifact] skipping unsafe path: %s", f.Name)
+			continue
+		}
+		target := filepath.Join(destDir, cleanName)
+		// Security: verify target is within destDir
+		if !strings.HasPrefix(target, destDir+string(os.PathSeparator)) && target != destDir {
+			log.add("[artifact] skipping path escaping destination: %s", f.Name)
+			continue
+		}
+		if f.FileInfo().IsDir() {
+			os.MkdirAll(target, 0755) //nolint
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+			return fmt.Errorf("mkdir %q: %w", filepath.Dir(target), err)
+		}
+		rc, err := f.Open()
+		if err != nil {
+			return fmt.Errorf("open entry %q: %w", f.Name, err)
+		}
+		out, err := os.Create(target)
+		if err != nil {
+			rc.Close()
+			return fmt.Errorf("create %q: %w", target, err)
+		}
+		_, copyErr := io.Copy(out, io.LimitReader(rc, 500<<20)) // 500 MB per-file cap
+		out.Close()
+		rc.Close()
+		if copyErr != nil {
+			return fmt.Errorf("write %q: %w", target, copyErr)
+		}
+	}
+	return nil
+}
+
+func extractTarGz(archivePath, destDir string, log *logBuf) error {
+	f, err := os.Open(archivePath)
+	if err != nil {
+		return fmt.Errorf("open tar.gz: %w", err)
+	}
+	defer f.Close()
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		return fmt.Errorf("gzip reader: %w", err)
+	}
+	defer gz.Close()
+	tr := tar.NewReader(gz)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("tar read: %w", err)
+		}
+		// Sanitise path
+		cleanName := filepath.ToSlash(hdr.Name)
+		if strings.Contains(cleanName, "..") {
+			log.add("[artifact] skipping unsafe path: %s", hdr.Name)
+			continue
+		}
+		target := filepath.Join(destDir, cleanName)
+		if !strings.HasPrefix(target, destDir+string(os.PathSeparator)) && target != destDir {
+			log.add("[artifact] skipping path escaping destination: %s", hdr.Name)
+			continue
+		}
+		switch hdr.Typeflag {
+		case tar.TypeDir:
+			os.MkdirAll(target, 0755) //nolint
+		case tar.TypeReg, tar.TypeRegA:
+			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+				return fmt.Errorf("mkdir %q: %w", filepath.Dir(target), err)
+			}
+			out, err := os.Create(target)
+			if err != nil {
+				return fmt.Errorf("create %q: %w", target, err)
+			}
+			_, copyErr := io.Copy(out, io.LimitReader(tr, 500<<20))
+			out.Close()
+			if copyErr != nil {
+				return fmt.Errorf("write %q: %w", target, copyErr)
+			}
+		}
+	}
 	return nil
 }

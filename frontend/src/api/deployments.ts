@@ -29,6 +29,7 @@ export interface TriggerDeploymentPayload {
   repo_branch?: string
   branch?: string
   commit_sha?: string
+  artifact_path?: string
 }
 
 export const deploymentsApi = {
@@ -64,4 +65,20 @@ export const deploymentsApi = {
     _file: File
   ): Promise<{ deployment_id: number; status: string }> =>
     deploymentsApi.trigger(projectId, serviceId, { deploy_type: 'artifact' }),
+
+  uploadArtifact: (
+    projectId: string | number,
+    serviceId: string | number,
+    file: File
+  ): Promise<{ artifact_path: string }> => {
+    const formData = new FormData()
+    formData.append('artifact', file)
+    return client
+      .post<{ artifact_path: string }>(
+        `/projects/${projectId}/services/${serviceId}/upload-artifact`,
+        formData,
+        { headers: { 'Content-Type': 'multipart/form-data' } }
+      )
+      .then((r) => r.data)
+  },
 }
