@@ -304,7 +304,8 @@ export function ServicePage() {
         const result = await servicesApi.detect(projectId!, serviceId!)
         setDetection(result)
       } catch (e: unknown) {
-        toast.error(e instanceof Error ? e.message : 'Stack detection failed.')
+        const msg = (e as any)?.response?.data?.error ?? (e instanceof Error ? e.message : 'Stack detection failed.')
+        toast.error(msg)
         setDetectOpen(false)
       } finally {
         setDetecting(false)
@@ -348,7 +349,8 @@ export function ServicePage() {
       const result = await servicesApi.detect(projectId!, serviceId!)
       setDetection(result)
     } catch (e: unknown) {
-      toast.error(e instanceof Error ? e.message : 'Stack detection failed.')
+      const msg = (e as any)?.response?.data?.error ?? (e instanceof Error ? e.message : 'Stack detection failed.')
+      toast.error(msg)
       setDetectOpen(false)
     } finally {
       setDetecting(false)

@@ -96,17 +96,50 @@ func (h *DetectHandler) Detect(w http.ResponseWriter, r *http.Request) {
 
 	// First attempt: clone with the configured branch
 	cloneArgs := []string{"clone", "--depth", "1", "--branch", repoBranch, "--", repoURL, tmpDir}
-	if out, err := newGitCmd(cloneArgs...).CombinedOutput(); err != nil {
+	out1, err1 := newGitCmd(cloneArgs...).CombinedOutput()
+	var cloneOut string
+	if err1 != nil {
 		// Second attempt: clone without --branch (uses the repo default)
-		cloneArgs2 := []string{"clone", "--depth", "1", "--", repoURL, tmpDir}
-		if out2, err2 := newGitCmd(cloneArgs2...).CombinedOutput(); err2 != nil {
-			slog.Error("git clone for detect", "url", repoURL, "out", strings.TrimSpace(string(out)+string(out2)))
-			writeJSON(w, http.StatusBadGateway,
-				errMap("failed to clone repository — make sure the URL is correct and accessible"))
+		if err2Out, err2 := newGitCmd("clone", "--depth", "1", "--", repoURL, tmpDir).CombinedOutput(); err2 != nil {
+			cloneOut = strings.TrimSpace(string(out1) + "\n" + string(err2Out))
+			slog.Error("git clone for detect", "url", repoURL, "out", cloneOut)
+			writeJSON(w, http.StatusUnprocessableEntity, errMap(cloneErrMsg(cloneOut, repoURL)))
 			return
 		}
 	}
 
 	result := detect.Detect(tmpDir)
 	writeJSON(w, http.StatusOK, result)
+}
+
+// cloneErrMsg returns a human-readable error message based on the git output.
+func cloneErrMsg(out, repoURL string) string {
+	lower := strings.ToLower(out)
+	switch {
+	case strings.Contains(lower, "repository not found") || strings.Contains(lower, "not found"):
+		if strings.Contains(repoURL, "x-access-token") {
+			return "GitHub App does not have access to this repository. " +
+				"Open your GitHub App installation settings and grant access to this repository " +
+				"(Settings → GitHub App → Configure → Repository access → Add repository)."
+		}
+		return "Repository not found — check the URL and make sure the repo exists."
+	case strings.Contains(lower, "authentication failed") || strings.Contains(lower, "could not read username"):
+		return "Authentication failed — connect a GitHub App or SSH key for private repositories."
+	case strings.Contains(lower, "permission denied"):
+		return "Permission denied — the configured credentials do not have read access to this repository."
+	case strings.Contains(lower, "timeout") || strings.Contains(lower, "timed out"):
+		return "Connection timed out while cloning the repository — check network connectivity."
+	default:
+		return "Failed to clone repository: " + firstLine(out)
+	}
+}
+
+// firstLine returns the first non-empty line of s.
+func firstLine(s string) string {
+	for _, l := range strings.Split(s, "\n") {
+		if t := strings.TrimSpace(l); t != "" {
+			return t
+		}
+	}
+	return s
 }
