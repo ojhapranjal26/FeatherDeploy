@@ -269,18 +269,20 @@ func collectContainerStats(cName string) ContainerStatsEvent {
 	}
 
 	// stdout was empty or unparseable.
-	if runErr != nil {
-		// Command failed and no output → container not found or not running.
-		return ContainerStatsEvent{Name: cName, Status: "not_found"}
-	}
-
-	// Command succeeded but returned no useful stats — container may be starting.
-	// Ask podman inspect for its actual state.
+	// Always verify via `podman inspect` before declaring the container gone.
+	// On many VPS kernels (cgroup v1, restricted namespaces) `podman stats`
+	// exits non-zero even for running containers. Never rely solely on
+	// runErr here — inspect is the ground truth.
+	_ = runErr // already attempted parse above; outcome doesn't matter now
 	inspCmd := exec.Command("sudo", "-n", "podman", "inspect", "--format", "{{.State.Status}}", cName)
 	out, _ := inspCmd.Output()
 	state := strings.TrimSpace(string(out))
 	if state == "running" {
 		return ContainerStatsEvent{Name: cName, Status: "running"}
+	}
+	if state != "" {
+		// Container exists but is stopped/paused/exited.
+		return ContainerStatsEvent{Name: cName, Status: "stopped"}
 	}
 	return ContainerStatsEvent{Name: cName, Status: "not_found"}
 }

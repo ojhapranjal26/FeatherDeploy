@@ -125,7 +125,14 @@ func serve() {
 	// Seed default superadmin on first run (no users in DB yet)
 	seedSuperAdmin(db)
 
-	// Start deployment worker pool.
+	// ─── Startup reconciliation ────────────────────────────────────────────
+	// After a restart or update, fix any inconsistent state left by the
+	// previous process:
+	//  • Deployments stuck in 'running'/'pending' become 'failed' (the worker
+	//    that was handling them is gone, so they will never finish).
+	//  • Services whose container is actually running get status='running';
+	//    services whose container is gone get status='error'.
+	go reconcileServiceStates(db)
 	// One worker = fully sequential deployments: when two services are deployed
 	// simultaneously they queue up rather than running in parallel. This prevents
 	// the build process (npm install, podman build, …) from saturating CPU/RAM
@@ -138,8 +145,7 @@ func serve() {
 	}
 	deploy.InitQueue(workers)
 
-	// ─── Brain heartbeat + SSH key ──────────────────────────────────────
-	// Generate / load cluster SSH keypair (for passwordless node access)
+	// ─── Brain heartbeat + SSH key
 	if err := ensureSSHKey(db); err != nil {
 		slog.Warn("SSH key setup", "err", err)
 	}
@@ -423,6 +429,65 @@ func serve() {
 	if err := http.ListenAndServe(*addr, r); err != nil {
 		slog.Error("server exited", "err", err)
 		os.Exit(1)
+	}
+}
+
+// reconcileServiceStates is called once at startup in a goroutine. It marks
+// any deployment that was 'running'/'pending' (orphaned by the previous process)
+// as 'failed', then checks each service's actual podman container state and
+// updates the services.status column accordingly.
+func reconcileServiceStates(db *sql.DB) {
+	// 1. Mark orphaned in-progress deployments as failed.
+	now := time.Now().UTC().Format("2006-01-02 15:04:05")
+	res, err := db.Exec(
+		`UPDATE deployments
+		 SET status='failed', finished_at=?, error_message='server restarted before deployment completed'
+		 WHERE status IN ('running','pending')`,
+		now)
+	if err == nil {
+		if n, _ := res.RowsAffected(); n > 0 {
+			slog.Info("startup reconcile: marked orphaned deployments failed", "count", n)
+		}
+	}
+
+	// 2. Sync service.status with the actual podman container state.
+	rows, err := db.Query(
+		`SELECT id FROM services WHERE status IN ('running','deploying','error')`)
+	if err != nil {
+		slog.Warn("startup reconcile: query services", "err", err)
+		return
+	}
+	defer rows.Close()
+
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if rows.Scan(&id) == nil {
+			ids = append(ids, id)
+		}
+	}
+	rows.Close()
+
+	for _, svcID := range ids {
+		cName := fmt.Sprintf("fd-svc-%d", svcID)
+		out, inspErr := exec.Command("sudo", "-n", "podman", "inspect",
+			"--format", "{{.State.Status}}", cName).Output()
+		if inspErr != nil {
+			// Container doesn't exist — mark service as error.
+			db.Exec( //nolint
+				`UPDATE services SET status='error', updated_at=datetime('now') WHERE id=?`, svcID)
+			slog.Info("startup reconcile: container missing", "svc_id", svcID)
+			continue
+		}
+		state := strings.TrimSpace(string(out))
+		wantedStatus := "error"
+		if state == "running" {
+			wantedStatus = "running"
+		}
+		db.Exec( //nolint
+			`UPDATE services SET status=?, updated_at=datetime('now') WHERE id=?`,
+			wantedStatus, svcID)
+		slog.Info("startup reconcile: synced service", "svc_id", svcID, "container_state", state, "db_status", wantedStatus)
 	}
 }
 
