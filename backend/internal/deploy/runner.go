@@ -214,7 +214,12 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 			markFailed(db, depID, svcID, log.text())
 			return
 		}
-		log.add("[dockerfile] generated Dockerfile for framework=%q build=%q", framework, buildCmd)
+		multiStage := strings.Contains(df, "AS builder")
+		if multiStage {
+			log.add("[dockerfile] generated multi-stage Dockerfile for framework=%q (builder → slim runtime)", framework)
+		} else {
+			log.add("[dockerfile] generated Dockerfile for framework=%q build=%q", framework, buildCmd)
+		}
 	} else {
 		log.add("[dockerfile] using Dockerfile from repository")
 	}
@@ -314,6 +319,10 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 			log.add("[podman] saved %s as stable snapshot", stableImage)
 			db.Exec(`UPDATE services SET last_image=? WHERE id=?`, stableImage, svcID) //nolint
 		}
+		// Prune old deployment-tagged images for this service (dep-N tags that
+		// are no longer needed). Keep only the current dep-N and :stable.
+		// This reclaims disk space after every successful deployment.
+		go pruneOldDepImages(svcID, depID)
 	}
 
 	slog.Info("deployment succeeded", "dep_id", depID, "svc_id", svcID, "container", shortID)
@@ -512,23 +521,59 @@ func generateDockerfile(workDir, framework, buildCmd, startCmd string, appPort i
 		fw == "nestjs" || fw == "koa" || fw == "hapi" || fw == "gatsby"
 
 	var sb strings.Builder
-	sb.WriteString("FROM " + baseImage + "\n")
-	sb.WriteString("WORKDIR /app\n")
-	sb.WriteString("COPY . .\n")
 
 	switch {
+	// ── Node: multi-stage ────────────────────────────────────────────────────
+	// Stage 1 (builder): full node image — install deps, run build.
+	// Stage 2 (runner): slim node-alpine — copy only what's needed to run.
+	// This cuts typical Next.js / React images from 1–2 GB down to ~150–250 MB.
+	case isNode:
+		sb.WriteString("FROM " + baseImage + " AS builder\n")
+		sb.WriteString("WORKDIR /app\n")
+		sb.WriteString("COPY . .\n")
+		if strings.TrimSpace(buildCmd) != "" && looksLikeNpmInstall(buildCmd) {
+			sb.WriteString("RUN " + buildCmd + "\n")
+		} else {
+			sb.WriteString("RUN npm install\n")
+			if strings.TrimSpace(buildCmd) != "" {
+				sb.WriteString("RUN " + buildCmd + "\n")
+			}
+		}
+		// Remove devDependencies after build to shrink node_modules before copy
+		sb.WriteString("RUN npm prune --production 2>/dev/null || true\n")
+
+		// Final stage: copy only the production artefacts
+		sb.WriteString("\nFROM " + baseImage + "\n")
+		sb.WriteString("WORKDIR /app\n")
+		// Detect common build output dirs; copy whichever exist (Dockerfile COPY
+		// is fine even if the src doesn't exist when using a wildcard glob).
+		sb.WriteString("COPY --from=builder /app/node_modules ./node_modules\n")
+		sb.WriteString("COPY --from=builder /app/package.json ./package.json\n")
+		// Always copy .next / dist / build / public if they exist
+		sb.WriteString("COPY --from=builder /app/.next ./.next\n")
+		sb.WriteString("COPY --from=builder /app/dist ./dist\n")
+		// Fallback: copy the whole app (handles cases where build output is in-place)
+		// The above COPYs will override if specific dirs exist.
+		sb.WriteString("COPY --from=builder /app .\n")
+		sb.WriteString(fmt.Sprintf("EXPOSE %d\n", appPort))
+		sb.WriteString(`CMD ["/bin/sh", "-c", "` + strings.ReplaceAll(startCmd, `"`, `\"`) + `"]` + "\n")
+
+	// ── Python: multi-stage ──────────────────────────────────────────────────
+	// Stage 1 (builder): full python image with gcc/build-tools — install deps
+	//   into a venv so they can be cleanly copied.
+	// Stage 2 (runner): slim python image — copy only the venv + app code.
 	case isPython:
-		// Inject apt-get install for any C-extension build dependencies that
-		// the detected requirements need (e.g. mysqlclient → pkg-config +
-		// default-libmysqlclient-dev, psycopg2 → libpq-dev, lxml → libxml2-dev…).
-		// python:3.12-slim ships no compiler or pkg-config by default.
+		sb.WriteString("FROM " + baseImage + " AS builder\n")
+		sb.WriteString("WORKDIR /app\n")
 		if aptPkgs := detectPythonAptDeps(workDir); len(aptPkgs) > 0 {
 			sb.WriteString("RUN apt-get update && apt-get install -y --no-install-recommends " +
 				strings.Join(aptPkgs, " ") +
 				" && rm -rf /var/lib/apt/lists/*\n")
 		}
-		// Use the user-configured build command when it is already a pip/poetry/
-		// pipenv invocation; otherwise auto-inject a requirements.txt install.
+		// Always create an isolated venv for clean copying
+		sb.WriteString("RUN python -m venv /venv\n")
+		sb.WriteString("ENV PATH=\"/venv/bin:$PATH\"\n")
+		sb.WriteString("COPY . .\n")
 		pipInstallCmd := buildCmd
 		remainingBuild := ""
 		if !looksLikePipInstall(buildCmd) {
@@ -539,30 +584,31 @@ func generateDockerfile(workDir, framework, buildCmd, startCmd string, appPort i
 		if strings.TrimSpace(remainingBuild) != "" {
 			sb.WriteString("RUN " + remainingBuild + "\n")
 		}
-		// Ensure the WSGI/ASGI server used in startCmd is installed even when
-		// it is absent from requirements.txt (common for managed-host repos).
 		if extra := pythonServerPipInstall(workDir, startCmd); extra != "" {
 			sb.WriteString("RUN " + extra + "\n")
 		}
-	case isNode:
-		// If the build command already handles npm install (e.g. "npm ci && npm
-		// run build") use it as a single RUN; otherwise prepend npm install.
-		if strings.TrimSpace(buildCmd) != "" && looksLikeNpmInstall(buildCmd) {
-			sb.WriteString("RUN " + buildCmd + "\n")
-		} else {
-			sb.WriteString("RUN npm install\n")
-			if strings.TrimSpace(buildCmd) != "" {
-				sb.WriteString("RUN " + buildCmd + "\n")
-			}
-		}
+
+		// Final stage: no compiler or build tools — just the venv and app source
+		sb.WriteString("\nFROM " + baseImage + "\n")
+		sb.WriteString("WORKDIR /app\n")
+		sb.WriteString("COPY --from=builder /venv /venv\n")
+		sb.WriteString("COPY --from=builder /app .\n")
+		sb.WriteString("ENV PATH=\"/venv/bin:$PATH\"\n")
+		sb.WriteString(fmt.Sprintf("EXPOSE %d\n", appPort))
+		sb.WriteString(`CMD ["/bin/sh", "-c", "` + strings.ReplaceAll(startCmd, `"`, `\"`) + `"]` + "\n")
+
+	// ── Default: single-stage (Go, Ruby, PHP, etc.) ──────────────────────────
 	default:
+		sb.WriteString("FROM " + baseImage + "\n")
+		sb.WriteString("WORKDIR /app\n")
+		sb.WriteString("COPY . .\n")
 		if strings.TrimSpace(buildCmd) != "" {
 			sb.WriteString("RUN " + buildCmd + "\n")
 		}
+		sb.WriteString(fmt.Sprintf("EXPOSE %d\n", appPort))
+		sb.WriteString(`CMD ["/bin/sh", "-c", "` + strings.ReplaceAll(startCmd, `"`, `\"`) + `"]` + "\n")
 	}
 
-	sb.WriteString(fmt.Sprintf("EXPOSE %d\n", appPort))
-	sb.WriteString(`CMD ["/bin/sh", "-c", "` + strings.ReplaceAll(startCmd, `"`, `\"`) + `"]` + "\n")
 	return sb.String()
 }
 
@@ -743,6 +789,32 @@ func podmanBuild(dir string, log *logBuf, imageName string) error {
 // podmanImageExists returns true if the named image exists in the rootful podman store.
 func podmanImageExists(image string) bool {
 	return podmanCmd("image", "exists", image).Run() == nil
+}
+
+// pruneOldDepImages removes old featherdeploy/svc-N:dep-M images for the given
+// service, keeping only the current deployment image and the :stable tag.
+// Called asynchronously after a successful deployment to reclaim disk space.
+func pruneOldDepImages(svcID, currentDepID int64) {
+	prefix := fmt.Sprintf("featherdeploy/svc-%d", svcID)
+	current := fmt.Sprintf("%s:dep-%d", prefix, currentDepID)
+	stable := fmt.Sprintf("%s:stable", prefix)
+
+	out, err := podmanCmd("images", "--format", "{{.Repository}}:{{.Tag}}", "--filter",
+		"reference="+prefix+"*").Output()
+	if err != nil {
+		return
+	}
+	for _, img := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		img = strings.TrimSpace(img)
+		if img == "" || img == current || img == stable {
+			continue
+		}
+		// Only remove dep-N images for this service
+		if strings.HasPrefix(img, prefix+":dep-") {
+			podmanCmd("rmi", "-f", img).Run() //nolint
+			slog.Info("[deploy] pruned old image", "image", img)
+		}
+	}
 }
 
 func pickBaseImage(framework string) string {

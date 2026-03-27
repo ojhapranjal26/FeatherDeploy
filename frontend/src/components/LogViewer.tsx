@@ -51,10 +51,11 @@ const DOT_CLASS: Record<LineKind, string> = {
 interface LogViewerProps {
   lines: LogLine[]
   done: boolean
+  status?: string  // 'success' | 'failed' | undefined (in-progress)
   className?: string
 }
 
-export function LogViewer({ lines, done, className }: LogViewerProps) {
+export function LogViewer({ lines, done, status, className }: LogViewerProps) {
   const bottomRef = useRef<HTMLDivElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
 
@@ -102,8 +103,17 @@ export function LogViewer({ lines, done, className }: LogViewerProps) {
           )
         })}
         {done && (
-          <div className="mt-2 text-zinc-600 border-t border-zinc-800 pt-2 text-center select-none">
-            ── deployment finished ──
+          <div className={cn(
+            'mt-2 border-t pt-2 text-center text-[11px] select-none font-medium',
+            status === 'success'
+              ? 'border-emerald-900/60 text-emerald-600'
+              : status === 'failed'
+              ? 'border-red-900/60 text-red-600'
+              : 'border-zinc-800 text-zinc-600',
+          )}>
+            {status === 'success' && '✓  deployment finished successfully'}
+            {status === 'failed'  && '✗  deployment failed — see errors above'}
+            {!status              && '── end of log ──'}
           </div>
         )}
       </div>
