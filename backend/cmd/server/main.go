@@ -198,6 +198,7 @@ func serve() {
 	settingsH := handler.NewSettingsHandler(db, cfgStore)
 	statsH := handler.NewStatsHandler(db)
 	containerStatsH := handler.NewContainerStatsHandler()
+	systemH := handler.NewSystemHandler()
 
 	// ─── Router ──────────────────────────────────────────────────────────────
 	r := chi.NewRouter()
@@ -253,6 +254,14 @@ func serve() {
 
 		// Self
 		r.Get("/api/auth/me", authH.Me)
+
+		// ── System / version check (any authenticated user can query) ─────
+		r.Get("/api/system/version", systemH.VersionCheck)
+		// Self-update is superadmin only — one-click update from the dashboard.
+		r.Group(func(r chi.Router) {
+			r.Use(mw.RequireRole(model.RoleSuperAdmin))
+			r.Post("/api/system/update", systemH.TriggerUpdate)
+		})
 
 		// ── Dashboard ──────────────────────────────────────────────────────
 		r.Get("/api/dashboard", dashH.Stats)

@@ -515,16 +515,42 @@ fi
 # -- 8d. sudo rule: allow featherdeploy to run rootful podman without a password
 # This gives the service account access to rootful podman, which avoids all
 # rootless user-namespace requirements (newuidmap failures, kernel restrictions).
-echo "==> Installing sudo rule for featherdeploy → podman + caddy..."
+echo "==> Installing sudo rule for featherdeploy → podman + caddy + self-update..."
 cat > /etc/sudoers.d/featherdeploy-podman << 'SUDOEOF'
 Defaults!/usr/bin/podman !requiretty
 featherdeploy ALL=(root) NOPASSWD: /usr/bin/podman
 featherdeploy ALL=(root) NOPASSWD: /bin/systemctl reload caddy
 featherdeploy ALL=(root) NOPASSWD: /usr/bin/systemctl reload caddy
 featherdeploy ALL=(root) NOPASSWD: /usr/bin/tee /etc/caddy/featherdeploy-services.caddy
+featherdeploy ALL=(root) NOPASSWD: /usr/local/bin/featherdeploy-update
 SUDOEOF
 chmod 440 /etc/sudoers.d/featherdeploy-podman
 echo "  /etc/sudoers.d/featherdeploy-podman installed"
+
+# -- 8f. Install the self-update helper script (used by one-click UI updates)
+echo "==> Installing featherdeploy-update helper script..."
+cat > /usr/local/bin/featherdeploy-update << 'UPDATEEOF'
+#!/usr/bin/env bash
+# featherdeploy-update <VERSION> <ARCH>
+# Downloads the release binary for the given version, replaces the running
+# binary, then delegates to "featherdeploy update" for DB migrations and
+# service restart.  Must be run as root (via sudo -n from the panel service).
+set -euo pipefail
+VERSION="${1:?Usage: featherdeploy-update <version> <arch>}"
+ARCH="${2:?Usage: featherdeploy-update <version> <arch>}"
+URL="https://github.com/ojhapranjal26/FeatherDeploy/releases/download/v${VERSION}/featherdeploy-linux-${ARCH}"
+TMP=$(mktemp /tmp/featherdeploy-update-XXXXXX)
+trap 'rm -f "$TMP"' EXIT
+echo "==> Downloading FeatherDeploy v${VERSION} (${ARCH})..."
+curl -fsSL --retry 3 --retry-delay 5 --connect-timeout 30 --max-time 300 "$URL" -o "$TMP"
+chmod +x "$TMP"
+echo "==> Installing new binary to /usr/local/bin/featherdeploy..."
+cp -f "$TMP" /usr/local/bin/featherdeploy
+echo "==> Running migration + service restart..."
+exec /usr/local/bin/featherdeploy update
+UPDATEEOF
+chmod 755 /usr/local/bin/featherdeploy-update
+echo "  featherdeploy-update installed"
 
 # -- 8e. Create the Caddy services include file with correct ownership so the
 #        FeatherDeploy service account can write domain routing config to it.

@@ -1,16 +1,19 @@
 ﻿import { useRef, useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useMutation } from '@tanstack/react-query'
 import {
   Activity, AlertTriangle, Rocket, CheckCircle2, XCircle,
   Crown, Cpu, MemoryStick, HardDrive, Server, Wifi, WifiOff,
-  FolderGit2, TrendingUp, Layers,
+  FolderGit2, TrendingUp, Layers, ArrowUpCircle, X, RefreshCw,
+  Tag,
 } from 'lucide-react'
 import {
   AreaChart, Area, ResponsiveContainer, Tooltip, XAxis,
 } from 'recharts'
 import client from '@/api/client'
+import { systemApi, type VersionInfo } from '@/api/system'
 import { useStatsSSE, type NodeStats } from '@/hooks/useStatsSSE'
+import { useAuth } from '@/context/AuthContext'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Progress } from '@/components/ui/progress'
@@ -18,6 +21,11 @@ import { Badge } from '@/components/ui/badge'
 import {
   Card, CardContent, CardHeader, CardTitle, CardDescription,
 } from '@/components/ui/card'
+import {
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription,
+  DialogFooter,
+} from '@/components/ui/dialog'
+import { toast } from 'sonner'
 import { cn } from '@/lib/utils'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -286,14 +294,155 @@ function NodeCard({ node, history, ramHistory }: { node: NodeStats; history: Cpu
   )
 }
 
+// ── UpdateBanner ──────────────────────────────────────────────────────────────
+function UpdateBanner({ info, isSuperAdmin }: { info: VersionInfo; isSuperAdmin: boolean }) {
+  const [dismissed, setDismissed] = useState(() => {
+    const key = `update-dismissed-${info.latest_version}`
+    return localStorage.getItem(key) === '1'
+  })
+  const [dialogOpen, setDialogOpen] = useState(false)
+  const [updating, setUpdating] = useState(false)
+  const [showChangelog, setShowChangelog] = useState(false)
+
+  const dismiss = () => {
+    localStorage.setItem(`update-dismissed-${info.latest_version}`, '1')
+    setDismissed(true)
+  }
+
+  const updateMutation = useMutation({
+    mutationFn: systemApi.triggerUpdate,
+    onSuccess: (data) => {
+      setDialogOpen(false)
+      setUpdating(true)
+      toast.success(`Update to v${data.version} started — panel will restart in ~60 seconds.`)
+      // Reload the page after ~70 seconds to pick up the new version
+      setTimeout(() => window.location.reload(), 70_000)
+    },
+    onError: (err: unknown) => {
+      const msg = (err as { response?: { data?: { error?: string } } })?.response?.data?.error
+        ?? 'Update failed — check server logs for details.'
+      toast.error(msg)
+    },
+  })
+
+  if (dismissed && !updating) return null
+
+  if (updating) {
+    return (
+      <div className="rounded-xl border border-blue-400/30 bg-blue-500/8 px-4 py-3 flex items-center gap-3">
+        <RefreshCw className="h-4 w-4 text-blue-500 animate-spin shrink-0" />
+        <p className="text-sm font-medium text-blue-700 dark:text-blue-300">
+          Updating to v{info.latest_version}… The panel will restart automatically. Page will refresh shortly.
+        </p>
+      </div>
+    )
+  }
+
+  return (
+    <>
+      <div className="rounded-xl border border-amber-400/40 bg-amber-500/8 px-4 py-3.5">
+        <div className="flex items-start gap-3">
+          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-amber-500/15 text-amber-600 dark:text-amber-400 mt-0.5">
+            <ArrowUpCircle className="h-4 w-4" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2 flex-wrap">
+              <p className="text-sm font-semibold text-foreground">
+                Update available — FeatherDeploy v{info.latest_version}
+              </p>
+              <span className="text-xs font-mono px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-400/30 flex items-center gap-1">
+                <Tag className="h-3 w-3" /> v{info.current_version} → v{info.latest_version}
+              </span>
+            </div>
+            <button
+              onClick={() => setShowChangelog(v => !v)}
+              className="mt-0.5 text-xs text-muted-foreground hover:text-foreground transition-colors underline-offset-2 hover:underline"
+            >
+              {showChangelog ? 'Hide changelog' : 'Show what\'s new'}
+            </button>
+            {showChangelog && (
+              <div className="mt-3 rounded-lg border border-border/60 bg-background/60 p-3 text-xs text-muted-foreground leading-relaxed max-h-48 overflow-y-auto whitespace-pre-wrap">
+                {info.changelog}
+              </div>
+            )}
+          </div>
+          <div className="flex items-center gap-2 shrink-0 mt-0.5">
+            {isSuperAdmin && (
+              <Button size="sm" className="h-7 text-xs gap-1.5 bg-amber-500 hover:bg-amber-600 text-white border-0"
+                onClick={() => setDialogOpen(true)}>
+                <ArrowUpCircle className="h-3.5 w-3.5" />
+                Update Now
+              </Button>
+            )}
+            <button
+              onClick={dismiss}
+              className="flex h-7 w-7 items-center justify-center rounded-md hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
+              title="Dismiss"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <ArrowUpCircle className="h-5 w-5 text-amber-500" />
+              Update FeatherDeploy
+            </DialogTitle>
+            <DialogDescription>
+              This will download v{info.latest_version}, replace the running binary, apply any
+              database migrations, and restart the panel service. The dashboard will be
+              unavailable for ~60 seconds during the restart.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="rounded-lg bg-muted/50 p-3 text-xs text-muted-foreground space-y-1">
+            <p className="font-medium text-foreground text-sm">What's new in v{info.latest_version}</p>
+            <div className="max-h-32 overflow-y-auto whitespace-pre-wrap leading-relaxed mt-1">
+              {info.changelog}
+            </div>
+          </div>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={() => setDialogOpen(false)}
+              disabled={updateMutation.isPending}>
+              Cancel
+            </Button>
+            <Button
+              className="bg-amber-500 hover:bg-amber-600 text-white border-0 gap-1.5"
+              onClick={() => updateMutation.mutate()}
+              disabled={updateMutation.isPending}
+            >
+              {updateMutation.isPending
+                ? <><RefreshCw className="h-3.5 w-3.5 animate-spin" />Starting update…</>
+                : <><ArrowUpCircle className="h-3.5 w-3.5" />Confirm update to v{info.latest_version}</>}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  )
+}
+
 // ── Page ──────────────────────────────────────────────────────────────────────
 export function DashboardPage() {
   const navigate = useNavigate()
+  const { user } = useAuth()
+  const isSuperAdmin = user?.role === 'superadmin'
 
   const { data: dash, isLoading: dashLoading } = useQuery({
     queryKey: ['dashboard'],
     queryFn: () => client.get<DashStats>('/dashboard').then(r => r.data),
     refetchInterval: 30_000,
+  })
+
+  // Version check: at most once per 24 hours thanks to staleTime.
+  const { data: versionInfo } = useQuery({
+    queryKey: ['system-version'],
+    queryFn: systemApi.checkVersion,
+    staleTime: 24 * 60 * 60 * 1000,
+    retry: false,
   })
 
   const { brain, nodes: liveNodes, connected } = useStatsSSE()
@@ -331,21 +480,34 @@ export function DashboardPage() {
 
   return (
     <div className="space-y-6">
+      {/* Update banner — shown when an update is available */}
+      {versionInfo?.update_available && (
+        <UpdateBanner info={versionInfo} isSuperAdmin={isSuperAdmin} />
+      )}
+
       {/* Header */}
       <div className="flex items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Cluster Overview</h1>
           <p className="text-sm text-muted-foreground mt-0.5">Live infrastructure performance and health.</p>
         </div>
-        <div className={cn(
-          'flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium border',
-          connected
-            ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-300/30'
-            : 'bg-muted text-muted-foreground border-border',
-        )}>
-          {connected
-            ? <><Wifi className="h-3 w-3 mr-1" />Live</>
-            : <><WifiOff className="h-3 w-3 mr-1 animate-pulse" />Reconnecting…</>}
+        <div className="flex items-center gap-2">
+          {/* Current version badge */}
+          {versionInfo && (
+            <span className="hidden sm:flex items-center gap-1 text-xs text-muted-foreground font-mono px-2 py-1 rounded-md bg-muted/60 border border-border/50">
+              <Tag className="h-3 w-3" /> v{versionInfo.current_version}
+            </span>
+          )}
+          <div className={cn(
+            'flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium border',
+            connected
+              ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-300/30'
+              : 'bg-muted text-muted-foreground border-border',
+          )}>
+            {connected
+              ? <><Wifi className="h-3 w-3 mr-1" />Live</>
+              : <><WifiOff className="h-3 w-3 mr-1 animate-pulse" />Reconnecting…</>}
+          </div>
         </div>
       </div>
 
