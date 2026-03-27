@@ -432,12 +432,14 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 		// This reclaims disk space after every successful deployment.
 		go func() {
 			pruneOldDepImages(svcID, depID)
-			// Prune dangling image layers left over from multi-stage builds.
-			// "Dangling" = layers with no tag, produced by intermediate stages.
-			podmanCmd("image", "prune", "-f").Run() //nolint
+			// Prune ALL unused images (not just dangling) to reclaim disk space
+			// from base images (node:20-alpine, python:3.12-slim, …) that are no
+			// longer referenced by any running container.
+			podmanCmd("image", "prune", "-a", "-f").Run() //nolint
 		}()
 	}
 
+	go trimOldDeployLogs(db, svcID)
 	slog.Info("deployment succeeded", "dep_id", depID, "svc_id", svcID, "container", shortID)
 }
 
@@ -450,8 +452,10 @@ func markFailed(db *sql.DB, depID, svcID int64, logText string) {
 		now, logText, lastLine(logText), depID)
 	db.Exec(
 		`UPDATE services SET status='error', updated_at=datetime('now') WHERE id=?`, svcID)
-	// Prune dangling build layers so failed builds don't waste disk space.
-	go podmanCmd("image", "prune", "-f").Run() //nolint
+	// Prune ALL unused images — failed builds leave behind pulled base images
+	// (e.g. node:20-alpine) that are never referenced by a container.
+	go podmanCmd("image", "prune", "-a", "-f").Run() //nolint
+	go trimOldDeployLogs(db, svcID)
 	slog.Error("deployment failed", "dep_id", depID, "svc_id", svcID)
 }
 
@@ -993,6 +997,26 @@ func podmanBuild(dir string, log *logBuf, imageName string) error {
 // podmanImageExists returns true if the named image exists in the rootful podman store.
 func podmanImageExists(image string) bool {
 	return podmanCmd("image", "exists", image).Run() == nil
+}
+
+// trimOldDeployLogs nullifies the deploy_log column for all but the most recent
+// maxKeepLogs deployments for the given service. This prevents the database
+// from growing unboundedly as build output (npm install, podman build, …) can
+// easily be 100–300 KB per deployment.
+const maxKeepLogs = 5
+
+func trimOldDeployLogs(db *sql.DB, svcID int64) {
+	db.Exec(`
+		UPDATE deployments
+		SET    deploy_log = ''
+		WHERE  service_id = ?
+		  AND  deploy_log != ''
+		  AND  id NOT IN (
+			  SELECT id FROM deployments
+			  WHERE  service_id = ?
+			  ORDER  BY id DESC
+			  LIMIT  ?
+		  )`, svcID, svcID, maxKeepLogs) //nolint
 }
 
 // pruneOldDepImages removes old featherdeploy/svc-N:dep-M images for the given

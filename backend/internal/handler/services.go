@@ -227,8 +227,10 @@ func (h *ServiceHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		if removeErr := os.RemoveAll(artifactDir); removeErr != nil {
 			slog.Warn("service cleanup: remove artifacts", "svc_id", svcID, "err", removeErr)
 		}
-		// Prune dangling podman layers from this service's builds
-		exec.Command("sudo", "-n", "podman", "image", "prune", "-f").Run() //nolint
+		// Prune ALL unused images: after the service images are removed above,
+		// base images (node:20-alpine, python:3.12-slim, …) that are no longer
+		// referenced by any container can now be freed.
+		exec.Command("sudo", "-n", "podman", "image", "prune", "-a", "-f").Run() //nolint
 		slog.Info("service cleanup complete", "svc_id", svcID, "container", cName)
 	}()
 
