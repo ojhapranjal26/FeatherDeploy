@@ -71,6 +71,12 @@ func (h *DetectHandler) Detect(w http.ResponseWriter, r *http.Request) {
 		repoBranch = "main"
 	}
 
+	// Inject GitHub App installation token for HTTPS GitHub repos
+	// This must happen before SSH URL detection since the two are mutually exclusive.
+	if !deploy.IsSSHURL(repoURL) {
+		repoURL = deploy.InjectGitHubAppToken(r.Context(), h.db, repoURL)
+	}
+
 	// Optional SSH key setup for private repos
 	gitEnv := os.Environ()
 	if deploy.IsSSHURL(repoURL) {

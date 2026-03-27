@@ -509,6 +509,14 @@ func injectGitHubAppToken(ctx context.Context, db *sql.DB, repoURL string, log *
 	return authedURL
 }
 
+// InjectGitHubAppToken is the exported version of injectGitHubAppToken for use
+// from other packages (e.g. the detect handler). It rewrites an
+// https://github.com/... URL to carry an installation access token.
+// Returns the original URL unchanged on any error.
+func InjectGitHubAppToken(ctx context.Context, db *sql.DB, repoURL string) string {
+	return injectGitHubAppToken(ctx, db, repoURL, &logBuf{})
+}
+
 // githubAppInstallToken exchanges the App JWT for a short-lived installation token.
 func githubAppInstallToken(ctx context.Context, appID, privateKeyPEM, installID string) (string, error) {
 	privKey, err := jwt.ParseRSAPrivateKeyFromPEM([]byte(privateKeyPEM))
