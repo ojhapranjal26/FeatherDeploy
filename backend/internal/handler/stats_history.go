@@ -186,3 +186,81 @@ func (h *StatsHistoryHandler) History(w http.ResponseWriter, r *http.Request) {
 func round2(v float64) float64 {
 	return math.Round(v*100) / 100
 }
+
+// ─── Monthly history (aggregate table) ───────────────────────────────────────
+
+type monthlyHourBucket struct {
+	Hour    int     `json:"hour"`
+	CPUAvg  float64 `json:"cpu_avg"`
+	MemAvg  float64 `json:"mem_avg"`
+	Samples int     `json:"samples"`
+}
+
+type monthlyEntry struct {
+	Year   int                  `json:"year"`
+	Month  int                  `json:"month"`
+	Label  string               `json:"label"`
+	Hourly []monthlyHourBucket  `json:"hourly"`
+}
+
+type MonthlyHistoryResponse struct {
+	Months []monthlyEntry `json:"months"`
+}
+
+// GET /api/projects/{projectID}/services/{serviceID}/stats/monthly
+func (h *StatsHistoryHandler) MonthlyHistory(w http.ResponseWriter, r *http.Request) {
+	serviceID, err := strconv.ParseInt(chi.URLParam(r, "serviceID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errMap("invalid serviceID"))
+		return
+	}
+
+	rows, err := h.db.QueryContext(r.Context(),
+		`SELECT year, month, hour, cpu_avg, mem_avg, samples
+		 FROM service_stats_monthly
+		 WHERE service_id=?
+		 ORDER BY year DESC, month DESC, hour ASC`,
+		serviceID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errMap("internal error"))
+		return
+	}
+	defer rows.Close()
+
+	type monthKey struct{ year, month int }
+	entryMap := map[monthKey]*monthlyEntry{}
+	var order []monthKey
+
+	for rows.Next() {
+		var year, month, hour, samples int
+		var cpuAvg, memAvg float64
+		if err := rows.Scan(&year, &month, &hour, &cpuAvg, &memAvg, &samples); err != nil {
+			continue
+		}
+		k := monthKey{year, month}
+		if _, ok := entryMap[k]; !ok {
+			t := time.Date(year, time.Month(month), 1, 0, 0, 0, 0, time.UTC)
+			entryMap[k] = &monthlyEntry{
+				Year:  year,
+				Month: month,
+				Label: t.Format("Jan 2006"),
+			}
+			order = append(order, k)
+		}
+		entryMap[k].Hourly = append(entryMap[k].Hourly, monthlyHourBucket{
+			Hour:    hour,
+			CPUAvg:  round2(cpuAvg),
+			MemAvg:  round2(memAvg),
+			Samples: samples,
+		})
+	}
+
+	var months []monthlyEntry
+	for _, k := range order {
+		months = append(months, *entryMap[k])
+	}
+	if months == nil {
+		months = []monthlyEntry{}
+	}
+	writeJSON(w, http.StatusOK, MonthlyHistoryResponse{Months: months})
+}

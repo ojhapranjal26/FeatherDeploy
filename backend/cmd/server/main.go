@@ -203,6 +203,7 @@ func serve() {
 	statsH := handler.NewStatsHandler(db)
 	containerStatsH := handler.NewContainerStatsHandler()
 	statsHistH := handler.NewStatsHistoryHandler(db)
+	qrH := handler.NewQRAuthHandler(db, *jwtSecret)
 	systemH := handler.NewSystemHandler()
 
 	// ─── Router ──────────────────────────────────────────────────────────────
@@ -233,6 +234,10 @@ func serve() {
 	// Invitation accept flow (public — token acts as credential)
 	r.Get("/api/invitations/{token}", inviteH.Verify)
 	r.Post("/api/invitations/{token}/accept", inviteH.Accept)
+
+	// QR login: status and claim are public (token is the credential)
+	r.Get("/api/auth/qr/{qrToken}/status", qrH.Status)
+	r.Post("/api/auth/qr/{qrToken}/claim", qrH.Claim)
 
 	// GitHub App status is public (frontend uses it to show connect button)
 	r.Get("/api/github-app/status", ghAppH.Status)
@@ -404,6 +409,10 @@ func serve() {
 
 				// ── Historical stats ──────────────────────────────────────
 				r.Get("/api/projects/{projectID}/services/{serviceID}/stats/history", statsHistH.History)
+				r.Get("/api/projects/{projectID}/services/{serviceID}/stats/monthly", statsHistH.MonthlyHistory)
+
+				// ── QR generate (authenticated) ───────────────────────────
+				r.Post("/api/auth/qr/generate", qrH.Generate)
 
 				// ── Domains ──────────────────────────────────────────────
 				r.Get("/api/projects/{projectID}/services/{serviceID}/domains", domainH.List)
@@ -726,8 +735,11 @@ func diskUsage(path string) (used, total int64) {
 }
 
 // startStatsCollector samples every running container once per minute and
-// inserts a row into service_stats for historical analysis.  Records older
-// than 7 days are pruned once per hour to bound storage.
+// inserts a row into service_stats for historical analysis.
+// Every hour it performs a monthly rollup: raw stats older than 31 days are
+// first summarised into service_stats_monthly (hourly averages per calendar
+// month) then deleted from the raw table, so storage stays bounded while
+// history is preserved indefinitely.
 func startStatsCollector(db *sql.DB) {
 	collect := func() {
 		rows, err := db.Query(`SELECT id FROM services WHERE status='running'`)
@@ -758,6 +770,40 @@ func startStatsCollector(db *sql.DB) {
 		}
 	}
 
+	rollupAndPrune := func() {
+		// Roll up the previous calendar month into service_stats_monthly.
+		// Uses INSERT OR IGNORE so re-runs after a crash are idempotent.
+		now := time.Now().UTC()
+		prev := time.Date(now.Year(), now.Month()-1, 1, 0, 0, 0, 0, time.UTC)
+		prevYear := prev.Year()
+		prevMonth := int(prev.Month())
+		db.Exec(`
+			INSERT OR IGNORE INTO service_stats_monthly
+			    (service_id, year, month, hour,
+			     cpu_avg, mem_avg, net_in_avg, net_out_avg, blk_in_avg, blk_out_avg, samples)
+			SELECT
+			    service_id,
+			    CAST(? AS INTEGER),
+			    CAST(? AS INTEGER),
+			    CAST(strftime('%H', recorded_at) AS INTEGER),
+			    AVG(cpu_pct), AVG(mem_pct),
+			    AVG(net_in),  AVG(net_out),
+			    AVG(blk_in),  AVG(blk_out),
+			    COUNT(*)
+			FROM service_stats
+			WHERE strftime('%Y', recorded_at) = ? AND strftime('%m', recorded_at) = ?
+			GROUP BY service_id, strftime('%H', recorded_at)
+		`, prevYear, prevMonth,
+			fmt.Sprintf("%04d", prevYear),
+			fmt.Sprintf("%02d", prevMonth)) //nolint
+
+		// Prune raw data older than 31 days.
+		db.Exec(`DELETE FROM service_stats WHERE recorded_at < datetime('now', '-31 days')`) //nolint
+		// Expire stale QR login tokens.
+		db.Exec(`UPDATE qr_login_tokens SET status='expired' WHERE status='pending' AND qr_expires_at < datetime('now')`) //nolint
+		slog.Debug("stats: monthly rollup + prune completed")
+	}
+
 	// Immediate first sample, then every 60 s
 	collect()
 
@@ -771,8 +817,7 @@ func startStatsCollector(db *sql.DB) {
 		case <-sampleTicker.C:
 			collect()
 		case <-pruneTicker.C:
-			db.Exec(`DELETE FROM service_stats WHERE recorded_at < datetime('now', '-7 days')`) //nolint
-			slog.Debug("stats collector: pruned records older than 7 days")
+			rollupAndPrune()
 		}
 	}
 }

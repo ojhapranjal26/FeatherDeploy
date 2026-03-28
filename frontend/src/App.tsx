@@ -3,6 +3,7 @@ import { AppLayout } from '@/components/layout/AppLayout'
 import { ProtectedRoute } from '@/components/ProtectedRoute'
 import { LoginPage } from '@/pages/LoginPage'
 import { InviteAcceptPage } from '@/pages/InviteAcceptPage'
+import { QRLoginPage } from '@/pages/QRLoginPage'
 import { DashboardPage } from '@/pages/DashboardPage'
 import { ProjectPage } from '@/pages/ProjectPage'
 import { ServicePage } from '@/pages/ServicePage'
@@ -22,6 +23,7 @@ export default function App() {
       {/* Public routes */}
       <Route path="/login" element={<LoginPage />} />
       <Route path="/invite/:token" element={<InviteAcceptPage />} />
+      <Route path="/qr-login/:token" element={<QRLoginPage />} />
 
       {/* Protected routes wrapped in AppLayout */}
       <Route element={<ProtectedRoute />}>

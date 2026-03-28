@@ -142,9 +142,41 @@ CREATE TABLE IF NOT EXISTS service_stats (
     recorded_at DATETIME NOT NULL DEFAULT (datetime('now'))
 );
 
+-- 012: service_stats_monthly — hourly rollup per calendar month (one row per service/year/month/hour)
+CREATE TABLE IF NOT EXISTS service_stats_monthly (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    service_id   INTEGER NOT NULL REFERENCES services(id) ON DELETE CASCADE,
+    year         INTEGER NOT NULL,
+    month        INTEGER NOT NULL,   -- 1–12
+    hour         INTEGER NOT NULL,   -- 0–23 UTC
+    cpu_avg      REAL    NOT NULL DEFAULT 0,
+    mem_avg      REAL    NOT NULL DEFAULT 0,
+    net_in_avg   REAL    NOT NULL DEFAULT 0,
+    net_out_avg  REAL    NOT NULL DEFAULT 0,
+    blk_in_avg   REAL    NOT NULL DEFAULT 0,
+    blk_out_avg  REAL    NOT NULL DEFAULT 0,
+    samples      INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(service_id, year, month, hour)
+);
+
+-- 013: qr_login_tokens — short-lived tokens enabling QR-code-based login on another device
+CREATE TABLE IF NOT EXISTS qr_login_tokens (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    token         TEXT    NOT NULL UNIQUE,
+    user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    status        TEXT    NOT NULL DEFAULT 'pending',  -- pending | claimed | expired
+    ttl_minutes   INTEGER NOT NULL DEFAULT 60,          -- session duration after claim (max 60)
+    session_token TEXT    NOT NULL DEFAULT '',          -- JWT issued on claim
+    created_at    DATETIME NOT NULL DEFAULT (datetime('now')),
+    qr_expires_at DATETIME NOT NULL                    -- QR code itself expires after ~5 min
+);
+
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_project_members_user    ON project_members(user_id);
 CREATE INDEX IF NOT EXISTS idx_service_stats_svc_time  ON service_stats(service_id, recorded_at);
+CREATE INDEX IF NOT EXISTS idx_stats_monthly_svc       ON service_stats_monthly(service_id, year, month);
+CREATE INDEX IF NOT EXISTS idx_qr_tokens               ON qr_login_tokens(token);
+CREATE INDEX IF NOT EXISTS idx_qr_user                 ON qr_login_tokens(user_id);
 CREATE INDEX IF NOT EXISTS idx_services_project        ON services(project_id);
 CREATE INDEX IF NOT EXISTS idx_deployments_service     ON deployments(service_id);
 CREATE INDEX IF NOT EXISTS idx_env_variables_service   ON env_variables(service_id);

@@ -144,3 +144,36 @@ export const statsApi = {
       })
       .then((r) => r.data),
 }
+
+// ── Monthly aggregate stats ───────────────────────────────────────────────────
+
+export interface MonthlyHourBucket {
+  hour: number
+  cpu_avg: number
+  mem_avg: number
+  samples: number
+}
+
+export interface MonthlyEntry {
+  year: number
+  month: number
+  label: string
+  hourly: MonthlyHourBucket[]
+}
+
+export interface MonthlyHistoryResponse {
+  months: MonthlyEntry[]
+}
+
+export const monthlyStatsApi = {
+  getMonthly: (
+    projectId: string | number,
+    serviceId: string | number,
+  ): Promise<MonthlyHistoryResponse> =>
+    client
+      .get<MonthlyHistoryResponse>(
+        `/projects/${projectId}/services/${serviceId}/stats/monthly`,
+      )
+      .then((r) => r.data),
+}
+

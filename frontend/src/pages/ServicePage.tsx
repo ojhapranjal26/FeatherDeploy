@@ -6,7 +6,7 @@ import {
   AreaChart, Area, BarChart, Bar, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis, CartesianGrid, ReferenceLine,
 } from 'recharts'
 import { toast } from 'sonner'
-import { servicesApi, statsApi, type DetectionResult, type UpdateServicePayload, type StatsRange, type StatsHistoryResponse } from '@/api/services'
+import { servicesApi, statsApi, monthlyStatsApi, type DetectionResult, type UpdateServicePayload, type StatsRange, type StatsHistoryResponse, type MonthlyHistoryResponse } from '@/api/services'
 import { GitHubRepoSelector, type RepoSelection } from '@/components/GitHubRepoSelector'
 import { useContainerLogs } from '@/hooks/useContainerLogs'
 import { useContainerStatsSSE } from '@/hooks/useContainerStatsSSE'
@@ -1399,14 +1399,21 @@ function ContainerStatsPanel({
   enabled: boolean
 }) {
   const { latest, history: liveHistory, status } = useContainerStatsSSE(projectId, serviceId, enabled)
-  const [mode, setMode] = useState<'live' | 'history'>('live')
+  const [mode, setMode] = useState<'live' | 'history' | 'monthly'>('live')
   const [range, setRange] = useState<StatsRange>('24h')
 
   const { data: histData, isLoading: histLoading } = useQuery<StatsHistoryResponse>({
     queryKey: ['stats-history', projectId, serviceId, range],
     queryFn: () => statsApi.getHistory(projectId!, serviceId!, range),
     enabled: !!projectId && !!serviceId && mode === 'history',
-    refetchInterval: 60_000, // refresh every minute
+    refetchInterval: 60_000,
+  })
+
+  const { data: monthData, isLoading: monthLoading } = useQuery<MonthlyHistoryResponse>({
+    queryKey: ['stats-monthly', projectId, serviceId],
+    queryFn: () => monthlyStatsApi.getMonthly(projectId!, serviceId!),
+    enabled: !!projectId && !!serviceId && mode === 'monthly',
+    refetchInterval: 5 * 60_000,
   })
 
   const cpuData = liveHistory.map(p => ({ t: p.ts, v: Number(p.cpuPct.toFixed(2)) }))
@@ -1445,6 +1452,10 @@ function ContainerStatsPanel({
             className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${mode === 'history' ? 'bg-background shadow-sm text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
             onClick={() => setMode('history')}
           >History</button>
+          <button
+            className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${mode === 'monthly' ? 'bg-background shadow-sm text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
+            onClick={() => setMode('monthly')}
+          >Monthly</button>
         </div>
 
         {mode === 'history' && (
@@ -1778,6 +1789,76 @@ function ContainerStatsPanel({
           )}
         </>
       )}
+
+      {/* ══════════════════════════ MONTHLY MODE ═══════════════════════════ */}
+      {mode === 'monthly' && (
+        <>
+          {monthLoading && (
+            <div className="grid gap-4 sm:grid-cols-2">
+              {[...Array(4)].map((_, i) => (
+                <div key={i} className="h-48 rounded-xl bg-muted animate-pulse" />
+              ))}
+            </div>
+          )}
+
+          {!monthLoading && monthData && monthData.months.length === 0 && (
+            <div className="rounded-lg border border-dashed py-14 text-center text-sm text-muted-foreground">
+              <Activity className="h-8 w-8 mx-auto mb-3 opacity-30" />
+              <p className="font-medium">No monthly data yet</p>
+              <p className="text-xs mt-1 max-w-xs mx-auto">
+                Monthly summaries are created at each month rollover from raw data.
+                Check back after the service has been running for at least one full month.
+              </p>
+            </div>
+          )}
+
+          {!monthLoading && monthData && monthData.months.map((m) => {
+            const peakH = m.hourly.length > 0
+              ? m.hourly.reduce((a, b) => b.cpu_avg > a.cpu_avg ? b : a)
+              : null
+            return (
+              <div key={`${m.year}-${m.month}`} className="rounded-xl border border-border/60 bg-card p-4">
+                <div className="flex items-start justify-between mb-3">
+                  <p className="text-sm font-medium flex items-center gap-2">
+                    <Activity className="h-4 w-4 text-muted-foreground" />
+                    {m.label} — hourly averages
+                  </p>
+                  {peakH && (
+                    <p className="text-xs text-muted-foreground">
+                      Peak hour{' '}
+                      <span className="font-medium text-foreground">{fmtHour(peakH.hour)}</span>
+                      {' '}— {peakH.cpu_avg.toFixed(1)}% CPU avg
+                    </p>
+                  )}
+                </div>
+                <ResponsiveContainer width="100%" height={160}>
+                  <BarChart
+                    data={m.hourly.map(h => ({ hour: fmtHour(h.hour), cpu: h.cpu_avg, mem: h.mem_avg, samples: h.samples }))}
+                    margin={{ top: 4, right: 8, bottom: 0, left: 0 }}
+                    barGap={2}
+                  >
+                    <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" strokeOpacity={0.4} vertical={false} />
+                    <XAxis dataKey="hour" tick={{ fontSize: 9 }} />
+                    <YAxis tickFormatter={v => `${v}%`} tick={{ fontSize: 10 }} width={32} domain={[0, 100]} />
+                    <Tooltip
+                      contentStyle={{ fontSize: 12, borderRadius: 8 }}
+                      formatter={(v: unknown, name) => [`${Number(v).toFixed(1)}%`, name === 'cpu' ? 'Avg CPU' : 'Avg Mem']}
+                      labelFormatter={(l) => `${m.label} — ${l}`}
+                    />
+                    <Legend iconSize={8} wrapperStyle={{ fontSize: 11 }} />
+                    <Bar dataKey="cpu" name="CPU" fill="#6366f1" radius={[2, 2, 0, 0]} maxBarSize={20} isAnimationActive={false} />
+                    <Bar dataKey="mem" name="Memory" fill="#10b981" radius={[2, 2, 0, 0]} maxBarSize={20} isAnimationActive={false} />
+                  </BarChart>
+                </ResponsiveContainer>
+                <p className="text-xs text-muted-foreground mt-2">
+                  {m.hourly.reduce((s, h) => s + h.samples, 0).toLocaleString()} total samples — raw data rolled up at month end then deleted.
+                </p>
+              </div>
+            )
+          })}
+        </>
+      )}
     </div>
   )
 }
+

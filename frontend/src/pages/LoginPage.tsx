@@ -8,7 +8,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { toast } from 'sonner'
-import { Rocket, GitBranch, Globe, Zap, Feather, Github, ArrowRight, Shield, RotateCcw } from 'lucide-react'
+import { Rocket, GitBranch, Globe, Zap, Feather, Github, ArrowRight, Shield, RotateCcw, Smartphone, QrCode } from 'lucide-react'
 import { settingsApi, type Branding } from '@/api/settings'
 
 const schema = z.object({
@@ -30,6 +30,7 @@ export function LoginPage() {
   const { login } = useAuth()
   const navigate = useNavigate()
   const [branding, setBranding] = useState<Branding>({ company_name: '', logo_url: '' })
+  const [loginMode, setLoginMode] = useState<'password' | 'qr'>('password')
 
   useEffect(() => {
     settingsApi.getBranding().then(setBranding).catch(() => {})
@@ -161,45 +162,103 @@ export function LoginPage() {
             <p className="text-sm text-muted-foreground">Sign in to your {platformName} dashboard</p>
           </div>
 
-          {/* Form */}
-          <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
-            <div className="space-y-1.5">
-              <Label htmlFor="email">Email address</Label>
-              <Input
-                id="email"
-                type="email"
-                placeholder="you@company.com"
-                autoComplete="email"
-                className="h-10"
-                {...register('email')}
-              />
-              {errors.email && (
-                <p className="text-xs text-destructive">{errors.email.message}</p>
-              )}
-            </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="password">Password</Label>
-              <Input
-                id="password"
-                type="password"
-                autoComplete="current-password"
-                className="h-10"
-                {...register('password')}
-              />
-              {errors.password && (
-                <p className="text-xs text-destructive">{errors.password.message}</p>
-              )}
-            </div>
-            <Button
-              type="submit"
-              className="h-10 w-full font-medium gap-2 mt-2"
-              disabled={isSubmitting}
+          {/* Mode toggle */}
+          <div className="flex rounded-lg border border-border/60 p-0.5 bg-muted/40">
+            <button
+              type="button"
+              onClick={() => setLoginMode('password')}
+              className={`flex flex-1 items-center justify-center gap-1.5 rounded-md py-2 text-xs font-medium transition-colors ${
+                loginMode === 'password' ? 'bg-background shadow-sm text-foreground' : 'text-muted-foreground hover:text-foreground'
+              }`}
             >
-              {isSubmitting
-                ? 'Signing in…'
-                : <><span>Sign in</span><ArrowRight className="h-4 w-4" /></>}
-            </Button>
-          </form>
+              <Shield className="h-3.5 w-3.5" /> Password
+            </button>
+            <button
+              type="button"
+              onClick={() => setLoginMode('qr')}
+              className={`flex flex-1 items-center justify-center gap-1.5 rounded-md py-2 text-xs font-medium transition-colors ${
+                loginMode === 'qr' ? 'bg-background shadow-sm text-foreground' : 'text-muted-foreground hover:text-foreground'
+              }`}
+            >
+              <QrCode className="h-3.5 w-3.5" /> QR Login
+            </button>
+          </div>
+
+          {/* ── Password form ── */}
+          {loginMode === 'password' && (
+            <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
+              <div className="space-y-1.5">
+                <Label htmlFor="email">Email address</Label>
+                <Input
+                  id="email"
+                  type="email"
+                  placeholder="you@company.com"
+                  autoComplete="email"
+                  className="h-10"
+                  {...register('email')}
+                />
+                {errors.email && (
+                  <p className="text-xs text-destructive">{errors.email.message}</p>
+                )}
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="password">Password</Label>
+                <Input
+                  id="password"
+                  type="password"
+                  autoComplete="current-password"
+                  className="h-10"
+                  {...register('password')}
+                />
+                {errors.password && (
+                  <p className="text-xs text-destructive">{errors.password.message}</p>
+                )}
+              </div>
+              <Button
+                type="submit"
+                className="h-10 w-full font-medium gap-2 mt-2"
+                disabled={isSubmitting}
+              >
+                {isSubmitting
+                  ? 'Signing in…'
+                  : <><span>Sign in</span><ArrowRight className="h-4 w-4" /></>}
+              </Button>
+            </form>
+          )}
+
+          {/* ── QR login instructions ── */}
+          {loginMode === 'qr' && (
+            <div className="rounded-xl border border-border/60 bg-muted/30 p-5 space-y-4">
+              <div className="flex items-start gap-3">
+                <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                  <Smartphone className="h-4 w-4" />
+                </div>
+                <div className="space-y-1">
+                  <p className="text-sm font-medium">Scan QR from a trusted device</p>
+                  <p className="text-xs text-muted-foreground leading-relaxed">
+                    Log into your {platformName} dashboard on a trusted device, click the
+                    <span className="font-medium text-foreground"> smartphone icon</span> next to your name in the sidebar,
+                    and scan the QR code with this device's camera.
+                  </p>
+                </div>
+              </div>
+
+              <ol className="space-y-2 text-xs text-muted-foreground">
+                {[
+                  'Open ' + platformName + ' on a trusted device',
+                  'Click the smartphone icon (Login on another device)',
+                  'Choose a session duration (up to 1 hour)',
+                  'Scan the QR code with this device',
+                  'Tap Authorize Login',
+                ].map((step, i) => (
+                  <li key={i} className="flex items-start gap-2">
+                    <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-primary/15 text-primary text-[10px] font-bold">{i + 1}</span>
+                    {step}
+                  </li>
+                ))}
+              </ol>
+            </div>
+          )}
 
           {/* Divider */}
           <div className="relative">
