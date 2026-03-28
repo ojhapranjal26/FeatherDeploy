@@ -103,12 +103,19 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token, err := auth.IssueToken(h.jwtSecret, user.ID, user.Email, user.Role, h.tokenTTL)
+	token, sessionID, err := auth.IssueToken(h.jwtSecret, user.ID, user.Email, user.Role, h.tokenTTL)
 	if err != nil {
 		slog.Error("issue token", "err", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
+
+	// Record the session for device management
+	expiresAt := time.Now().UTC().Add(h.tokenTTL).Format("2006-01-02 15:04:05")
+	h.db.ExecContext(r.Context(), //nolint
+		`INSERT INTO user_sessions (id, user_id, user_agent, ip_address, expires_at)
+		 VALUES (?, ?, ?, ?, ?)`,
+		sessionID, user.ID, r.UserAgent(), ip, expiresAt)
 
 	writeJSON(w, http.StatusOK, model.TokenResponse{Token: token, User: user})
 }
@@ -130,6 +137,16 @@ func (h *AuthHandler) Me(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, user)
+}
+
+// POST /api/auth/logout
+func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
+	claims := middleware.GetClaims(r.Context())
+	if claims != nil && claims.ID != "" {
+		h.db.ExecContext(r.Context(), //nolint
+			`UPDATE user_sessions SET revoked=1 WHERE id=?`, claims.ID)
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 // ─────── helpers ─────────────────────────────────────────────────────────────

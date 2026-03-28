@@ -21,7 +21,9 @@ const (
 
 // Authenticate extracts and validates the Bearer JWT.
 // For SSE/EventSource clients that cannot set headers, also accepts a ?token= query param.
-func Authenticate(secret string) func(http.Handler) http.Handler {
+// If db is non-nil and the token carries a jti (session ID), the session is checked
+// against the user_sessions table to support revocation (device logout).
+func Authenticate(secret string, db *sql.DB) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			var token string
@@ -40,6 +42,25 @@ func Authenticate(secret string) func(http.Handler) http.Handler {
 			if err != nil {
 				writeErr(w, http.StatusUnauthorized, "invalid or expired token")
 				return
+			}
+			// If the token carries a session ID (jti), verify it has not been revoked.
+			// Tokens issued before session tracking was added have no ID and are let through.
+			if db != nil && claims.ID != "" {
+				var revoked int
+				err := db.QueryRowContext(r.Context(),
+					`SELECT revoked FROM user_sessions WHERE id=?`, claims.ID,
+				).Scan(&revoked)
+				if err == sql.ErrNoRows || revoked == 1 {
+					writeErr(w, http.StatusUnauthorized, "session revoked or not found")
+					return
+				}
+				if err != nil {
+					writeErr(w, http.StatusInternalServerError, "internal error")
+					return
+				}
+				// Update last_seen asynchronously so it doesn't add request latency
+				go db.ExecContext(context.Background(), //nolint
+					`UPDATE user_sessions SET last_seen=datetime('now') WHERE id=?`, claims.ID)
 			}
 			ctx := context.WithValue(r.Context(), ctxClaims, claims)
 			next.ServeHTTP(w, r.WithContext(ctx))

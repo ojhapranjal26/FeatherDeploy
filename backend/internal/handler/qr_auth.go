@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"log/slog"
+	"net"
 	"net/http"
 	"time"
 
@@ -178,11 +179,22 @@ func (h *QRAuthHandler) Approve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sessionJWT, err := auth.IssueToken(h.jwtSecret, user.ID, user.Email, user.Role, qrSessionTTL)
+	sessionJWT, sessionID, err := auth.IssueToken(h.jwtSecret, user.ID, user.Email, user.Role, qrSessionTTL)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, errMap("could not issue session"))
 		return
 	}
+
+	// Record the session for device management
+	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+	if ip == "" {
+		ip = r.RemoteAddr
+	}
+	expiresAt := time.Now().UTC().Add(qrSessionTTL).Format("2006-01-02 15:04:05")
+	h.db.ExecContext(r.Context(), //nolint
+		`INSERT INTO user_sessions (id, user_id, user_agent, ip_address, expires_at)
+		 VALUES (?, ?, ?, ?, ?)`,
+		sessionID, user.ID, r.UserAgent(), ip, expiresAt)
 
 	if _, err = h.db.ExecContext(r.Context(),
 		`UPDATE qr_login_tokens SET status='approved', user_id=?, session_token=? WHERE token=?`,

@@ -16,6 +16,7 @@ import { AdminSettingsPage } from '@/pages/AdminSettingsPage'
 import { GitHubSettingsPage } from '@/pages/GitHubSettingsPage'
 import { NodesPage } from '@/pages/NodesPage'
 import { ProjectsListPage } from '@/pages/ProjectsListPage'
+import { DevicesPage } from '@/pages/DevicesPage'
 
 export default function App() {
   return (
@@ -31,6 +32,7 @@ export default function App() {
         <Route element={<AppLayout />}>
           <Route index element={<Navigate to="/dashboard" replace />} />
           <Route path="dashboard" element={<DashboardPage />} />
+          <Route path="devices" element={<DevicesPage />} />
           <Route path="projects" element={<ProjectsListPage />} />
 
           <Route path="projects/:projectId" element={<ProjectPage />} />

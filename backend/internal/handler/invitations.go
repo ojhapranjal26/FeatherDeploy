@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"time"
 
@@ -281,11 +282,22 @@ func (h *InvitationHandler) Accept(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Issue JWT and return user
-	tokenStr, err := auth.IssueToken(h.jwtSecret, userID, email, role, h.jwtTTL)
+	tokenStr, sessionID, err := auth.IssueToken(h.jwtSecret, userID, email, role, h.jwtTTL)
 	if err != nil {
 		http.Error(w, `{"error":"failed to issue token"}`, http.StatusInternalServerError)
 		return
 	}
+
+	// Record the session for device management
+	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+	if ip == "" {
+		ip = r.RemoteAddr
+	}
+	sessExpiresAt := time.Now().UTC().Add(h.jwtTTL).Format("2006-01-02 15:04:05")
+	h.db.ExecContext(r.Context(), //nolint
+		`INSERT INTO user_sessions (id, user_id, user_agent, ip_address, expires_at)
+		 VALUES (?, ?, ?, ?, ?)`,
+		sessionID, userID, r.UserAgent(), ip, sessExpiresAt)
 
 	user := model.User{ID: userID, Email: email, Name: req.Name, Role: role, CreatedAt: time.Now().UTC()}
 	w.Header().Set("Content-Type", "application/json")

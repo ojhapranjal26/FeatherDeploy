@@ -174,8 +174,21 @@ CREATE TABLE IF NOT EXISTS qr_login_tokens (
     qr_expires_at DATETIME NOT NULL                    -- QR code itself expires after ~5 min
 );
 
+-- 014: user_sessions — tracks active JWT sessions for device management
+CREATE TABLE IF NOT EXISTS user_sessions (
+    id          TEXT     PRIMARY KEY,  -- random hex = jti embedded in JWT
+    user_id     INTEGER  NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    user_agent  TEXT     NOT NULL DEFAULT '',
+    ip_address  TEXT     NOT NULL DEFAULT '',
+    created_at  DATETIME NOT NULL DEFAULT (datetime('now')),
+    expires_at  DATETIME NOT NULL,
+    last_seen   DATETIME NOT NULL DEFAULT (datetime('now')),
+    revoked     INTEGER  NOT NULL DEFAULT 0
+);
+
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_project_members_user    ON project_members(user_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_user           ON user_sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_service_stats_svc_time  ON service_stats(service_id, recorded_at);
 CREATE INDEX IF NOT EXISTS idx_stats_monthly_svc       ON service_stats_monthly(service_id, year, month);
 CREATE INDEX IF NOT EXISTS idx_qr_tokens               ON qr_login_tokens(token);

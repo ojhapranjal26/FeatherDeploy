@@ -33,6 +33,17 @@ export interface QRPollResponse {
   user?: User          // present when status === 'approved'
 }
 
+// ── Session / device types ────────────────────────────────────────────────────
+
+export interface Session {
+  id: string
+  user_agent: string
+  ip_address: string
+  created_at: string
+  last_seen: string
+  is_current: boolean
+}
+
 export const authApi = {
   login: async (data: LoginPayload): Promise<AuthResponse> => {
     const res = await client.post<AuthResponse>('/auth/login', data)
@@ -41,6 +52,11 @@ export const authApi = {
   },
 
   logout: async (): Promise<void> => {
+    try {
+      await client.post('/auth/logout')
+    } catch {
+      // best-effort — always clear the local token
+    }
     localStorage.removeItem('token')
   },
 
@@ -60,5 +76,19 @@ export const qrApi = {
   /** POST /api/auth/qr/{token}/approve — authenticated, approving device calls this */
   approve: (token: string): Promise<{ status: string }> =>
     client.post<{ status: string }>(`/auth/qr/${token}/approve`).then((r) => r.data),
+}
+
+export const sessionsApi = {
+  /** GET /api/auth/sessions — list active sessions for the current user */
+  list: (): Promise<Session[]> =>
+    client.get<Session[]>('/auth/sessions').then((r) => r.data),
+
+  /** DELETE /api/auth/sessions/{id} — revoke a specific session */
+  revoke: (id: string): Promise<void> =>
+    client.delete(`/auth/sessions/${id}`).then(() => undefined),
+
+  /** DELETE /api/auth/sessions/others — revoke all sessions except current */
+  revokeOthers: (): Promise<void> =>
+    client.delete('/auth/sessions/others').then(() => undefined),
 }
 

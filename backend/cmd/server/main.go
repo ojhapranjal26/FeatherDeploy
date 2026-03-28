@@ -206,6 +206,8 @@ func serve() {
 	qrH := handler.NewQRAuthHandler(db, *jwtSecret)
 	systemH := handler.NewSystemHandler()
 
+	sessionsH := handler.NewSessionsHandler(db)
+
 	// ─── Router ──────────────────────────────────────────────────────────────
 	r := chi.NewRouter()
 
@@ -259,11 +261,17 @@ func serve() {
 	// SSE streaming routes are registered in a separate group below WITHOUT this
 	// timeout so long-running builds don't get killed at 30s.
 	r.Group(func(r chi.Router) {
-		r.Use(mw.Authenticate(*jwtSecret))
+		r.Use(mw.Authenticate(*jwtSecret, db))
 		r.Use(chiMiddleware.Timeout(30 * time.Second))
 
 		// Self
 		r.Get("/api/auth/me", authH.Me)
+		r.Post("/api/auth/logout", authH.Logout)
+
+		// Sessions / device management
+		r.Get("/api/auth/sessions", sessionsH.List)
+		r.Delete("/api/auth/sessions/others", sessionsH.RevokeOthers)
+		r.Delete("/api/auth/sessions/{sessionID}", sessionsH.Revoke)
 
 		// ── System / version check (any authenticated user can query) ─────
 		r.Get("/api/system/version", systemH.VersionCheck)
@@ -431,7 +439,7 @@ func serve() {
 	// request context at 30s terminates the SSE stream and causes Caddy to return
 	// a 502 to the browser.
 	r.Group(func(r chi.Router) {
-		r.Use(mw.Authenticate(*jwtSecret))
+		r.Use(mw.Authenticate(*jwtSecret, db))
 		// Global node stats stream
 		r.Get("/api/stats/stream", statsH.Stream)
 		// Per-service SSE streams (require at least editor project access)
