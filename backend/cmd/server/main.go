@@ -186,6 +186,7 @@ func serve() {
 	userH := handler.NewUserHandler(db)
 	projH := handler.NewProjectHandler(db)
 	svcH := handler.NewServiceHandler(db)
+	dbH := handler.NewDatabaseHandler(db, *jwtSecret)
 	depH := handler.NewDeploymentHandler(db, *jwtSecret)
 	envH := handler.NewEnvHandler(db, *jwtSecret)
 	domainH := handler.NewDomainHandler(db)
@@ -419,6 +420,15 @@ func serve() {
 				// ── Historical stats ──────────────────────────────────────
 				r.Get("/api/projects/{projectID}/services/{serviceID}/stats/history", statsHistH.History)
 				r.Get("/api/projects/{projectID}/services/{serviceID}/stats/monthly", statsHistH.MonthlyHistory)
+
+				// ── Databases ────────────────────────────────────────────
+				r.Get("/api/projects/{projectID}/databases", dbH.List)
+				r.Post("/api/projects/{projectID}/databases", dbH.Create)
+				r.Get("/api/projects/{projectID}/databases/{databaseID}", dbH.Get)
+				r.Get("/api/projects/{projectID}/databases/{databaseID}/backup", dbH.Backup)
+				r.Delete("/api/projects/{projectID}/databases/{databaseID}", dbH.Delete)
+				r.Post("/api/projects/{projectID}/databases/{databaseID}/start", dbH.Start)
+				r.Post("/api/projects/{projectID}/databases/{databaseID}/stop", dbH.Stop)
 
 				// ── QR approve (authenticated) ────────────────────────────
 				r.Post("/api/auth/qr/{token}/approve", qrH.Approve)

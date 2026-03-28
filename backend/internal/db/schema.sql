@@ -287,3 +287,28 @@ CREATE TABLE IF NOT EXISTS app_settings (
     enc_value   TEXT     NOT NULL DEFAULT '',
     updated_at  DATETIME NOT NULL DEFAULT (datetime('now'))
 );
+
+-- 018: databases — managed databases per project
+-- Postgres and MySQL run as named podman containers (fd-db-{id}) on the
+-- project's isolated network (fd-proj-{project_id}). SQLite is provided as a
+-- managed volume mounted into sibling service containers.
+CREATE TABLE IF NOT EXISTS databases (
+    id              INTEGER  PRIMARY KEY AUTOINCREMENT,
+    project_id      INTEGER  NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    name            TEXT     NOT NULL,
+    db_type         TEXT     NOT NULL DEFAULT 'postgres'
+                             CHECK(db_type IN ('postgres','mysql','sqlite')),
+    db_version      TEXT     NOT NULL DEFAULT 'latest',
+    db_name         TEXT     NOT NULL DEFAULT '',
+    db_user         TEXT     NOT NULL DEFAULT '',
+    db_password     TEXT     NOT NULL DEFAULT '',   -- AES-256-GCM encrypted, fdenc: prefix
+    host_port       INTEGER  DEFAULT NULL,          -- non-NULL only for public databases
+    status          TEXT     NOT NULL DEFAULT 'stopped'
+                             CHECK(status IN ('stopped','starting','running','error')),
+    container_id    TEXT     NOT NULL DEFAULT '',
+    network_public  INTEGER  NOT NULL DEFAULT 0 CHECK(network_public IN (0,1)),
+    created_at      DATETIME NOT NULL DEFAULT (datetime('now')),
+    updated_at      DATETIME NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(project_id, name)
+);
+CREATE INDEX IF NOT EXISTS idx_databases_project ON databases(project_id);

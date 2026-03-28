@@ -164,14 +164,15 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 	}()
 
 	// ── 1. Fetch service config ───────────────────────────────────────────────
-	var repoURL, repoBranch, repoFolder, framework, buildCmd, startCmd string
+	var repoURL, repoBranch, repoFolder, framework, buildCmd, startCmd, svcName string
+	var projectID int64
 	var appPort int
 	var hostPortNull sql.NullInt64
 	err := db.QueryRow(
-		`SELECT repo_url, repo_branch, repo_folder, framework, build_command, start_command,
+		`SELECT project_id, name, repo_url, repo_branch, repo_folder, framework, build_command, start_command,
 		        app_port, host_port
 		 FROM services WHERE id=?`, svcID,
-	).Scan(&repoURL, &repoBranch, &repoFolder, &framework, &buildCmd, &startCmd,
+	).Scan(&projectID, &svcName, &repoURL, &repoBranch, &repoFolder, &framework, &buildCmd, &startCmd,
 		&appPort, &hostPortNull)
 	if err != nil {
 		log.add("ERROR: could not load service config: %v", err)
@@ -344,7 +345,7 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 	// This allows frameworks that read .env at build time (Next.js, Vite, etc.)
 	// to access DATABASE_URL and other vars during `npm run build` / `tsc`.
 	// The .env file is included via COPY . . in the Dockerfile.
-	if writeErr := writeEnvFileForBuild(db, svcID, jwtSecret, workDir); writeErr != nil {
+	if writeErr := writeEnvFileForBuild(db, svcID, projectID, jwtSecret, workDir); writeErr != nil {
 		log.add("[env] warning: could not write .env for build: %v", writeErr)
 	} else {
 		log.add("[env] injected env vars into build context")
@@ -384,6 +385,18 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 
 	// ── 8. Collect env vars ───────────────────────────────────────────────────
 	envArgs := collectEnvArgs(db, svcID, jwtSecret)
+	// Auto-inject connection URLs for running databases in the same project.
+	envArgs = append(envArgs, collectProjectDBEnvArgs(db, projectID, jwtSecret)...)
+	mountArgs := collectProjectDBMountArgs(db, projectID)
+
+	// ── 8b. Ensure the per-project podman network exists ──────────────────────
+	// All containers in the same project share this network so they can reach
+	// each other by container-name alias (e.g. http://myapi:3000).
+	networkName := fmt.Sprintf("fd-proj-%d", projectID)
+	if netErr := ensureProjectNetwork(projectID); netErr != nil {
+		log.add("[network] WARNING: could not create project network %s: %v", networkName, netErr)
+		networkName = ""
+	}
 
 	// ── 9. Run new container ──────────────────────────────────────────────────
 	runArgs := []string{
@@ -395,10 +408,16 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 		"--log-opt", "max-size=10m",
 		"--log-opt", "max-file=3",
 	}
+	if networkName != "" {
+		// Join the project network; the service is reachable by its name alias
+		// from other containers in the same project.
+		runArgs = append(runArgs, "--network", networkName, "--network-alias", svcName)
+	}
+	runArgs = append(runArgs, mountArgs...)
 	runArgs = append(runArgs, envArgs...)
 	runArgs = append(runArgs, imageName)
 
-	log.add("[podman] podman run -d --name %s -p %d:%d %s", cName, hostPort, appPort, imageName)
+	log.add("[podman] podman run -d --name %s -p %d:%d --network %s %s", cName, hostPort, appPort, networkName, imageName)
 	out, err := podmanCmd(runArgs...).CombinedOutput()
 	if err != nil {
 		log.add("ERROR: podman run failed: %v\n%s", err, strings.TrimSpace(string(out)))
@@ -978,6 +997,444 @@ func looksLikeNpmInstall(cmd string) bool {
 		strings.HasPrefix(c, "yarn install") || strings.HasPrefix(c, "pnpm install")
 }
 
+// ─── Per-project network helpers ─────────────────────────────────────────────
+
+// ensureProjectNetwork creates the per-project podman bridge network if it
+// does not already exist. The --ignore flag makes podman exit 0 when the
+// network already exists, so calling this before every deployment is idempotent.
+func ensureProjectNetwork(projectID int64) error {
+	name := fmt.Sprintf("fd-proj-%d", projectID)
+	out, err := podmanCmd("network", "create", "--ignore", name).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("podman network create %s: %v — %s", name, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// DBNetworkAlias converts a database or service name (slug) into a valid
+// container network alias (lowercase alphanum + hyphens).
+func DBNetworkAlias(name string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(name) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+			b.WriteRune(r)
+		} else {
+			b.WriteRune('-')
+		}
+	}
+	return b.String()
+}
+
+// DBEnvKey converts a name to the environment-variable key suffix.
+// e.g. "my-db" → "MY_DB" (used as prefix for the auto-injected _URL var).
+func DBEnvKey(name string) string {
+	var b strings.Builder
+	for _, r := range strings.ToUpper(name) {
+		if (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		} else {
+			b.WriteRune('_')
+		}
+	}
+	return b.String()
+}
+
+// DBConnectionURL builds the internal connection URL for a database using the
+// container alias as hostname (valid within the project podman network).
+func DBConnectionURL(dbType, dbName, dbUser, clearPassword, alias string) string {
+	esc := urlEscapeCredential
+	switch dbType {
+	case "postgres":
+		return fmt.Sprintf("postgresql://%s:%s@%s:5432/%s",
+			esc(dbUser), esc(clearPassword), alias, dbName)
+	case "mysql":
+		return fmt.Sprintf("mysql://%s:%s@%s:3306/%s",
+			esc(dbUser), esc(clearPassword), alias, dbName)
+	case "sqlite":
+		return fmt.Sprintf("sqlite:///%s", strings.TrimPrefix(filepath.Join(sqliteMountTarget(alias), sqliteDatabaseFilename(dbName)), "/"))
+	}
+	return ""
+}
+
+// DBPublicConnectionURL builds the external connection URL using the host's
+// port binding (valid from outside the project network).
+func DBPublicConnectionURL(dbType, dbName, dbUser, clearPassword string, hostPort int) string {
+	esc := urlEscapeCredential
+	switch dbType {
+	case "postgres":
+		return fmt.Sprintf("postgresql://%s:%s@HOST:%d/%s",
+			esc(dbUser), esc(clearPassword), hostPort, dbName)
+	case "mysql":
+		return fmt.Sprintf("mysql://%s:%s@HOST:%d/%s",
+			esc(dbUser), esc(clearPassword), hostPort, dbName)
+	}
+	return ""
+}
+
+func sqliteMountTarget(name string) string {
+	return filepath.ToSlash(filepath.Join("/var/lib/featherdeploy/sqlite", DBNetworkAlias(name)))
+}
+
+func sqliteDatabaseFilename(dbName string) string {
+	lowerName := strings.ToLower(dbName)
+	if strings.HasSuffix(lowerName, ".sqlite") || strings.HasSuffix(lowerName, ".db") {
+		return dbName
+	}
+	return dbName + ".sqlite"
+}
+
+func dbVolumeName(dbID int64) string {
+	return fmt.Sprintf("fd-db-%d-data", dbID)
+}
+
+func urlEscapeCredential(s string) string {
+	return strings.NewReplacer(
+		":", "%3A", "@", "%40", "/", "%2F",
+		"?", "%3F", "#", "%23",
+	).Replace(s)
+}
+
+// collectProjectDBEnvArgs queries all running databases in the same project
+// and returns ["-e", "MYDB_URL=...", ...] args for podman run.
+// This auto-injects connection URLs into sibling service containers.
+func collectProjectDBEnvArgs(db *sql.DB, projectID int64, jwtSecret string) []string {
+	rows, err := db.Query(
+		`SELECT id, name, db_type, db_name, db_user, db_password
+		 FROM databases WHERE project_id=? AND status='running'`, projectID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var args []string
+	for rows.Next() {
+		var dbID int64
+		var name, dbType, dbName, dbUser, encPass string
+		if rows.Scan(&dbID, &name, &dbType, &dbName, &dbUser, &encPass) != nil {
+			continue
+		}
+		clearPass := encPass
+		if strings.HasPrefix(encPass, "fdenc:") {
+			if p, decErr := appCrypto.Decrypt(encPass[len("fdenc:"):], jwtSecret); decErr == nil {
+				clearPass = p
+			}
+		}
+		alias := DBNetworkAlias(name)
+		_ = dbID
+		connURL := DBConnectionURL(dbType, dbName, dbUser, clearPass, alias)
+		if connURL == "" {
+			continue
+		}
+		envKey := DBEnvKey(name) + "_URL"
+		args = append(args, "-e", envKey+"="+connURL)
+	}
+	return args
+}
+
+func collectProjectDBMountArgs(db *sql.DB, projectID int64) []string {
+	rows, err := db.Query(
+		`SELECT id, name, db_type
+		 FROM databases WHERE project_id=? AND status='running'`, projectID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var args []string
+	for rows.Next() {
+		var dbID int64
+		var name, dbType string
+		if rows.Scan(&dbID, &name, &dbType) != nil {
+			continue
+		}
+		if dbType != "sqlite" {
+			continue
+		}
+		args = append(args, "-v", dbVolumeName(dbID)+":"+sqliteMountTarget(name))
+	}
+	return args
+}
+
+// ─── Database container management ───────────────────────────────────────────
+
+// StartDatabase pulls the database image and starts the container in the
+// project's network. Safe to call for both new and stopped databases.
+func StartDatabase(db *sql.DB, jwtSecret string, dbID int64) error {
+	var projectID int64
+	var name, dbType, dbVersion, dbName, dbUser, encPass string
+	var hostPortNull sql.NullInt64
+	var networkPublic int
+	err := db.QueryRow(
+		`SELECT project_id, name, db_type, db_version, db_name, db_user, db_password,
+		        host_port, network_public
+		 FROM databases WHERE id=?`, dbID,
+	).Scan(&projectID, &name, &dbType, &dbVersion, &dbName, &dbUser, &encPass,
+		&hostPortNull, &networkPublic)
+	if err != nil {
+		return fmt.Errorf("load database config: %w", err)
+	}
+
+	clearPass := encPass
+	if strings.HasPrefix(encPass, "fdenc:") {
+		if p, decErr := appCrypto.Decrypt(encPass[len("fdenc:"):], jwtSecret); decErr == nil {
+			clearPass = p
+		}
+	}
+	if dbType == "sqlite" {
+		if err := ensureDatabaseVolume(dbID); err != nil {
+			db.Exec(`UPDATE databases SET status='error', updated_at=datetime('now') WHERE id=?`, dbID) //nolint
+			return err
+		}
+		db.Exec( //nolint
+			`UPDATE databases SET status='running', container_id='', host_port=NULL, updated_at=datetime('now') WHERE id=?`,
+			dbID)
+		return nil
+	}
+
+	// Ensure the project network exists.
+	if netErr := ensureProjectNetwork(projectID); netErr != nil {
+		slog.Warn("start database: ensure project network", "err", netErr)
+	}
+
+	cName := fmt.Sprintf("fd-db-%d", dbID)
+	networkName := fmt.Sprintf("fd-proj-%d", projectID)
+	alias := DBNetworkAlias(name)
+	image := dbImageName(dbType, dbVersion)
+
+	db.Exec(`UPDATE databases SET status='starting', updated_at=datetime('now') WHERE id=?`, dbID) //nolint
+
+	// Pull the image only when it is missing locally to avoid re-downloading a
+	// cached database image on every start.
+	if image != "" && !podmanImageExists(image) {
+		slog.Info("pulling database image", "db_id", dbID, "image", image)
+		if out, pullErr := podmanCmd("pull", image).CombinedOutput(); pullErr != nil {
+			db.Exec(`UPDATE databases SET status='error', updated_at=datetime('now') WHERE id=?`, dbID) //nolint
+			return fmt.Errorf("pull database image %s: %v — %s", image, pullErr, strings.TrimSpace(string(out)))
+		}
+	}
+
+	// Stop/remove any existing container from a previous start.
+	if containerExists(cName) {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		podmanCmdCtx(stopCtx, "stop", "--time", "10", cName).Run() //nolint
+		cancel()
+		podmanCmd("rm", "-f", cName).Run() //nolint
+	}
+
+	// Auto-assign host port for public databases.
+	hostPort := int(hostPortNull.Int64)
+	if networkPublic == 1 && hostPort <= 0 {
+		hostPort = 15000 + int(dbID)
+		db.Exec(`UPDATE databases SET host_port=? WHERE id=?`, hostPort, dbID) //nolint
+	}
+
+	// Persist data in a named volume so it survives container re-creation.
+	volumeName := dbVolumeName(dbID)
+	if err := ensureDatabaseVolume(dbID); err != nil {
+		db.Exec(`UPDATE databases SET status='error', updated_at=datetime('now') WHERE id=?`, dbID) //nolint
+		return err
+	}
+	mountPath := dbDataMountPath(dbType)
+
+	runArgs := []string{
+		"run", "-d",
+		"--name", cName,
+		"--restart", "unless-stopped",
+		"--network", networkName,
+		"--network-alias", alias,
+		"--log-opt", "max-size=10m",
+		"--log-opt", "max-file=3",
+		"-v", volumeName + ":" + mountPath,
+	}
+	// Public databases are additionally bound to a host port for external access.
+	if networkPublic == 1 && hostPort > 0 {
+		internalPort := dbInternalPort(dbType)
+		runArgs = append(runArgs, "-p", fmt.Sprintf("%d:%d", hostPort, internalPort))
+	}
+	// Inject the DB engine's environment variables (credentials, database name).
+	runArgs = append(runArgs, dbContainerEnvArgs(dbType, dbName, dbUser, clearPass)...)
+	runArgs = append(runArgs, image)
+
+	out, err := podmanCmd(runArgs...).CombinedOutput()
+	if err != nil {
+		db.Exec(`UPDATE databases SET status='error', updated_at=datetime('now') WHERE id=?`, dbID) //nolint
+		return fmt.Errorf("podman run database %s: %v — %s", cName, err, strings.TrimSpace(string(out)))
+	}
+	containerID := strings.TrimSpace(string(out))
+	db.Exec( //nolint
+		`UPDATE databases SET status='running', container_id=?, updated_at=datetime('now') WHERE id=?`,
+		containerID, dbID)
+	slog.Info("database container started", "db_id", dbID, "container", cName)
+	return nil
+}
+
+// StopDatabase stops and removes the database container without deleting the
+// data volume, so it can be restarted later with all data intact.
+func StopDatabase(db *sql.DB, dbID int64) error {
+	var dbType string
+	if err := db.QueryRow(`SELECT db_type FROM databases WHERE id=?`, dbID).Scan(&dbType); err != nil && err != sql.ErrNoRows {
+		return fmt.Errorf("load database type: %w", err)
+	}
+	if dbType == "sqlite" {
+		db.Exec( //nolint
+			`UPDATE databases SET status='stopped', container_id='', host_port=NULL, updated_at=datetime('now') WHERE id=?`, dbID)
+		slog.Info("sqlite database marked stopped", "db_id", dbID)
+		return nil
+	}
+	cName := fmt.Sprintf("fd-db-%d", dbID)
+	if containerExists(cName) {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		podmanCmdCtx(stopCtx, "stop", "--time", "10", cName).Run() //nolint
+		cancel()
+		podmanCmd("rm", "-f", cName).Run() //nolint
+	}
+	db.Exec( //nolint
+		`UPDATE databases SET status='stopped', container_id='', updated_at=datetime('now') WHERE id=?`, dbID)
+	slog.Info("database container stopped", "db_id", dbID)
+	return nil
+}
+
+func DeleteDatabase(db *sql.DB, dbID int64, purgeData bool) error {
+	if err := StopDatabase(db, dbID); err != nil {
+		return err
+	}
+	if !purgeData {
+		return nil
+	}
+	if err := deleteDatabaseVolume(dbID); err != nil {
+		return err
+	}
+	return nil
+}
+
+func CreateDatabaseBackup(db *sql.DB, jwtSecret string, dbID int64) (string, string, error) {
+	var name, dbType, status string
+	err := db.QueryRow(
+		`SELECT name, db_type, status FROM databases WHERE id=?`, dbID,
+	).Scan(&name, &dbType, &status)
+	if err != nil {
+		return "", "", fmt.Errorf("load database backup metadata: %w", err)
+	}
+
+	wasRunning := status == "running" && dbType != "sqlite"
+	if wasRunning {
+		if err := StopDatabase(db, dbID); err != nil {
+			return "", "", err
+		}
+	}
+
+	tmpFile, err := os.CreateTemp("", fmt.Sprintf("fd-db-%d-*.tar", dbID))
+	if err != nil {
+		if wasRunning {
+			_ = StartDatabase(db, jwtSecret, dbID)
+		}
+		return "", "", fmt.Errorf("create temp backup file: %w", err)
+	}
+	defer tmpFile.Close()
+
+	cmd := podmanCmd("volume", "export", dbVolumeName(dbID))
+	cmd.Stdout = tmpFile
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		os.Remove(tmpFile.Name()) //nolint
+		if wasRunning {
+			_ = StartDatabase(db, jwtSecret, dbID)
+		}
+		return "", "", fmt.Errorf("export database volume: %v — %s", err, strings.TrimSpace(stderr.String()))
+	}
+
+	if wasRunning {
+		if err := StartDatabase(db, jwtSecret, dbID); err != nil {
+			os.Remove(tmpFile.Name()) //nolint
+			return "", "", fmt.Errorf("restart database after backup: %w", err)
+		}
+	}
+
+	downloadName := fmt.Sprintf("%s-%s-backup-%s.tar",
+		DBNetworkAlias(name), dbType, time.Now().UTC().Format("20060102-150405"))
+	return tmpFile.Name(), downloadName, nil
+}
+
+// dbImageName returns the full image reference for a database type + version tag.
+func dbImageName(dbType, version string) string {
+	if version == "" || version == "latest" {
+		version = "latest"
+	}
+	switch dbType {
+	case "postgres":
+		return "postgres:" + version
+	case "mysql":
+		return "mysql:" + version
+	case "sqlite":
+		return ""
+	default:
+		return ""
+	}
+}
+
+// dbInternalPort returns the default listening port for a database type.
+func dbInternalPort(dbType string) int {
+	switch dbType {
+	case "postgres":
+		return 5432
+	case "mysql":
+		return 3306
+	default:
+		return 5432
+	}
+}
+
+// dbDataMountPath returns the internal data directory for persistent volume mounts.
+func dbDataMountPath(dbType string) string {
+	switch dbType {
+	case "postgres":
+		return "/var/lib/postgresql/data"
+	case "mysql":
+		return "/var/lib/mysql"
+	case "sqlite":
+		return "/data"
+	default:
+		return "/data"
+	}
+}
+
+// dbContainerEnvArgs returns -e KEY=VALUE pairs for the DB engine container.
+// Redis credentials are handled via a command override, not env vars.
+func dbContainerEnvArgs(dbType, dbName, dbUser, clearPass string) []string {
+	switch dbType {
+	case "postgres":
+		return []string{
+			"-e", "POSTGRES_DB=" + dbName,
+			"-e", "POSTGRES_USER=" + dbUser,
+			"-e", "POSTGRES_PASSWORD=" + clearPass,
+		}
+	case "mysql":
+		return []string{
+			"-e", "MYSQL_DATABASE=" + dbName,
+			"-e", "MYSQL_USER=" + dbUser,
+			"-e", "MYSQL_PASSWORD=" + clearPass,
+			"-e", "MYSQL_ROOT_PASSWORD=" + clearPass,
+		}
+	default:
+		return nil
+	}
+}
+
+func ensureDatabaseVolume(dbID int64) error {
+	out, err := podmanCmd("volume", "create", "--ignore", dbVolumeName(dbID)).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("create database volume %s: %v — %s", dbVolumeName(dbID), err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+func deleteDatabaseVolume(dbID int64) error {
+	out, err := podmanCmd("volume", "rm", "-f", dbVolumeName(dbID)).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("remove database volume %s: %v — %s", dbVolumeName(dbID), err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
 // podmanCmd creates a rootless podman command run as the featherdeploy service
 // user. The service user has /etc/subuid + /etc/subgid entries and the systemd
 // unit provides HOME + XDG_RUNTIME_DIR so rootless podman has a valid user
@@ -1087,12 +1544,12 @@ func pickBaseImage(framework string) string {
 	}
 }
 
-// writeEnvFileForBuild writes service env vars to .env and .env.local in
-// workDir so that frameworks which read env vars at build time (Next.js,
-// Vite, Create React App, etc.) can access them during `npm run build`.
-// Secret values are decrypted before writing.
+// writeEnvFileForBuild writes service env vars (and project DB connection URLs)
+// to .env and .env.local in workDir so that frameworks which read env vars at
+// build time (Next.js, Vite, Create React App, etc.) can access them during
+// `npm run build`. Secret values are decrypted before writing.
 // Both .env and .env.local are written so Next.js and other tools pick them up.
-func writeEnvFileForBuild(db *sql.DB, svcID int64, jwtSecret, workDir string) error {
+func writeEnvFileForBuild(db *sql.DB, svcID, projectID int64, jwtSecret, workDir string) error {
 	rows, err := db.Query(
 		`SELECT key, value, is_secret FROM env_variables WHERE service_id=?`, svcID)
 	if err != nil {
@@ -1117,13 +1574,23 @@ func writeEnvFileForBuild(db *sql.DB, svcID int64, jwtSecret, workDir string) er
 		// Quote values that contain special shell chars
 		sb.WriteString(k + "=" + v + "\n")
 	}
+	// Also inject project database connection URLs so build tools (Prisma, etc.)
+	// can access them at build time.
+	for _, pair := range collectProjectDBEnvArgs(db, projectID, jwtSecret) {
+		// collectProjectDBEnvArgs returns ["-e", "KEY=VALUE", "-e", "KEY=VALUE", ...]
+		// skip the "-e" flag entries
+		if pair == "-e" {
+			continue
+		}
+		sb.WriteString(pair + "\n")
+	}
 	content := []byte(sb.String())
 	if len(content) == 0 {
 		return nil
 	}
 	// Write both .env and .env.local (Next.js prefers .env.local)
-	os.WriteFile(filepath.Join(workDir, ".env"), content, 0600)        //nolint
-	os.WriteFile(filepath.Join(workDir, ".env.local"), content, 0600)  //nolint
+	os.WriteFile(filepath.Join(workDir, ".env"), content, 0600)       //nolint
+	os.WriteFile(filepath.Join(workDir, ".env.local"), content, 0600) //nolint
 	return nil
 }
 

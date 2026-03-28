@@ -169,13 +169,22 @@ func (h *ProjectHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, errMap("invalid projectID"))
 		return
 	}
-	// Block deletion until all services are removed (data safety + container cleanup)
+	// Block deletion until all services and databases are removed so their
+	// containers and volumes can be cleaned up explicitly.
 	var svcCount int
 	h.db.QueryRowContext(r.Context(),
 		`SELECT COUNT(*) FROM services WHERE project_id=?`, projectID).Scan(&svcCount) //nolint
 	if svcCount > 0 {
 		writeJSON(w, http.StatusConflict, errMap(
 			"cannot delete project: delete all services first to ensure containers are cleaned up"))
+		return
+	}
+	var dbCount int
+	h.db.QueryRowContext(r.Context(),
+		`SELECT COUNT(*) FROM databases WHERE project_id=?`, projectID).Scan(&dbCount) //nolint
+	if dbCount > 0 {
+		writeJSON(w, http.StatusConflict, errMap(
+			"cannot delete project: delete all databases first to ensure data volumes are cleaned up"))
 		return
 	}
 	res, err := h.db.ExecContext(r.Context(), `DELETE FROM projects WHERE id=?`, projectID)
