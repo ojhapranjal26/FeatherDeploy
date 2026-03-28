@@ -73,12 +73,21 @@ function DetectModal({ open, detecting, result, onEdit, onConfirmDeploy, onClose
           </div>
         ) : result ? (
           <div className="space-y-4 py-2">
-            {/* Detected badge */}
-            <div className="flex items-center gap-2">
-              <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+            {/* Detected badge row */}
+            <div className="flex items-center flex-wrap gap-2">
+              <CheckCircle2 className="h-4 w-4 text-emerald-500 shrink-0" />
               <span className="text-sm font-medium">{frameworkLabel}</span>
               {result.version && (
                 <Badge variant="secondary" className="font-mono text-xs">{result.version}</Badge>
+              )}
+              {result.type && (
+                <Badge variant="secondary" className="text-xs capitalize">{result.type}</Badge>
+              )}
+              {result.orm && (
+                <Badge variant="outline" className="text-xs font-mono">{result.orm}</Badge>
+              )}
+              {result.is_monorepo && (
+                <Badge variant="outline" className="text-xs">monorepo</Badge>
               )}
               <Badge variant="outline" className="ml-auto font-mono text-[10px]">{result.base_image}</Badge>
             </div>
@@ -86,6 +95,18 @@ function DetectModal({ open, detecting, result, onEdit, onConfirmDeploy, onClose
             <Separator />
 
             <div className="space-y-3">
+              {result.pre_build_command && (
+                <div className="space-y-1.5">
+                  <Label htmlFor="det-prebuild" className="text-xs text-muted-foreground">Pre-build command</Label>
+                  <Input
+                    id="det-prebuild"
+                    className="font-mono text-xs h-8"
+                    value={result.pre_build_command}
+                    onChange={(e) => onEdit('pre_build_command', e.target.value)}
+                    placeholder="e.g. npx prisma generate"
+                  />
+                </div>
+              )}
               <div className="space-y-1.5">
                 <Label htmlFor="det-build" className="text-xs text-muted-foreground">Build command</Label>
                 <Input

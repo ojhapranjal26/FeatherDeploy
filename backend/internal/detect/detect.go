@@ -12,38 +12,54 @@ import (
 
 // Result holds the detected application metadata.
 type Result struct {
-	Language     string `json:"language"`      // "nodejs"|"python"|"php"|"static"|"unknown"
-	Framework    string `json:"framework"`     // e.g. "nextjs", "flask", "laravel"
-	Version      string `json:"version"`       // runtime version hint, e.g. "20", "3.12", "8.2"
-	BuildCommand string `json:"build_command"` // e.g. "npm ci && npm run build"
-	StartCommand string `json:"start_command"` // e.g. "node server.js"
-	AppPort      int    `json:"app_port"`      // default port the app listens on
-	BaseImage    string `json:"base_image"`    // suggested OCI base image for Podman
+	Language        string `json:"language"`          // "nodejs"|"python"|"php"|"static"|"unknown"
+	Framework       string `json:"framework"`         // e.g. "nextjs", "flask", "laravel"
+	Type            string `json:"type"`              // "fullstack"|"backend"|"frontend"|"static"|"ai"
+	Version         string `json:"version"`           // runtime version hint, e.g. "20", "3.12", "8.2"
+	BuildCommand    string `json:"build_command"`     // e.g. "npm ci && npm run build"
+	PreBuildCommand string `json:"pre_build_command"` // e.g. "npx prisma generate"
+	StartCommand    string `json:"start_command"`     // e.g. "node server.js"
+	AppPort         int    `json:"app_port"`          // default port the app listens on
+	BaseImage       string `json:"base_image"`        // suggested OCI base image for Podman
+	ORM             string `json:"orm"`               // "prisma"|"typeorm"|"mongoose"|"sequelize"|"drizzle"
+	BuildTool       string `json:"build_tool"`        // "npm"|"yarn"|"pnpm"|"bun"
+	IsMonorepo      bool   `json:"is_monorepo"`       // true if monorepo tooling detected
+	NeedsBuild      bool   `json:"needs_build"`       // true when build_command is non-empty
 }
 
 // Detect inspects the directory at root and returns the best-effort Result.
 // Detection is attempted in order: Node.js → Python → PHP → Static → Unknown.
 func Detect(root string) *Result {
-	if r := detectNode(root); r != nil {
-		return r
+	r := detectNode(root)
+	if r == nil {
+		r = detectPython(root)
 	}
-	if r := detectPython(root); r != nil {
-		return r
+	if r == nil {
+		r = detectPHP(root)
 	}
-	if r := detectPHP(root); r != nil {
-		return r
+	if r == nil {
+		r = detectStatic(root)
 	}
-	if r := detectStatic(root); r != nil {
-		return r
+	if r == nil {
+		r = &Result{
+			Language:     "unknown",
+			Framework:    "unknown",
+			AppPort:      8080,
+			BaseImage:    "alpine:3.19",
+			StartCommand: "./app",
+		}
 	}
-	return &Result{
-		Language:     "unknown",
-		Framework:    "unknown",
-		AppPort:      8080,
-		BaseImage:    "alpine:3.19",
-		BuildCommand: "",
-		StartCommand: "./app",
+	// Derived fields computed after all detection is complete.
+	r.NeedsBuild = r.BuildCommand != ""
+	if r.Type == "" {
+		switch r.Language {
+		case "static":
+			r.Type = "static"
+		default:
+			r.Type = "backend"
+		}
 	}
+	return r
 }
 
 // ─── Node.js ─────────────────────────────────────────────────────────────────
@@ -86,42 +102,77 @@ func detectNode(root string) *Result {
 	switch {
 	case deps["next"]:
 		r.Framework = "nextjs"
+		r.Type = "fullstack"
 		r.BuildCommand = "npm ci && npm run build"
 		r.StartCommand = "npm start"
 	case deps["nuxt"] || deps["nuxt3"] || deps["@nuxt/core"]:
 		r.Framework = "nuxt"
+		r.Type = "fullstack"
 		r.BuildCommand = "npm ci && npm run build"
 		r.StartCommand = "node .output/server/index.mjs"
 	case deps["gatsby"]:
 		r.Framework = "gatsby"
+		r.Type = "frontend"
 		r.BuildCommand = "npm ci && npm run build"
 		r.StartCommand = "npm run serve"
 	case deps["@remix-run/node"] || deps["@remix-run/react"]:
 		r.Framework = "remix"
+		r.Type = "fullstack"
 		r.BuildCommand = "npm ci && npm run build"
 		r.StartCommand = "npm start"
-	case deps["@sveltejs/kit"] || deps["svelte"]:
+	case deps["@sveltejs/kit"]:
 		r.Framework = "svelte"
+		r.Type = "fullstack"
 		r.BuildCommand = "npm ci && npm run build"
 		r.StartCommand = "node build"
+	case deps["svelte"]:
+		r.Framework = "svelte"
+		r.Type = "frontend"
+		r.BuildCommand = "npm ci && npm run build"
+		r.StartCommand = "npx serve -s build -l 3000"
 	case deps["@angular/core"]:
 		r.Framework = "angular"
+		r.Type = "frontend"
 		r.BuildCommand = "npm ci && npx ng build --configuration=production"
 		r.StartCommand = "npx serve -s dist -l 3000"
+	case deps["react-scripts"]:
+		// Create React App
+		r.Framework = "react"
+		r.Type = "frontend"
+		r.BuildCommand = "npm ci && npm run build"
+		r.StartCommand = "npx serve -s build -l 3000"
 	case deps["vue"]:
 		r.Framework = "vue"
+		r.Type = "frontend"
 		r.BuildCommand = "npm ci && npm run build"
 		r.StartCommand = "npx serve -s dist -l 3000"
 	case deps["react"]:
 		r.Framework = "react"
+		r.Type = "frontend"
 		r.BuildCommand = "npm ci && npm run build"
 		r.StartCommand = "npx serve -s build -l 3000"
 	case deps["@nestjs/core"]:
 		r.Framework = "nestjs"
+		r.Type = "backend"
 		r.BuildCommand = "npm ci && npm run build"
 		r.StartCommand = "node dist/main"
+	case deps["hono"]:
+		r.Framework = "hono"
+		r.Type = "backend"
+		if pkg.Scripts.Build != "" {
+			r.BuildCommand = "npm ci && npm run build"
+			r.StartCommand = "node dist/index.js"
+		} else {
+			r.BuildCommand = "npm ci"
+			if pkg.Scripts.Start != "" {
+				r.StartCommand = "npm start"
+			} else {
+				r.StartCommand = "node src/index.js"
+			}
+		}
 	case deps["fastify"]:
 		r.Framework = "fastify"
+		r.Type = "backend"
 		r.BuildCommand = "npm ci"
 		if pkg.Scripts.Start != "" {
 			r.StartCommand = "npm start"
@@ -130,6 +181,7 @@ func detectNode(root string) *Result {
 		}
 	case deps["express"]:
 		r.Framework = "express"
+		r.Type = "backend"
 		r.BuildCommand = "npm ci"
 		if pkg.Scripts.Start != "" {
 			r.StartCommand = "npm start"
@@ -138,14 +190,17 @@ func detectNode(root string) *Result {
 		}
 	case deps["koa"]:
 		r.Framework = "koa"
+		r.Type = "backend"
 		r.BuildCommand = "npm ci"
 		r.StartCommand = "node app.js"
 	case deps["hapi"] || deps["@hapi/hapi"]:
 		r.Framework = "hapi"
+		r.Type = "backend"
 		r.BuildCommand = "npm ci"
 		r.StartCommand = "node index.js"
 	default:
 		r.Framework = "nodejs"
+		r.Type = "backend"
 		if pkg.Scripts.Build != "" {
 			r.BuildCommand = "npm ci && npm run build"
 		} else {
@@ -163,13 +218,47 @@ func detectNode(root string) *Result {
 		r.BuildCommand = "npm ci && npm run build"
 	}
 
-	// Use yarn or pnpm if lock file found
-	if _, err := os.Stat(filepath.Join(root, "yarn.lock")); err == nil {
+	// ORM / database layer detection
+	if _, err := os.Stat(filepath.Join(root, "prisma", "schema.prisma")); err == nil ||
+		deps["prisma"] || deps["@prisma/client"] {
+		r.ORM = "prisma"
+		r.PreBuildCommand = "npx prisma generate"
+	} else if deps["typeorm"] {
+		r.ORM = "typeorm"
+	} else if deps["mongoose"] {
+		r.ORM = "mongoose"
+	} else if deps["sequelize"] || deps["@sequelize/core"] {
+		r.ORM = "sequelize"
+	} else if deps["drizzle-orm"] {
+		r.ORM = "drizzle"
+	}
+
+	// Monorepo tooling detection
+	for _, mf := range []string{"turbo.json", "nx.json", "lerna.json", "pnpm-workspace.yaml"} {
+		if fileExists(filepath.Join(root, mf)) {
+			r.IsMonorepo = true
+			break
+		}
+	}
+
+	// Build tool detection (bun > yarn > pnpm > npm)
+	switch {
+	case fileExists(filepath.Join(root, "bun.lockb")):
+		r.BuildTool = "bun"
+		r.BuildCommand = strings.ReplaceAll(r.BuildCommand, "npm ci", "bun install --frozen-lockfile")
+		r.BuildCommand = strings.ReplaceAll(r.BuildCommand, "npm run", "bun run")
+		r.StartCommand = strings.ReplaceAll(r.StartCommand, "npm start", "bun start")
+		r.StartCommand = strings.ReplaceAll(r.StartCommand, "npm run", "bun run")
+	case fileExists(filepath.Join(root, "yarn.lock")):
+		r.BuildTool = "yarn"
 		r.BuildCommand = strings.ReplaceAll(r.BuildCommand, "npm ci", "yarn install --frozen-lockfile")
 		r.StartCommand = strings.ReplaceAll(r.StartCommand, "npm start", "yarn start")
-	} else if _, err := os.Stat(filepath.Join(root, "pnpm-lock.yaml")); err == nil {
+	case fileExists(filepath.Join(root, "pnpm-lock.yaml")):
+		r.BuildTool = "pnpm"
 		r.BuildCommand = strings.ReplaceAll(r.BuildCommand, "npm ci", "pnpm install --frozen-lockfile")
 		r.StartCommand = strings.ReplaceAll(r.StartCommand, "npm start", "pnpm start")
+	default:
+		r.BuildTool = "npm"
 	}
 
 	return r
@@ -266,6 +355,30 @@ func detectPython(root string) *Result {
 		r.Framework = "sanic"
 		r.BuildCommand = "pip install --no-cache-dir -r requirements.txt"
 		r.StartCommand = "python " + detectPythonModule(root, "server", "app", "main") + ".py"
+	case strings.Contains(depsContent, "streamlit"):
+		r.Framework = "streamlit"
+		r.Type = "frontend"
+		r.AppPort = 8501
+		appEntry := detectPythonModule(root, "app", "main", "streamlit_app")
+		r.BuildCommand = "pip install --no-cache-dir -r requirements.txt"
+		r.StartCommand = "python -m streamlit run " + appEntry + ".py --server.port 8501 --server.address 0.0.0.0"
+	case strings.Contains(depsContent, "gradio"):
+		r.Framework = "gradio"
+		r.Type = "frontend"
+		r.AppPort = 7860
+		appEntry := detectPythonModule(root, "app", "main")
+		r.BuildCommand = "pip install --no-cache-dir -r requirements.txt"
+		r.StartCommand = "python " + appEntry + ".py"
+	case strings.Contains(depsContent, "torch") ||
+		strings.Contains(depsContent, "tensorflow") ||
+		strings.Contains(depsContent, "transformers") ||
+		strings.Contains(depsContent, "scikit-learn") ||
+		strings.Contains(depsContent, "sklearn"):
+		r.Framework = "ml"
+		r.Type = "ai"
+		r.BuildCommand = "pip install --no-cache-dir -r requirements.txt"
+		appEntry := detectPythonModule(root, "main", "app", "train", "inference", "predict", "serve")
+		r.StartCommand = "python " + appEntry + ".py"
 	default:
 		r.Framework = "python"
 		r.BuildCommand = "pip install --no-cache-dir -r requirements.txt"
@@ -495,6 +608,7 @@ func detectStatic(root string) *Result {
 		return &Result{
 			Language:     "static",
 			Framework:    "html",
+			Type:         "static",
 			Version:      "",
 			BuildCommand: "",
 			StartCommand: "nginx -g 'daemon off;'",
@@ -503,4 +617,10 @@ func detectStatic(root string) *Result {
 		}
 	}
 	return nil
+}
+
+// fileExists reports whether the named file or directory exists.
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }

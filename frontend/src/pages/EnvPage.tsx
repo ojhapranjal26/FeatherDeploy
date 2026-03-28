@@ -314,14 +314,15 @@ export function EnvPage() {
 
       {/* Bulk import dialog */}
       <Dialog open={bulkOpen} onOpenChange={(o) => { setBulkOpen(o); if (!o) { setBulkText(''); setPreviewRows([]) } }}>
-        <DialogContent className="max-w-2xl">
-          <DialogHeader>
+        <DialogContent className="max-w-2xl flex flex-col max-h-[90dvh]">
+          <DialogHeader className="shrink-0">
             <DialogTitle>Import .env file</DialogTitle>
           </DialogHeader>
-          <div className="space-y-4 pt-2">
+          {/* Scrollable body */}
+          <div className="flex-1 min-h-0 overflow-y-auto space-y-3 pr-1">
             <Textarea
               rows={5}
-              className="font-mono text-xs"
+              className="font-mono text-xs resize-none"
               placeholder={'DATABASE_URL=postgres://user:pass@host/db\nAPI_KEY=supersecret\nDEBUG=false'}
               value={bulkText}
               onChange={(e) => handleBulkText(e.target.value)}
@@ -332,75 +333,74 @@ export function EnvPage() {
                 <div className="bg-muted/40 px-3 py-1.5 text-xs font-medium text-muted-foreground flex items-center justify-between">
                   <span>{previewRows.length} variable{previewRows.length !== 1 ? 's' : ''} — review &amp; edit before importing</span>
                 </div>
-                <div className="max-h-56 overflow-y-auto">
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead>Key</TableHead>
-                        <TableHead>Value</TableHead>
-                        <TableHead className="w-24">Type</TableHead>
-                        <TableHead className="w-8" />
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Key</TableHead>
+                      <TableHead>Value</TableHead>
+                      <TableHead className="w-24">Type</TableHead>
+                      <TableHead className="w-8" />
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {previewRows.map(row => (
+                      <TableRow key={row.id}>
+                        <TableCell className="py-1">
+                          <Input
+                            className="h-7 font-mono text-xs"
+                            value={row.key}
+                            onChange={e => updatePreviewRow(row.id, 'key', e.target.value)}
+                          />
+                        </TableCell>
+                        <TableCell className="py-1">
+                          <Input
+                            className="h-7 font-mono text-xs"
+                            type={row.isSecret ? 'password' : 'text'}
+                            value={row.value}
+                            onChange={e => updatePreviewRow(row.id, 'value', e.target.value)}
+                          />
+                        </TableCell>
+                        <TableCell className="py-1">
+                          <button
+                            type="button"
+                            className={`flex items-center gap-1 text-xs rounded-full px-2.5 py-0.5 font-medium transition-colors ${
+                              row.isSecret
+                                ? 'bg-amber-500/15 text-amber-700 dark:text-amber-400'
+                                : 'bg-muted text-muted-foreground'
+                            }`}
+                            onClick={() => updatePreviewRow(row.id, 'isSecret', !row.isSecret)}
+                          >
+                            {row.isSecret
+                              ? <><Lock className="h-2.5 w-2.5" /> Secret</>
+                              : <><Globe className="h-2.5 w-2.5" /> Plain</>}
+                          </button>
+                        </TableCell>
+                        <TableCell className="py-1">
+                          <Button
+                            variant="ghost" size="icon" className="h-6 w-6 text-muted-foreground"
+                            onClick={() => removePreviewRow(row.id)}
+                          >
+                            <X className="h-3 w-3" />
+                          </Button>
+                        </TableCell>
                       </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {previewRows.map(row => (
-                        <TableRow key={row.id}>
-                          <TableCell className="py-1">
-                            <Input
-                              className="h-7 font-mono text-xs"
-                              value={row.key}
-                              onChange={e => updatePreviewRow(row.id, 'key', e.target.value)}
-                            />
-                          </TableCell>
-                          <TableCell className="py-1">
-                            <Input
-                              className="h-7 font-mono text-xs"
-                              type={row.isSecret ? 'password' : 'text'}
-                              value={row.value}
-                              onChange={e => updatePreviewRow(row.id, 'value', e.target.value)}
-                            />
-                          </TableCell>
-                          <TableCell className="py-1">
-                            <button
-                              type="button"
-                              className={`flex items-center gap-1 text-xs rounded-full px-2.5 py-0.5 font-medium transition-colors ${
-                                row.isSecret
-                                  ? 'bg-amber-500/15 text-amber-700 dark:text-amber-400'
-                                  : 'bg-muted text-muted-foreground'
-                              }`}
-                              onClick={() => updatePreviewRow(row.id, 'isSecret', !row.isSecret)}
-                            >
-                              {row.isSecret
-                                ? <><Lock className="h-2.5 w-2.5" /> Secret</>
-                                : <><Globe className="h-2.5 w-2.5" /> Plain</>}
-                            </button>
-                          </TableCell>
-                          <TableCell className="py-1">
-                            <Button
-                              variant="ghost" size="icon" className="h-6 w-6 text-muted-foreground"
-                              onClick={() => removePreviewRow(row.id)}
-                            >
-                              <X className="h-3 w-3" />
-                            </Button>
-                          </TableCell>
-                        </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
-                </div>
+                    ))}
+                  </TableBody>
+                </Table>
               </div>
             )}
-            <div className="flex justify-end gap-2">
-              <Button variant="outline" onClick={() => setBulkOpen(false)}>Cancel</Button>
-              <Button
-                onClick={importPreview}
-                disabled={!previewRows.filter(r => r.key.trim()).length || bulkMutation.isPending}
-              >
-                {previewRows.filter(r => r.key.trim()).length > 0
-                  ? `Import ${previewRows.filter(r => r.key.trim()).length} variable${previewRows.filter(r => r.key.trim()).length !== 1 ? 's' : ''}`
-                  : 'Import'}
-              </Button>
-            </div>
+          </div>
+          {/* Sticky footer — always visible */}
+          <div className="flex justify-end gap-2 pt-3 mt-1 border-t shrink-0">
+            <Button variant="outline" onClick={() => setBulkOpen(false)}>Cancel</Button>
+            <Button
+              onClick={importPreview}
+              disabled={!previewRows.filter(r => r.key.trim()).length || bulkMutation.isPending}
+            >
+              {previewRows.filter(r => r.key.trim()).length > 0
+                ? `Import ${previewRows.filter(r => r.key.trim()).length} variable${previewRows.filter(r => r.key.trim()).length !== 1 ? 's' : ''}`
+                : 'Import'}
+            </Button>
           </div>
         </DialogContent>
       </Dialog>

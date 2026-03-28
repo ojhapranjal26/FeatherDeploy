@@ -55,13 +55,19 @@ export interface UpdateServicePayload {
 }
 
 export interface DetectionResult {
-  language: string     // "nodejs" | "python" | "php" | "static" | "unknown"
-  framework: string    // e.g. "nextjs", "flask", "laravel"
-  version: string      // runtime version, e.g. "20", "3.12"
+  language: string           // "nodejs" | "python" | "php" | "static" | "unknown"
+  framework: string          // e.g. "nextjs", "flask", "laravel"
+  type: string               // "fullstack" | "backend" | "frontend" | "static" | "ai"
+  version: string            // runtime version, e.g. "20", "3.12"
   build_command: string
+  pre_build_command: string  // e.g. "npx prisma generate"
   start_command: string
   app_port: number
   base_image: string
+  orm: string                // "prisma" | "typeorm" | "mongoose" | "sequelize" | "drizzle"
+  build_tool: string         // "npm" | "yarn" | "pnpm" | "bun"
+  is_monorepo: boolean
+  needs_build: boolean
 }
 
 export const servicesApi = {
