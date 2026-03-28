@@ -399,6 +399,7 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 		markFailed(db, depID, svcID, log.text())
 		return
 	}
+	log.add("[network] project network ready: %s", networkName)
 
 	// ── 9. Run new container ──────────────────────────────────────────────────
 	runArgs := []string{
@@ -1028,6 +1029,11 @@ func ensureProjectNetwork(projectID int64) error {
 		}
 		return fmt.Errorf("podman network create %s: %v — %s", name, err, strings.TrimSpace(string(out)))
 	}
+	// Verify the network actually exists after creation — catches silent failures
+	// where podman returns exit 0 but doesn’t write the network to storage.
+	if verErr := podmanCmd("network", "inspect", name).Run(); verErr != nil {
+		return fmt.Errorf("podman network create appeared to succeed but network %s not found afterwards: %v", name, verErr)
+	}
 	return nil
 }
 
@@ -1432,11 +1438,14 @@ func dbImageName(dbType, version string) string {
 	if version == "" || version == "latest" {
 		version = "latest"
 	}
+	// Use fully-qualified docker.io/library/ names to avoid short-name
+	// resolution failures on systems without unqualified-search-registries
+	// configured in /etc/containers/registries.conf (e.g. RHEL/Fedora defaults).
 	switch dbType {
 	case "postgres":
-		return "postgres:" + version
+		return "docker.io/library/postgres:" + version
 	case "mysql":
-		return "mysql:" + version
+		return "docker.io/library/mysql:" + version
 	case "sqlite":
 		return ""
 	default:
