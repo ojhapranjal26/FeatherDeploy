@@ -58,4 +58,7 @@ export const projectsApi = {
 export const usersApi = {
   lookup: (email: string) =>
     client.get<UserLookup>(`/users/lookup`, { params: { email } }).then((r) => r.data),
+
+  search: (q: string) =>
+    client.get<UserLookup[]>(`/users/search`, { params: { q } }).then((r) => r.data),
 }

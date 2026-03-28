@@ -125,3 +125,40 @@ func (h *UserHandler) Lookup(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, u)
 }
 
+// GET /api/users/search?q=xxx  — any authenticated user
+// Returns up to 20 users whose name or email contains the query string.
+// Used by the add-member dialog to show a searchable dropdown.
+func (h *UserHandler) Search(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query().Get("q")
+	pattern := "%" + q + "%"
+
+	rows, err := h.db.QueryContext(r.Context(),
+		`SELECT id, email, name FROM users
+		 WHERE (email LIKE ? OR name LIKE ?)
+		 ORDER BY name, email
+		 LIMIT 20`,
+		pattern, pattern,
+	)
+	if err != nil {
+		slog.Error("search users", "err", err)
+		writeJSON(w, http.StatusInternalServerError, errMap("internal error"))
+		return
+	}
+	defer rows.Close()
+
+	type UserSummary struct {
+		ID    int64  `json:"id"`
+		Email string `json:"email"`
+		Name  string `json:"name"`
+	}
+	results := make([]UserSummary, 0)
+	for rows.Next() {
+		var u UserSummary
+		if err := rows.Scan(&u.ID, &u.Email, &u.Name); err != nil {
+			continue
+		}
+		results = append(results, u)
+	}
+	writeJSON(w, http.StatusOK, results)
+}
+

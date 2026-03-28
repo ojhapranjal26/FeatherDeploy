@@ -22,22 +22,15 @@ export interface AuthResponse {
 
 // ── QR login types ────────────────────────────────────────────────────────────
 
-export interface QRGenerateResponse {
+export interface QRInitResponse {
   qr_token: string
-  expires_at: number   // unix ms — QR code validity (5 min)
-  ttl_minutes: number  // session duration after claim
+  expires_at: number   // unix ms — QR code validity (~5 min)
 }
 
-export interface QRStatusResponse {
-  status: 'pending' | 'claimed' | 'expired'
-  user_name: string
-  user_email: string
-}
-
-export interface QRClaimResponse {
-  token: string
-  user: User
-  ttl_minutes: number
+export interface QRPollResponse {
+  status: 'pending' | 'approved' | 'expired'
+  token?: string       // present when status === 'approved'
+  user?: User          // present when status === 'approved'
 }
 
 export const authApi = {
@@ -56,16 +49,16 @@ export const authApi = {
 }
 
 export const qrApi = {
-  /** POST /api/auth/qr/generate — authenticated */
-  generate: (ttl_minutes: number): Promise<QRGenerateResponse> =>
-    client.post<QRGenerateResponse>('/auth/qr/generate', { ttl_minutes }).then((r) => r.data),
+  /** POST /api/auth/qr/init — public, login page calls this to start a QR session */
+  init: (): Promise<QRInitResponse> =>
+    client.post<QRInitResponse>('/auth/qr/init').then((r) => r.data),
 
-  /** GET /api/auth/qr/{token}/status — public */
-  status: (token: string): Promise<QRStatusResponse> =>
-    client.get<QRStatusResponse>(`/auth/qr/${token}/status`).then((r) => r.data),
+  /** GET /api/auth/qr/{token}/poll — public, login page polls until approved */
+  poll: (token: string): Promise<QRPollResponse> =>
+    client.get<QRPollResponse>(`/auth/qr/${token}/poll`).then((r) => r.data),
 
-  /** POST /api/auth/qr/{token}/claim — public (scanning device) */
-  claim: (token: string): Promise<QRClaimResponse> =>
-    client.post<QRClaimResponse>(`/auth/qr/${token}/claim`).then((r) => r.data),
+  /** POST /api/auth/qr/{token}/approve — authenticated, approving device calls this */
+  approve: (token: string): Promise<{ status: string }> =>
+    client.post<{ status: string }>(`/auth/qr/${token}/approve`).then((r) => r.data),
 }
 

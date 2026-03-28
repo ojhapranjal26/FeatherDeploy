@@ -235,9 +235,9 @@ func serve() {
 	r.Get("/api/invitations/{token}", inviteH.Verify)
 	r.Post("/api/invitations/{token}/accept", inviteH.Accept)
 
-	// QR login: status and claim are public (token is the credential)
-	r.Get("/api/auth/qr/{qrToken}/status", qrH.Status)
-	r.Post("/api/auth/qr/{qrToken}/claim", qrH.Claim)
+	// QR login: init and poll are public (token is the credential)
+	r.Post("/api/auth/qr/init", qrH.Init)
+	r.Get("/api/auth/qr/{token}/poll", qrH.Poll)
 
 	// GitHub App status is public (frontend uses it to show connect button)
 	r.Get("/api/github-app/status", ghAppH.Status)
@@ -276,8 +276,9 @@ func serve() {
 		// ── Dashboard ──────────────────────────────────────────────────────
 		r.Get("/api/dashboard", dashH.Stats)
 
-		// ── User lookup (any authenticated user — used for member invites) ─
+		// ── User lookup / search (any authenticated user — used for member invites) ─
 		r.Get("/api/users/lookup", userH.Lookup)
+		r.Get("/api/users/search", userH.Search)
 
 		// ── Admin: user management ─────────────────────────────────────────
 		r.Group(func(r chi.Router) {
@@ -411,8 +412,8 @@ func serve() {
 				r.Get("/api/projects/{projectID}/services/{serviceID}/stats/history", statsHistH.History)
 				r.Get("/api/projects/{projectID}/services/{serviceID}/stats/monthly", statsHistH.MonthlyHistory)
 
-				// ── QR generate (authenticated) ───────────────────────────
-				r.Post("/api/auth/qr/generate", qrH.Generate)
+				// ── QR approve (authenticated) ────────────────────────────
+				r.Post("/api/auth/qr/{token}/approve", qrH.Approve)
 
 				// ── Domains ──────────────────────────────────────────────
 				r.Get("/api/projects/{projectID}/services/{serviceID}/domains", domainH.List)

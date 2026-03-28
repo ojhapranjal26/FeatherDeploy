@@ -2,14 +2,16 @@ import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import { useNavigate } from 'react-router-dom'
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useRef, useCallback } from 'react'
+import { QRCodeSVG } from 'qrcode.react'
 import { useAuth } from '@/context/AuthContext'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { toast } from 'sonner'
-import { Rocket, GitBranch, Globe, Zap, Feather, Github, ArrowRight, Shield, RotateCcw, Smartphone, QrCode } from 'lucide-react'
+import { Rocket, GitBranch, Globe, Zap, Feather, Github, ArrowRight, Shield, RotateCcw, Smartphone, QrCode, RefreshCw, CheckCircle2, Loader2 } from 'lucide-react'
 import { settingsApi, type Branding } from '@/api/settings'
+import { qrApi, type QRInitResponse } from '@/api/auth'
 
 const schema = z.object({
   email:    z.string().email('Invalid email address'),
@@ -27,10 +29,80 @@ const FEATURES = [
 ]
 
 export function LoginPage() {
-  const { login } = useAuth()
+  const { login, loginWithToken } = useAuth()
   const navigate = useNavigate()
   const [branding, setBranding] = useState<Branding>({ company_name: '', logo_url: '' })
   const [loginMode, setLoginMode] = useState<'password' | 'qr'>('password')
+
+  // QR login state
+  const [qrData, setQrData] = useState<QRInitResponse | null>(null)
+  const [qrStatus, setQrStatus] = useState<'idle' | 'loading' | 'showing' | 'approved' | 'expired'>('idle')
+  const [qrSecondsLeft, setQrSecondsLeft] = useState(0)
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  const stopTimers = useCallback(() => {
+    if (pollRef.current)     { clearInterval(pollRef.current);     pollRef.current = null }
+    if (countdownRef.current){ clearInterval(countdownRef.current); countdownRef.current = null }
+  }, [])
+
+  // Clean up timers when switching away from QR tab or unmounting
+  useEffect(() => {
+    if (loginMode !== 'qr') stopTimers()
+    return stopTimers
+  }, [loginMode, stopTimers])
+
+  const startQR = useCallback(async () => {
+    stopTimers()
+    setQrStatus('loading')
+    setQrData(null)
+    try {
+      const data = await qrApi.init()
+      setQrData(data)
+      setQrStatus('showing')
+
+      const remaining = Math.max(0, Math.floor((data.expires_at - Date.now()) / 1000))
+      setQrSecondsLeft(remaining)
+
+      countdownRef.current = setInterval(() => {
+        setQrSecondsLeft((s) => {
+          if (s <= 1) {
+            stopTimers()
+            setQrStatus('expired')
+            return 0
+          }
+          return s - 1
+        })
+      }, 1000)
+
+      pollRef.current = setInterval(async () => {
+        try {
+          const res = await qrApi.poll(data.qr_token)
+          if (res.status === 'approved' && res.token && res.user) {
+            stopTimers()
+            setQrStatus('approved')
+            loginWithToken(res.token, res.user)
+            setTimeout(() => navigate('/dashboard'), 1200)
+          } else if (res.status === 'expired') {
+            stopTimers()
+            setQrStatus('expired')
+          }
+        } catch {
+          // network blip — keep polling
+        }
+      }, 2000)
+    } catch {
+      setQrStatus('idle')
+      toast.error('Could not generate QR code. Please try again.')
+    }
+  }, [stopTimers, loginWithToken, navigate])
+
+  // Auto-start QR when switching to QR tab
+  useEffect(() => {
+    if (loginMode === 'qr' && qrStatus === 'idle') {
+      startQR()
+    }
+  }, [loginMode, qrStatus, startQR])
 
   useEffect(() => {
     settingsApi.getBranding().then(setBranding).catch(() => {})
@@ -226,37 +298,75 @@ export function LoginPage() {
             </form>
           )}
 
-          {/* ── QR login instructions ── */}
+          {/* ── QR login ── */}
           {loginMode === 'qr' && (
-            <div className="rounded-xl border border-border/60 bg-muted/30 p-5 space-y-4">
-              <div className="flex items-start gap-3">
-                <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
-                  <Smartphone className="h-4 w-4" />
-                </div>
-                <div className="space-y-1">
-                  <p className="text-sm font-medium">Scan QR from a trusted device</p>
-                  <p className="text-xs text-muted-foreground leading-relaxed">
-                    Log into your {platformName} dashboard on a trusted device, click the
-                    <span className="font-medium text-foreground"> smartphone icon</span> next to your name in the sidebar,
-                    and scan the QR code with this device's camera.
-                  </p>
-                </div>
+            <div className="flex flex-col items-center gap-4">
+              {/* QR code box */}
+              <div className="relative flex h-52 w-52 items-center justify-center rounded-2xl border-2 border-border/60 bg-white shadow-inner">
+                {qrStatus === 'loading' && (
+                  <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+                )}
+                {qrStatus === 'showing' && qrData && (
+                  <QRCodeSVG
+                    value={`${window.location.origin}/qr-approve/${qrData.qr_token}`}
+                    size={180}
+                    level="M"
+                  />
+                )}
+                {qrStatus === 'approved' && (
+                  <div className="flex flex-col items-center gap-2 text-emerald-600">
+                    <CheckCircle2 className="h-12 w-12" />
+                    <span className="text-sm font-medium">Approved!</span>
+                  </div>
+                )}
+                {qrStatus === 'expired' && (
+                  <div className="flex flex-col items-center gap-2 text-muted-foreground">
+                    <QrCode className="h-8 w-8 opacity-30" />
+                    <span className="text-xs">Expired</span>
+                  </div>
+                )}
               </div>
 
-              <ol className="space-y-2 text-xs text-muted-foreground">
-                {[
-                  'Open ' + platformName + ' on a trusted device',
-                  'Click the smartphone icon (Login on another device)',
-                  'Choose a session duration (up to 1 hour)',
-                  'Scan the QR code with this device',
-                  'Tap Authorize Login',
-                ].map((step, i) => (
-                  <li key={i} className="flex items-start gap-2">
-                    <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-primary/15 text-primary text-[10px] font-bold">{i + 1}</span>
-                    {step}
-                  </li>
-                ))}
-              </ol>
+              {/* Status / countdown */}
+              {qrStatus === 'showing' && (
+                <div className="text-center space-y-1">
+                  <p className="text-sm font-medium flex items-center justify-center gap-1.5">
+                    <Smartphone className="h-4 w-4 text-primary" />
+                    Scan with a logged-in device
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    Expires in {Math.floor(qrSecondsLeft / 60)}:{String(qrSecondsLeft % 60).padStart(2, '0')}
+                  </p>
+                </div>
+              )}
+              {qrStatus === 'approved' && (
+                <p className="text-sm font-medium text-emerald-600">Logging you in…</p>
+              )}
+              {qrStatus === 'expired' && (
+                <div className="text-center space-y-2">
+                  <p className="text-sm text-muted-foreground">QR code expired</p>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="gap-1.5"
+                    onClick={() => { setQrStatus('idle') }}
+                  >
+                    <RefreshCw className="h-3.5 w-3.5" /> Generate new code
+                  </Button>
+                </div>
+              )}
+
+              {/* Instructions */}
+              {(qrStatus === 'loading' || qrStatus === 'showing') && (
+                <div className="rounded-xl border border-border/40 bg-muted/30 px-4 py-3 w-full space-y-1.5 text-xs text-muted-foreground">
+                  <p className="font-medium text-foreground/70">How it works</p>
+                  <ol className="ml-3 list-decimal space-y-1">
+                    <li>Open {platformName} on a device where you're logged in</li>
+                    <li>Scan this QR code with your camera</li>
+                    <li>Tap <span className="font-medium text-foreground">Approve Login</span> on that device</li>
+                  </ol>
+                </div>
+              )}
             </div>
           )}
 

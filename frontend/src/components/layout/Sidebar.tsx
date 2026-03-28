@@ -13,9 +13,7 @@ import {
   Github,
   Network,
   Feather,
-  Smartphone,
 } from 'lucide-react'
-import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { cn } from '@/lib/utils'
 import { useAuth } from '@/context/AuthContext'
@@ -24,7 +22,6 @@ import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Button } from '@/components/ui/button'
 import { Separator } from '@/components/ui/separator'
 import { settingsApi } from '@/api/settings'
-import { QRLoginDialog } from '@/components/QRLoginDialog'
 import type { User } from '@/api/auth'
 
 type Role = User['role']
@@ -55,7 +52,6 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
   const { user, logout } = useAuth()
   const { theme, setTheme } = useTheme()
   const navigate = useNavigate()
-  const [qrOpen, setQrOpen] = useState(false)
 
   const { data: branding } = useQuery({
     queryKey: ['branding'],
@@ -219,15 +215,6 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
                 variant="ghost"
                 size="icon"
                 className="h-7 w-7 text-sidebar-foreground/60 hover:text-sidebar-foreground hover:bg-sidebar-accent"
-                onClick={() => setQrOpen(true)}
-                title="Login on another device"
-              >
-                <Smartphone className="h-3.5 w-3.5" />
-              </Button>
-              <Button
-                variant="ghost"
-                size="icon"
-                className="h-7 w-7 text-sidebar-foreground/60 hover:text-sidebar-foreground hover:bg-sidebar-accent"
                 onClick={() => navigate('/settings')}
                 title="Settings"
               >
@@ -256,8 +243,6 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
           )}
         </div>
       </div>
-
-      <QRLoginDialog open={qrOpen} onClose={() => setQrOpen(false)} />
     </aside>
   )
 }

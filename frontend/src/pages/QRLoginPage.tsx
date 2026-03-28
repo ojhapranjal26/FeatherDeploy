@@ -3,46 +3,35 @@ import { useParams, useNavigate } from 'react-router-dom'
 import { Feather, CheckCircle2, XCircle, Loader2, Smartphone } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { qrApi } from '@/api/auth'
-import type { QRStatusResponse } from '@/api/auth'
 import { useAuth } from '@/context/AuthContext'
 import { settingsApi, type Branding } from '@/api/settings'
 
-export function QRLoginPage() {
+type PageStatus = 'approving' | 'success' | 'conflict' | 'expired' | 'error'
+
+/** /qr-approve/:token — authenticated device sees this page and approves the login. */
+export function QRApprovePage() {
   const { token } = useParams<{ token: string }>()
   const navigate = useNavigate()
-  const { loginWithToken } = useAuth()
+  const { user } = useAuth()
 
   const [branding, setBranding] = useState<Branding>({ company_name: '', logo_url: '' })
-  const [info, setInfo] = useState<QRStatusResponse | null>(null)
-  const [pageStatus, setPageStatus] = useState<'loading' | 'ready' | 'claiming' | 'success' | 'expired' | 'error'>('loading')
-  const [ttl, setTtl] = useState<number | null>(null)
+  const [pageStatus, setPageStatus] = useState<PageStatus>('approving')
 
   useEffect(() => {
     settingsApi.getBranding().then(setBranding).catch(() => {})
   }, [])
 
-  useEffect(() => {
-    if (!token) { setPageStatus('error'); return }
-    qrApi.status(token).then((res) => {
-      setInfo(res)
-      if (res.status === 'expired')       setPageStatus('expired')
-      else if (res.status === 'claimed')  setPageStatus('error')
-      else                               setPageStatus('ready')
-    }).catch(() => setPageStatus('error'))
-  }, [token])
-
-  const handleClaim = async () => {
+  const handleApprove = async () => {
     if (!token) return
-    setPageStatus('claiming')
+    setPageStatus('approving')
     try {
-      const data = await qrApi.claim(token)
-      setTtl(data.ttl_minutes)
-      loginWithToken(data.token, data.user)
+      await qrApi.approve(token)
       setPageStatus('success')
-      setTimeout(() => navigate('/dashboard'), 2000)
     } catch (err: unknown) {
       const status = (err as { response?: { status?: number } })?.response?.status
-      setPageStatus(status === 410 || status === 409 ? 'expired' : 'error')
+      if (status === 409) setPageStatus('conflict')
+      else if (status === 410 || status === 404) setPageStatus('expired')
+      else setPageStatus('error')
     }
   }
 
@@ -65,49 +54,39 @@ export function QRLoginPage() {
 
         {/* Card */}
         <div className="rounded-2xl border border-border/60 bg-card shadow-xl p-7 space-y-5">
-          {/* ── Loading ── */}
-          {pageStatus === 'loading' && (
-            <div className="flex flex-col items-center gap-3 py-4">
-              <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-              <p className="text-sm text-muted-foreground">Verifying QR code…</p>
-            </div>
-          )}
 
-          {/* ── Ready to claim ── */}
-          {pageStatus === 'ready' && info && (
+          {/* ── Pending approval ── */}
+          {pageStatus === 'approving' && (
             <>
               <div className="flex flex-col items-center gap-1 text-center">
                 <div className="flex h-14 w-14 items-center justify-center rounded-full bg-primary/10 mb-1">
                   <Smartphone className="h-7 w-7 text-primary" />
                 </div>
-                <h1 className="text-xl font-bold">Authorize this device</h1>
+                <h1 className="text-xl font-bold">Approve device login</h1>
                 <p className="text-sm text-muted-foreground mt-1">
-                  You are about to log in as:
+                  A device is waiting to log in as:
                 </p>
               </div>
 
               <div className="rounded-xl bg-muted/50 border border-border/50 px-4 py-3 space-y-0.5">
-                <p className="font-semibold text-sm">{info.user_name}</p>
-                <p className="text-xs text-muted-foreground">{info.user_email}</p>
+                <p className="font-semibold text-sm">{user?.name}</p>
+                <p className="text-xs text-muted-foreground">{user?.email}</p>
               </div>
 
               <p className="text-xs text-muted-foreground text-center">
-                Session expires automatically — this is a temporary login for this device only.
+                Only approve if you initiated this login. The session lasts up to 1 hour.
               </p>
 
-              <Button className="w-full h-10 font-medium gap-2" onClick={handleClaim}>
-                <CheckCircle2 className="h-4 w-4" />
-                Authorize Login
-              </Button>
+              <div className="flex gap-2">
+                <Button variant="outline" className="flex-1" onClick={() => navigate('/dashboard')}>
+                  Cancel
+                </Button>
+                <Button className="flex-1 gap-2" onClick={handleApprove}>
+                  <CheckCircle2 className="h-4 w-4" />
+                  Approve Login
+                </Button>
+              </div>
             </>
-          )}
-
-          {/* ── Claiming ── */}
-          {pageStatus === 'claiming' && (
-            <div className="flex flex-col items-center gap-3 py-4">
-              <Loader2 className="h-8 w-8 animate-spin text-primary" />
-              <p className="text-sm text-muted-foreground">Signing you in…</p>
-            </div>
           )}
 
           {/* ── Success ── */}
@@ -115,12 +94,30 @@ export function QRLoginPage() {
             <div className="flex flex-col items-center gap-3 py-4 text-center">
               <CheckCircle2 className="h-12 w-12 text-emerald-500" />
               <div>
-                <p className="font-semibold">Logged in!</p>
+                <p className="font-semibold">Login approved!</p>
                 <p className="text-xs text-muted-foreground mt-1">
-                  Session valid for {ttl} minute{ttl !== 1 ? 's' : ''}.
-                  Redirecting to dashboard…
+                  The other device is now logging in.
                 </p>
               </div>
+              <Button variant="outline" size="sm" onClick={() => navigate('/dashboard')}>
+                Back to dashboard
+              </Button>
+            </div>
+          )}
+
+          {/* ── Already approved ── */}
+          {pageStatus === 'conflict' && (
+            <div className="flex flex-col items-center gap-3 py-4 text-center">
+              <CheckCircle2 className="h-12 w-12 text-muted-foreground" />
+              <div>
+                <p className="font-semibold">Already approved</p>
+                <p className="text-xs text-muted-foreground mt-1">
+                  This QR login has already been approved.
+                </p>
+              </div>
+              <Button variant="outline" size="sm" onClick={() => navigate('/dashboard')}>
+                Back to dashboard
+              </Button>
             </div>
           )}
 
@@ -131,28 +128,40 @@ export function QRLoginPage() {
               <div>
                 <p className="font-semibold">QR code expired</p>
                 <p className="text-xs text-muted-foreground mt-1">
-                  Please go back to your dashboard and generate a new QR code.
+                  The QR code has expired. Ask the other device to refresh it.
                 </p>
               </div>
+              <Button variant="outline" size="sm" onClick={() => navigate('/dashboard')}>
+                Back to dashboard
+              </Button>
             </div>
           )}
 
-          {/* ── Generic error ── */}
+          {/* ── Error ── */}
           {pageStatus === 'error' && (
             <div className="flex flex-col items-center gap-3 py-4 text-center">
               <XCircle className="h-12 w-12 text-destructive" />
               <div>
-                <p className="font-semibold">Invalid or already used</p>
+                <p className="font-semibold">Something went wrong</p>
                 <p className="text-xs text-muted-foreground mt-1">
-                  This QR code is no longer valid. Ask the account owner to generate a new one.
+                  Could not approve the login. Please try again.
                 </p>
+              </div>
+              <div className="flex gap-2">
+                <Button variant="outline" size="sm" onClick={() => navigate('/dashboard')}>
+                  Cancel
+                </Button>
+                <Button size="sm" onClick={() => setPageStatus('approving')}>
+                  <Loader2 className="h-3.5 w-3.5 mr-1.5" />
+                  Retry
+                </Button>
               </div>
             </div>
           )}
         </div>
 
         <p className="text-center text-xs text-muted-foreground">
-          This session was initiated from a trusted device.
+          You are logged in as <span className="font-medium text-foreground">{user?.email}</span>
         </p>
       </div>
     </div>

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useRef } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
@@ -243,7 +243,11 @@ export function ProjectPage() {
   const [confirmDeleteProject, setConfirmDeleteProject] = useState(false)
   const [membersOpen, setMembersOpen] = useState(false)
   const [addMemberEmail, setAddMemberEmail] = useState('')
+  const [addMemberEmailDisplay, setAddMemberEmailDisplay] = useState('')
+  const [addMemberSearchQ, setAddMemberSearchQ] = useState('')
+  const [addMemberDropdownOpen, setAddMemberDropdownOpen] = useState(false)
   const [addMemberRole, setAddMemberRole] = useState<'owner' | 'editor' | 'viewer'>('editor')
+  const searchRef = useRef<HTMLDivElement>(null)
 
   const { data: project, isLoading: projLoading } = useQuery({
     queryKey: ['project', projectId],
@@ -259,6 +263,13 @@ export function ProjectPage() {
     enabled: !!projectId && isOwner,
   })
 
+  const { data: userSearchResults } = useQuery({
+    queryKey: ['users-search', addMemberSearchQ],
+    queryFn: () => usersApi.search(addMemberSearchQ),
+    enabled: membersOpen && addMemberSearchQ.length >= 1,
+    staleTime: 10_000,
+  })
+
   const addMemberMutation = useMutation({
     mutationFn: async () => {
       const user = await usersApi.lookup(addMemberEmail.trim())
@@ -267,6 +278,8 @@ export function ProjectPage() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['project-members', projectId] })
       setAddMemberEmail('')
+      setAddMemberEmailDisplay('')
+      setAddMemberSearchQ('')
       toast.success('Member added.')
     },
     onError: (err: unknown) => toast.error((err as any)?.response?.data?.error ?? 'Failed to add member.'),
@@ -471,28 +484,81 @@ export function ProjectPage() {
       )}
 
       {/* ── Add member dialog ──────────────────────────────────────────── */}
-      <Dialog open={membersOpen} onOpenChange={setMembersOpen}>
+      <Dialog open={membersOpen} onOpenChange={(o) => {
+        setMembersOpen(o)
+        if (!o) {
+          setAddMemberEmail('')
+          setAddMemberEmailDisplay('')
+          setAddMemberSearchQ('')
+          setAddMemberDropdownOpen(false)
+        }
+      }}>
         <DialogContent className="sm:max-w-sm">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Users className="h-4 w-4 text-primary" /> Add project member
             </DialogTitle>
             <DialogDescription>
-              Enter the email of a registered user and choose their role.
+              Search for a registered user and choose their role.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-3 py-2">
             <div>
-              <Label htmlFor="member-email">Email address</Label>
-              <Input
-                id="member-email"
-                type="email"
-                placeholder="user@example.com"
-                className="mt-1.5"
-                value={addMemberEmail}
-                onChange={e => setAddMemberEmail(e.target.value)}
-                onKeyDown={e => e.key === 'Enter' && addMemberEmail.includes('@') && addMemberMutation.mutate()}
-              />
+              <Label htmlFor="member-email">User</Label>
+              <div className="relative mt-1.5" ref={searchRef}>
+                <Input
+                  id="member-email"
+                  type="text"
+                  placeholder="Search by name or email…"
+                  autoComplete="off"
+                  value={addMemberEmailDisplay || addMemberSearchQ}
+                  onChange={e => {
+                    const v = e.target.value
+                    setAddMemberEmailDisplay('')
+                    setAddMemberEmail('')
+                    setAddMemberSearchQ(v)
+                    setAddMemberDropdownOpen(true)
+                  }}
+                  onFocus={() => {
+                    if (!addMemberEmail) setAddMemberDropdownOpen(true)
+                  }}
+                  onBlur={(e) => {
+                    // delay so click on list item fires first
+                    if (!searchRef.current?.contains(e.relatedTarget as Node)) {
+                      setTimeout(() => setAddMemberDropdownOpen(false), 150)
+                    }
+                  }}
+                />
+                {addMemberDropdownOpen && userSearchResults && userSearchResults.length > 0 && (
+                  <div className="absolute z-50 mt-1 w-full rounded-md border border-border/60 bg-popover shadow-lg">
+                    <ul className="max-h-44 overflow-y-auto py-1 text-sm">
+                      {userSearchResults.map(u => (
+                        <li
+                          key={u.id}
+                          tabIndex={0}
+                          className="flex flex-col px-3 py-2 cursor-pointer hover:bg-accent focus:bg-accent outline-none"
+                          onMouseDown={(e) => {
+                            // prevent blur firing before click
+                            e.preventDefault()
+                            setAddMemberEmail(u.email)
+                            setAddMemberEmailDisplay(u.name ? `${u.name} (${u.email})` : u.email)
+                            setAddMemberSearchQ('')
+                            setAddMemberDropdownOpen(false)
+                          }}
+                        >
+                          <span className="font-medium truncate">{u.name || u.email}</span>
+                          {u.name && <span className="text-xs text-muted-foreground truncate">{u.email}</span>}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {addMemberDropdownOpen && addMemberSearchQ.length >= 1 && (!userSearchResults || userSearchResults.length === 0) && (
+                  <div className="absolute z-50 mt-1 w-full rounded-md border border-border/60 bg-popover shadow-sm">
+                    <p className="px-3 py-2 text-xs text-muted-foreground">No users found</p>
+                  </div>
+                )}
+              </div>
             </div>
             <div>
               <Label htmlFor="member-role">Role</Label>
@@ -509,14 +575,20 @@ export function ProjectPage() {
             </div>
           </div>
           <DialogFooter>
-            <Button variant="ghost" size="sm" onClick={() => setMembersOpen(false)}>Cancel</Button>
+            <Button variant="ghost" size="sm" onClick={() => {
+              setMembersOpen(false)
+              setAddMemberEmail('')
+              setAddMemberEmailDisplay('')
+              setAddMemberSearchQ('')
+              setAddMemberDropdownOpen(false)
+            }}>Cancel</Button>
             <Button
               size="sm"
-              disabled={!addMemberEmail.includes('@') || addMemberMutation.isPending}
+              disabled={!addMemberEmail || addMemberMutation.isPending}
               onClick={() => addMemberMutation.mutate()}
             >
               {addMemberMutation.isPending
-                ? <><Loader2 className="h-3.5 w-3.5 animate-spin mr-1.5" />Looking up…</>
+                ? <><Loader2 className="h-3.5 w-3.5 animate-spin mr-1.5" />Adding…</>
                 : 'Add member'}
             </Button>
           </DialogFooter>

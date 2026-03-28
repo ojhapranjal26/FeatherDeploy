@@ -160,13 +160,14 @@ CREATE TABLE IF NOT EXISTS service_stats_monthly (
 );
 
 -- 013: qr_login_tokens — short-lived tokens enabling QR-code-based login on another device
+-- Flow: login page calls /init (public) → QR shown → authenticated device opens URL → /approve
+-- NOTE: if upgrading from an older schema, DROP TABLE qr_login_tokens to pick up nullable user_id
 CREATE TABLE IF NOT EXISTS qr_login_tokens (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     token         TEXT    NOT NULL UNIQUE,
-    user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    status        TEXT    NOT NULL DEFAULT 'pending',  -- pending | claimed | expired
-    ttl_minutes   INTEGER NOT NULL DEFAULT 60,          -- session duration after claim (max 60)
-    session_token TEXT    NOT NULL DEFAULT '',          -- JWT issued on claim
+    user_id       INTEGER REFERENCES users(id) ON DELETE CASCADE,  -- NULL until approved
+    status        TEXT    NOT NULL DEFAULT 'pending',  -- pending | approved | expired
+    session_token TEXT    NOT NULL DEFAULT '',          -- JWT issued on approval
     created_at    DATETIME NOT NULL DEFAULT (datetime('now')),
     qr_expires_at DATETIME NOT NULL                    -- QR code itself expires after ~5 min
 );
