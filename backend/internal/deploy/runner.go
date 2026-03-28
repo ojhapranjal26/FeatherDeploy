@@ -389,18 +389,15 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 	envArgs = append(envArgs, collectProjectDBEnvArgs(db, projectID, jwtSecret)...)
 	mountArgs := collectProjectDBMountArgs(db, projectID)
 
-	// ── 8b. Ensure the per-project runtime group exists ───────────────────────
-	// Containers are grouped under a project pod while still joining a shared
-	// project network for alias-based communication.
-	podName := projectPodName(projectID)
-	if podErr := ensureProjectPod(projectID); podErr != nil {
-		log.add("[pod] WARNING: could not create project pod %s: %v", podName, podErr)
-		podName = ""
-	}
+	// ── 8b. Ensure the per-project network exists ─────────────────────────────
+	// Microservices in the same project communicate over a dedicated project
+	// network using their service/database aliases. This avoids shared-pod port
+	// conflicts when multiple containers inside one project listen on 3000/8080.
 	networkName := projectNetworkName(projectID)
 	if netErr := ensureProjectNetwork(projectID); netErr != nil {
-		log.add("[network] WARNING: could not create project network %s: %v", networkName, netErr)
-		networkName = ""
+		log.add("ERROR: could not create project network %s: %v", networkName, netErr)
+		markFailed(db, depID, svcID, log.text())
+		return
 	}
 
 	// ── 9. Run new container ──────────────────────────────────────────────────
@@ -418,14 +415,11 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 		// from other containers in the same project.
 		runArgs = append(runArgs, "--network", networkName, "--network-alias", svcName)
 	}
-	if podName != "" {
-		runArgs = append(runArgs, "--pod", podName)
-	}
 	runArgs = append(runArgs, mountArgs...)
 	runArgs = append(runArgs, envArgs...)
 	runArgs = append(runArgs, imageName)
 
-	log.add("[podman] podman run -d --name %s -p %d:%d --pod %s --network %s %s", cName, hostPort, appPort, podName, networkName, imageName)
+	log.add("[podman] podman run -d --name %s -p %d:%d --network %s %s", cName, hostPort, appPort, networkName, imageName)
 	out, err := podmanCmd(runArgs...).CombinedOutput()
 	if err != nil {
 		log.add("ERROR: podman run failed: %v\n%s", err, strings.TrimSpace(string(out)))
@@ -1015,21 +1009,6 @@ func projectNetworkName(projectID int64) string {
 	return fmt.Sprintf("fd-proj-%d", projectID)
 }
 
-// ensureProjectPod creates the per-project pod if it does not already exist.
-// The pod intentionally does not share a network namespace so each container
-// can still keep its own published ports while remaining logically grouped.
-func ensureProjectPod(projectID int64) error {
-	name := projectPodName(projectID)
-	if podExists(name) {
-		return nil
-	}
-	out, err := podmanCmd("pod", "create", "--infra=false", "--share", "cgroup,ipc,uts", "--name", name).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("podman pod create %s: %v — %s", name, err, strings.TrimSpace(string(out)))
-	}
-	return nil
-}
-
 // ensureProjectNetwork creates the per-project podman bridge network if it
 // does not already exist. The --ignore flag makes podman exit 0 when the
 // network already exists, so calling this before every deployment is idempotent.
@@ -1221,15 +1200,12 @@ func StartDatabase(db *sql.DB, jwtSecret string, dbID int64) error {
 	}
 
 	// Ensure the project network exists.
-	if podErr := ensureProjectPod(projectID); podErr != nil {
-		slog.Warn("start database: ensure project pod", "err", podErr)
-	}
 	if netErr := ensureProjectNetwork(projectID); netErr != nil {
-		slog.Warn("start database: ensure project network", "err", netErr)
+		db.Exec(`UPDATE databases SET status='error', updated_at=datetime('now') WHERE id=?`, dbID) //nolint
+		return fmt.Errorf("start database: ensure project network: %w", netErr)
 	}
 
 	cName := fmt.Sprintf("fd-db-%d", dbID)
-	podName := projectPodName(projectID)
 	networkName := projectNetworkName(projectID)
 	alias := DBNetworkAlias(name)
 	image := dbImageName(dbType, dbVersion)
@@ -1277,9 +1253,6 @@ func StartDatabase(db *sql.DB, jwtSecret string, dbID int64) error {
 		"--log-opt", "max-size=10m",
 		"--log-opt", "max-file=3",
 		"-v", volumeName + ":" + mountPath,
-	}
-	if podName != "" {
-		runArgs = append(runArgs, "--pod", podName)
 	}
 	if networkName != "" {
 		runArgs = append(runArgs, "--network", networkName)
@@ -1504,10 +1477,6 @@ func podmanCmd(args ...string) *exec.Cmd {
 // podmanCmdCtx is like podmanCmd but accepts a context for timeout control.
 func podmanCmdCtx(ctx context.Context, args ...string) *exec.Cmd {
 	return exec.CommandContext(ctx, "podman", args...)
-}
-
-func podExists(name string) bool {
-	return podmanCmd("pod", "exists", name).Run() == nil
 }
 
 // podmanBuild builds a container image using rootless podman.
