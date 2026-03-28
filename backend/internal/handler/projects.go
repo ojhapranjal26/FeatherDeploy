@@ -114,12 +114,14 @@ func (h *ProjectHandler) Get(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, errMap("invalid projectID"))
 		return
 	}
+	claims := middleware.GetClaims(r.Context())
 	var p model.Project
 	err = h.db.QueryRowContext(r.Context(),
 		`SELECT p.id, p.name, p.description, p.owner_id, p.created_at, p.updated_at,
-		        (SELECT COUNT(*) FROM services s WHERE s.project_id=p.id) AS service_count
-		 FROM projects p WHERE p.id=?`, projectID,
-	).Scan(&p.ID, &p.Name, &p.Description, &p.OwnerID, &p.CreatedAt, &p.UpdatedAt, &p.ServiceCount)
+		        (SELECT COUNT(*) FROM services s WHERE s.project_id=p.id) AS service_count,
+		        COALESCE((SELECT pm.role FROM project_members pm WHERE pm.project_id=p.id AND pm.user_id=?), '') AS my_role
+		 FROM projects p WHERE p.id=?`, claims.UserID, projectID,
+	).Scan(&p.ID, &p.Name, &p.Description, &p.OwnerID, &p.CreatedAt, &p.UpdatedAt, &p.ServiceCount, &p.MyRole)
 	if err == sql.ErrNoRows {
 		writeJSON(w, http.StatusNotFound, errMap("project not found"))
 		return
@@ -254,5 +256,36 @@ func (h *ProjectHandler) RemoveMember(w http.ResponseWriter, r *http.Request) {
 	h.db.ExecContext(r.Context(),
 		`DELETE FROM project_members WHERE project_id=? AND user_id=?`, projectID, userID)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// PATCH /api/projects/{projectID}/members/{userID}
+func (h *ProjectHandler) UpdateMember(w http.ResponseWriter, r *http.Request) {
+	projectID, err := strconv.ParseInt(r.PathValue("projectID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errMap("invalid projectID"))
+		return
+	}
+	userID, err := strconv.ParseInt(r.PathValue("userID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errMap("invalid userID"))
+		return
+	}
+	var req model.AssignProjectMemberRequest
+	if !v.DecodeAndValidate(w, r, &req) {
+		return
+	}
+	res, err := h.db.ExecContext(r.Context(),
+		`UPDATE project_members SET role=? WHERE project_id=? AND user_id=?`,
+		req.Role, projectID, userID)
+	if err != nil {
+		slog.Error("update member", "err", err)
+		writeJSON(w, http.StatusInternalServerError, errMap("internal error"))
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		writeJSON(w, http.StatusNotFound, errMap("member not found"))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 

@@ -97,3 +97,31 @@ func (h *UserHandler) Delete(w http.ResponseWriter, r *http.Request) {
 
 func errMap(msg string) map[string]string { return map[string]string{"error": msg} }
 
+// GET /api/users/lookup?email=xxx  — any authenticated user
+// Returns basic public info about a registered user so project owners can
+// look up someone by email before adding them as a project member.
+func (h *UserHandler) Lookup(w http.ResponseWriter, r *http.Request) {
+	email := r.URL.Query().Get("email")
+	if email == "" {
+		writeJSON(w, http.StatusBadRequest, errMap("email query param required"))
+		return
+	}
+	var u struct {
+		ID    int64  `json:"id"`
+		Email string `json:"email"`
+		Name  string `json:"name"`
+	}
+	err := h.db.QueryRowContext(r.Context(),
+		`SELECT id, email, name FROM users WHERE email=?`, email,
+	).Scan(&u.ID, &u.Email, &u.Name)
+	if err == sql.ErrNoRows {
+		writeJSON(w, http.StatusNotFound, errMap("user not found"))
+		return
+	}
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errMap("internal error"))
+		return
+	}
+	writeJSON(w, http.StatusOK, u)
+}
+

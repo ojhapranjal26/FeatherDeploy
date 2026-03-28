@@ -88,4 +88,7 @@ export const servicesApi = {
 
   detect: (projectId: string | number, serviceId: string | number): Promise<DetectionResult> =>
     client.post<DetectionResult>(`/projects/${projectId}/services/${serviceId}/detect`).then((r) => r.data),
+
+  restart: (projectId: string | number, serviceId: string | number): Promise<{ status: string }> =>
+    client.post<{ status: string }>(`/projects/${projectId}/services/${serviceId}/restart`).then((r) => r.data),
 }

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { ChevronLeft, Rocket, Clock, Search, Loader2, CheckCircle2, Plus, Trash2, Eye, EyeOff, ExternalLink, Terminal, Code2, CircleDot, Cpu, MemoryStick, Network, HardDrive, Activity, Copy, Download, Upload, X, Lock, Globe, Pencil, Check, GitBranch, GitFork, Settings2, Unlink } from 'lucide-react'
+import { ChevronLeft, Rocket, Clock, Search, Loader2, CheckCircle2, Plus, Trash2, Eye, EyeOff, ExternalLink, Terminal, Code2, CircleDot, Cpu, MemoryStick, Network, HardDrive, Activity, Copy, Download, Upload, X, Lock, Globe, Pencil, Check, GitBranch, GitFork, Settings2, Unlink, RotateCcw } from 'lucide-react'
 import {
   AreaChart, Area, ResponsiveContainer, Tooltip, XAxis, YAxis, CartesianGrid,
 } from 'recharts'
@@ -304,6 +304,15 @@ export function ServicePage() {
     onError: (err: unknown) => toast.error((err as any)?.response?.data?.error ?? 'Artifact upload failed.'),
   })
 
+  const restartMutation = useMutation({
+    mutationFn: () => servicesApi.restart(projectId!, serviceId!),
+    onSuccess: () => {
+      toast.success('Container restarted.')
+      qc.invalidateQueries({ queryKey: ['service', projectId, serviceId] })
+    },
+    onError: (err: unknown) => toast.error((err as any)?.response?.data?.error ?? 'Restart failed.'),
+  })
+
   // needsDetection: true when deploy_type is git but framework/commands not set
   const needsDetection =
     service?.deploy_type === 'git' &&
@@ -507,6 +516,19 @@ export function ServicePage() {
             >
               <Search className="h-3.5 w-3.5" />
               Detect stack
+            </Button>
+          )}
+          {service.status === 'running' && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="gap-1.5 text-xs"
+              onClick={() => restartMutation.mutate()}
+              disabled={restartMutation.isPending || isDeploying}
+            >
+              {restartMutation.isPending
+                ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Restarting…</>
+                : <><RotateCcw className="h-3.5 w-3.5" /> Restart</>}
             </Button>
           )}
           <Button

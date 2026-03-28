@@ -266,6 +266,9 @@ func serve() {
 		// ── Dashboard ──────────────────────────────────────────────────────
 		r.Get("/api/dashboard", dashH.Stats)
 
+		// ── User lookup (any authenticated user — used for member invites) ─
+		r.Get("/api/users/lookup", userH.Lookup)
+
 		// ── Admin: user management ─────────────────────────────────────────
 		r.Group(func(r chi.Router) {
 			r.Use(mw.RequireRole(model.RoleSuperAdmin, model.RoleAdmin))
@@ -357,6 +360,7 @@ func serve() {
 				r.Delete("/api/projects/{projectID}", projH.Delete)
 				r.Get("/api/projects/{projectID}/members", projH.ListMembers)
 				r.Post("/api/projects/{projectID}/members", projH.AddMember)
+				r.Patch("/api/projects/{projectID}/members/{userID}", projH.UpdateMember)
 				r.Delete("/api/projects/{projectID}/members/{userID}", projH.RemoveMember)
 			})
 
@@ -370,6 +374,7 @@ func serve() {
 				r.Get("/api/projects/{projectID}/services/{serviceID}", svcH.Get)
 				r.Patch("/api/projects/{projectID}/services/{serviceID}", svcH.Update)
 				r.Delete("/api/projects/{projectID}/services/{serviceID}", svcH.Delete)
+				r.Post("/api/projects/{projectID}/services/{serviceID}/restart", svcH.Restart)
 
 				// ── Stack detection ──────────────────────────────────────
 				r.Post("/api/projects/{projectID}/services/{serviceID}/detect", detectH.Detect)
@@ -492,6 +497,14 @@ func reconcileServiceStates(db *sql.DB) {
 		wantedStatus := "error"
 		if state == "running" {
 			wantedStatus = "running"
+		} else if state == "exited" || state == "stopped" || state == "created" {
+			// Container exists but is stopped — attempt a restart before giving up.
+			if startOut, startErr := exec.Command("podman", "start", cName).CombinedOutput(); startErr == nil {
+				wantedStatus = "running"
+				slog.Info("startup reconcile: restarted stopped container", "svc_id", svcID)
+			} else {
+				slog.Warn("startup reconcile: could not restart container", "svc_id", svcID, "output", strings.TrimSpace(string(startOut)))
+			}
 		}
 		db.Exec( //nolint
 			`UPDATE services SET status=?, updated_at=datetime('now') WHERE id=?`,

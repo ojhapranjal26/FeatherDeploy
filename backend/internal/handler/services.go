@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	caddypkg "github.com/ojhapranjal26/featherdeploy/backend/internal/caddy"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/model"
@@ -237,7 +238,25 @@ func (h *ServiceHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// splitLines splits a newline-separated string, trimming whitespace.
+// POST /api/projects/{projectID}/services/{serviceID}/restart
+// Restarts a running container without triggering a full re-deployment.
+func (h *ServiceHandler) Restart(w http.ResponseWriter, r *http.Request) {
+	svcID, err := parseServiceID(r)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errMap("invalid serviceID"))
+		return
+	}
+	cName := fmt.Sprintf("fd-svc-%d", svcID)
+	out, err := exec.Command("podman", "restart", cName).CombinedOutput()
+	if err != nil {
+		slog.Error("restart container", "svc_id", svcID, "err", err, "output", string(out))
+		writeJSON(w, http.StatusInternalServerError, errMap("restart failed: "+strings.TrimSpace(string(out))))
+		return
+	}
+	h.db.ExecContext(r.Context(), //nolint
+		`UPDATE services SET status='running', updated_at=datetime('now') WHERE id=?`, svcID)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "restarted"})
+}
 func splitLines(s string) []string {
 	var out []string
 	for _, l := range splitNewline(s) {

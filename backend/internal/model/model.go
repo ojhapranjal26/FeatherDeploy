@@ -32,6 +32,8 @@ type Project struct {
 	UpdatedAt   time.Time `json:"updated_at"`
 	// Populated on list
 	ServiceCount int `json:"service_count,omitempty"`
+	// Calling user's role in this project (owner|editor|viewer), populated on get
+	MyRole string `json:"my_role,omitempty"`
 }
 
 // ProjectMember maps users↔projects with a per-project role

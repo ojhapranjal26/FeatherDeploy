@@ -82,6 +82,11 @@ func (e *podmanStatEntry) UnmarshalJSON(data []byte) error {
 			if json.Unmarshal(v, &obj) == nil && obj.Value > 0 {
 				return obj.Value
 			}
+			// Newer podman may return string-formatted sizes like "1.234kB"
+			var s string
+			if json.Unmarshal(v, &s) == nil {
+				return parseByteStr(s)
+			}
 		}
 		return 0
 	}
@@ -132,6 +137,15 @@ func (e *podmanStatEntry) UnmarshalJSON(data []byte) error {
 	if e.NetOutput == 0 {
 		e.NetOutput = u64("net_output")
 	}
+	// Newer podman versions use a combined "net_io" field: "1.2kB / 5.4kB"
+	if e.NetInput == 0 && e.NetOutput == 0 {
+		if v, ok := raw["net_io"]; ok {
+			var s string
+			if json.Unmarshal(v, &s) == nil {
+				e.NetInput, e.NetOutput = parseIOStr(s)
+			}
+		}
+	}
 
 	// Block I/O
 	e.BlockIn = u64("BlockInput")
@@ -141,6 +155,15 @@ func (e *podmanStatEntry) UnmarshalJSON(data []byte) error {
 	e.BlockOut = u64("BlockOutput")
 	if e.BlockOut == 0 {
 		e.BlockOut = u64("block_output")
+	}
+	// Newer podman versions use a combined "block_io" field: "32.7kB / 0B"
+	if e.BlockIn == 0 && e.BlockOut == 0 {
+		if v, ok := raw["block_io"]; ok {
+			var s string
+			if json.Unmarshal(v, &s) == nil {
+				e.BlockIn, e.BlockOut = parseIOStr(s)
+			}
+		}
 	}
 
 	// PIDs
@@ -173,6 +196,53 @@ func parsePercent(s string) float64 {
 	s = strings.TrimSuffix(strings.TrimSpace(s), "%")
 	v, _ := strconv.ParseFloat(s, 64)
 	return v
+}
+
+// parseByteStr converts podman human-readable byte sizes to raw bytes.
+// Handles formats from any podman version: "0B", "1.234kB", "2.5 MB", "1.2GiB", etc.
+func parseByteStr(s string) uint64 {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0
+	}
+	type mul struct {
+		suffix string
+		mult   float64
+	}
+	// Ordered longest-suffix first to avoid "B" matching "kB" etc.
+	multipliers := []mul{
+		{"GiB", float64(1 << 30)},
+		{"MiB", float64(1 << 20)},
+		{"KiB", float64(1 << 10)},
+		{"GB", 1e9},
+		{"MB", 1e6},
+		{"kB", 1e3},
+		{"KB", 1e3},
+		{"B", 1},
+	}
+	for _, m := range multipliers {
+		if strings.HasSuffix(s, m.suffix) {
+			numPart := strings.TrimSpace(strings.TrimSuffix(s, m.suffix))
+			if v, err := strconv.ParseFloat(numPart, 64); err == nil {
+				return uint64(v * m.mult)
+			}
+		}
+	}
+	// Try raw number
+	if v, err := strconv.ParseUint(strings.TrimSpace(s), 10, 64); err == nil {
+		return v
+	}
+	return 0
+}
+
+// parseIOStr splits a combined "1.234kB / 5.678MB" I/O string as returned by
+// some podman versions into (in, out) byte counts.
+func parseIOStr(s string) (in, out uint64) {
+	parts := strings.SplitN(s, " / ", 2)
+	if len(parts) == 2 {
+		return parseByteStr(parts[0]), parseByteStr(parts[1])
+	}
+	return parseByteStr(s), 0
 }
 
 // Stream handles GET .../stats/stream — SSE endpoint for a single container.

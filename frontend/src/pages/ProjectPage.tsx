@@ -4,10 +4,10 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   Plus, ChevronLeft, Rocket, Settings2, Trash2,
   ExternalLink, GitBranch, Terminal,
-  Globe, AlertTriangle,
+  Globe, AlertTriangle, Users, UserMinus, Loader2,
 } from 'lucide-react'
 import { toast } from 'sonner'
-import { projectsApi } from '@/api/projects'
+import { projectsApi, usersApi, type ProjectMember } from '@/api/projects'
 import { servicesApi } from '@/api/services'
 import { deploymentsApi } from '@/api/deployments'
 import type { Service } from '@/api/services'
@@ -40,8 +40,15 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 
-function ServiceCard({ service, projectId }: { service: Service; projectId: string }) {
+function ServiceCard({ service, projectId, canEdit }: { service: Service; projectId: string; canEdit: boolean }) {
   const navigate = useNavigate()
   const qc = useQueryClient()
   const [confirmDelete, setConfirmDelete] = useState(false)
@@ -114,19 +121,27 @@ function ServiceCard({ service, projectId }: { service: Service; projectId: stri
                 <DropdownMenuItem onClick={() => navigate(`/projects/${projectId}/services/${service.id}`)}>
                   <Terminal className="mr-2 h-3.5 w-3.5" /> View service
                 </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => navigate(`/projects/${projectId}/services/${service.id}/env`)}>
-                  <Settings2 className="mr-2 h-3.5 w-3.5" /> Environment
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => navigate(`/projects/${projectId}/services/${service.id}/domains`)}>
-                  <Globe className="mr-2 h-3.5 w-3.5" /> Domains
-                </DropdownMenuItem>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem
-                  className="text-destructive focus:text-destructive"
-                  onClick={() => setConfirmDelete(true)}
-                >
-                  <Trash2 className="mr-2 h-3.5 w-3.5" /> Delete service
-                </DropdownMenuItem>
+                {canEdit && (
+                  <DropdownMenuItem onClick={() => navigate(`/projects/${projectId}/services/${service.id}/env`)}>
+                    <Settings2 className="mr-2 h-3.5 w-3.5" /> Environment
+                  </DropdownMenuItem>
+                )}
+                {canEdit && (
+                  <DropdownMenuItem onClick={() => navigate(`/projects/${projectId}/services/${service.id}/domains`)}>
+                    <Globe className="mr-2 h-3.5 w-3.5" /> Domains
+                  </DropdownMenuItem>
+                )}
+                {canEdit && (
+                  <>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem
+                      className="text-destructive focus:text-destructive"
+                      onClick={() => setConfirmDelete(true)}
+                    >
+                      <Trash2 className="mr-2 h-3.5 w-3.5" /> Delete service
+                    </DropdownMenuItem>
+                  </>
+                )}
               </DropdownMenuContent>
             </DropdownMenu>
           </div>
@@ -151,21 +166,23 @@ function ServiceCard({ service, projectId }: { service: Service; projectId: stri
           ) : null}
 
           <div className="mt-auto flex gap-2">
-            <Button
-              size="sm"
-              className="flex-1 gap-1.5 text-xs h-8"
-              onClick={() => deployMutation.mutate()}
-              disabled={deployMutation.isPending || isDeploying}
-            >
-              {isDeploying ? (
-                <span className="flex items-center gap-1.5">
-                  <span className="h-3 w-3 rounded-full border-2 border-current border-t-transparent animate-spin" />
-                  Deploying…
-                </span>
-              ) : (
-                <><Rocket className="h-3 w-3" /> Deploy</>
-              )}
-            </Button>
+            {canEdit && (
+              <Button
+                size="sm"
+                className="flex-1 gap-1.5 text-xs h-8"
+                onClick={() => deployMutation.mutate()}
+                disabled={deployMutation.isPending || isDeploying}
+              >
+                {isDeploying ? (
+                  <span className="flex items-center gap-1.5">
+                    <span className="h-3 w-3 rounded-full border-2 border-current border-t-transparent animate-spin" />
+                    Deploying…
+                  </span>
+                ) : (
+                  <><Rocket className="h-3 w-3" /> Deploy</>
+                )}
+              </Button>
+            )}
             <Button
               size="sm"
               variant="outline"
@@ -224,11 +241,54 @@ export function ProjectPage() {
   const qc = useQueryClient()
   const [newServiceOpen, setNewServiceOpen] = useState(false)
   const [confirmDeleteProject, setConfirmDeleteProject] = useState(false)
+  const [membersOpen, setMembersOpen] = useState(false)
+  const [addMemberEmail, setAddMemberEmail] = useState('')
+  const [addMemberRole, setAddMemberRole] = useState<'owner' | 'editor' | 'viewer'>('editor')
 
   const { data: project, isLoading: projLoading } = useQuery({
     queryKey: ['project', projectId],
     queryFn: () => projectsApi.get(projectId!),
     enabled: !!projectId,
+  })
+
+  const isOwner = project?.my_role === 'owner'
+
+  const { data: members } = useQuery({
+    queryKey: ['project-members', projectId],
+    queryFn: () => projectsApi.listMembers(projectId!),
+    enabled: !!projectId && isOwner,
+  })
+
+  const addMemberMutation = useMutation({
+    mutationFn: async () => {
+      const user = await usersApi.lookup(addMemberEmail.trim())
+      return projectsApi.addMember(projectId!, user.id, addMemberRole)
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['project-members', projectId] })
+      setAddMemberEmail('')
+      toast.success('Member added.')
+    },
+    onError: (err: unknown) => toast.error((err as any)?.response?.data?.error ?? 'Failed to add member.'),
+  })
+
+  const updateMemberMutation = useMutation({
+    mutationFn: ({ userId, role }: { userId: number; role: 'owner' | 'editor' | 'viewer' }) =>
+      projectsApi.updateMember(projectId!, userId, role),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['project-members', projectId] })
+      toast.success('Role updated.')
+    },
+    onError: (err: unknown) => toast.error((err as any)?.response?.data?.error ?? 'Failed to update role.'),
+  })
+
+  const removeMemberMutation = useMutation({
+    mutationFn: (userId: number) => projectsApi.removeMember(projectId!, userId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['project-members', projectId] })
+      toast.success('Member removed.')
+    },
+    onError: (err: unknown) => toast.error((err as any)?.response?.data?.error ?? 'Failed to remove member.'),
   })
 
   const { data: services, isLoading: svcLoading } = useQuery({
@@ -285,7 +345,14 @@ export function ProjectPage() {
       ) : (
         <div className="flex items-start justify-between gap-4 flex-wrap">
           <div>
-            <h1 className="text-2xl font-bold tracking-tight">{project?.name}</h1>
+            <div className="flex items-center gap-2">
+              <h1 className="text-2xl font-bold tracking-tight">{project?.name}</h1>
+              {project?.my_role && (
+                <Badge variant={project.my_role === 'owner' ? 'default' : 'secondary'} className="text-xs capitalize">
+                  {project.my_role}
+                </Badge>
+              )}
+            </div>
             {project?.description && (
               <p className="mt-1 text-sm text-muted-foreground">{project.description}</p>
             )}
@@ -294,17 +361,21 @@ export function ProjectPage() {
             </p>
           </div>
           <div className="flex gap-2">
-            <Button
-              size="sm"
-              variant="outline"
-              className="gap-1.5 text-destructive hover:text-destructive hover:bg-destructive/10"
-              onClick={() => setConfirmDeleteProject(true)}
-            >
-              <Trash2 className="h-3.5 w-3.5" /> Delete project
-            </Button>
-            <Button size="sm" className="gap-1.5" onClick={() => setNewServiceOpen(true)}>
-              <Plus className="h-4 w-4" /> New service
-            </Button>
+            {isOwner && (
+              <Button
+                size="sm"
+                variant="outline"
+                className="gap-1.5 text-destructive hover:text-destructive hover:bg-destructive/10"
+                onClick={() => setConfirmDeleteProject(true)}
+              >
+                <Trash2 className="h-3.5 w-3.5" /> Delete project
+              </Button>
+            )}
+            {(project?.my_role === 'owner' || project?.my_role === 'editor') && (
+              <Button size="sm" className="gap-1.5" onClick={() => setNewServiceOpen(true)}>
+                <Plus className="h-4 w-4" /> New service
+              </Button>
+            )}
           </div>
         </div>
       )}
@@ -337,10 +408,120 @@ export function ProjectPage() {
       ) : (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {services?.map((s) => (
-            <ServiceCard key={s.id} service={s} projectId={projectId!} />
+            <ServiceCard key={s.id} service={s} projectId={projectId!} canEdit={project?.my_role === 'owner' || project?.my_role === 'editor'} />
           ))}
         </div>
       )}
+
+      {/* ── Project members (visible to owners only) ───────────────────── */}
+      {isOwner && (
+        <div className="mt-6">
+          <Separator className="mb-6" />
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-base font-semibold flex items-center gap-2">
+              <Users className="h-4 w-4 text-muted-foreground" />
+              Project members
+              {members && <Badge variant="secondary" className="ml-1">{members.length}</Badge>}
+            </h2>
+            <Button size="sm" variant="outline" className="gap-1.5 text-xs" onClick={() => setMembersOpen(true)}>
+              <Plus className="h-3.5 w-3.5" /> Add member
+            </Button>
+          </div>
+
+          <div className="rounded-lg border divide-y">
+            {members?.map((m: ProjectMember) => (
+              <div key={m.user_id} className="flex items-center justify-between gap-3 px-4 py-3">
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-medium truncate">{m.name || m.email}</p>
+                  <p className="text-xs text-muted-foreground truncate">{m.email}</p>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <Select
+                    value={m.role}
+                    onValueChange={(role) =>
+                      updateMemberMutation.mutate({ userId: m.user_id, role: role as 'owner' | 'editor' | 'viewer' })
+                    }
+                  >
+                    <SelectTrigger className="h-7 w-24 text-xs">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="owner">Owner</SelectItem>
+                      <SelectItem value="editor">Editor</SelectItem>
+                      <SelectItem value="viewer">Viewer</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-7 w-7 text-muted-foreground hover:text-destructive"
+                    disabled={removeMemberMutation.isPending}
+                    onClick={() => removeMemberMutation.mutate(m.user_id)}
+                  >
+                    <UserMinus className="h-3.5 w-3.5" />
+                  </Button>
+                </div>
+              </div>
+            ))}
+            {members?.length === 0 && (
+              <div className="px-4 py-6 text-center text-sm text-muted-foreground">No members yet.</div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ── Add member dialog ──────────────────────────────────────────── */}
+      <Dialog open={membersOpen} onOpenChange={setMembersOpen}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Users className="h-4 w-4 text-primary" /> Add project member
+            </DialogTitle>
+            <DialogDescription>
+              Enter the email of a registered user and choose their role.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3 py-2">
+            <div>
+              <Label htmlFor="member-email">Email address</Label>
+              <Input
+                id="member-email"
+                type="email"
+                placeholder="user@example.com"
+                className="mt-1.5"
+                value={addMemberEmail}
+                onChange={e => setAddMemberEmail(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && addMemberEmail.includes('@') && addMemberMutation.mutate()}
+              />
+            </div>
+            <div>
+              <Label htmlFor="member-role">Role</Label>
+              <Select value={addMemberRole} onValueChange={(v) => setAddMemberRole(v as 'owner' | 'editor' | 'viewer')}>
+                <SelectTrigger id="member-role" className="mt-1.5">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="owner">Owner — full control</SelectItem>
+                  <SelectItem value="editor">Editor — deploy &amp; configure</SelectItem>
+                  <SelectItem value="viewer">Viewer — read-only</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="ghost" size="sm" onClick={() => setMembersOpen(false)}>Cancel</Button>
+            <Button
+              size="sm"
+              disabled={!addMemberEmail.includes('@') || addMemberMutation.isPending}
+              onClick={() => addMemberMutation.mutate()}
+            >
+              {addMemberMutation.isPending
+                ? <><Loader2 className="h-3.5 w-3.5 animate-spin mr-1.5" />Looking up…</>
+                : 'Add member'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* ── New service dialog ─────────────────────────────────────────── */}
       <Dialog open={newServiceOpen} onOpenChange={(o) => { setNewServiceOpen(o); if (!o) setNewSvcName('') }}>
