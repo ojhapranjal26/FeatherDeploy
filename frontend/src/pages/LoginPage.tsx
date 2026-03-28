@@ -36,7 +36,7 @@ export function LoginPage() {
 
   // QR login state
   const [qrData, setQrData] = useState<QRInitResponse | null>(null)
-  const [qrStatus, setQrStatus] = useState<'idle' | 'loading' | 'showing' | 'approved' | 'expired'>('idle')
+  const [qrStatus, setQrStatus] = useState<'idle' | 'loading' | 'showing' | 'approved' | 'expired' | 'error'>('idle')
   const [qrSecondsLeft, setQrSecondsLeft] = useState(0)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -87,13 +87,19 @@ export function LoginPage() {
             stopTimers()
             setQrStatus('expired')
           }
-        } catch {
-          // network blip — keep polling
+        } catch (pollErr: unknown) {
+          // 410 Gone = expired, 404 = token not found (already consumed)
+          const httpStatus = (pollErr as { response?: { status?: number } })?.response?.status
+          if (httpStatus === 410 || httpStatus === 404) {
+            stopTimers()
+            setQrStatus('expired')
+          }
+          // other errors = network blip, keep polling
         }
       }, 2000)
     } catch {
-      setQrStatus('idle')
-      toast.error('Could not generate QR code. Please try again.')
+      // Do NOT set 'idle' here — that would retrigger the useEffect and cause an infinite loop
+      setQrStatus('error')
     }
   }, [stopTimers, loginWithToken, navigate])
 
@@ -300,70 +306,99 @@ export function LoginPage() {
 
           {/* ── QR login ── */}
           {loginMode === 'qr' && (
-            <div className="flex flex-col items-center gap-4">
-              {/* QR code box */}
-              <div className="relative flex h-52 w-52 items-center justify-center rounded-2xl border-2 border-border/60 bg-white shadow-inner">
-                {qrStatus === 'loading' && (
-                  <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-                )}
-                {qrStatus === 'showing' && qrData && (
-                  <QRCodeSVG
-                    value={`${window.location.origin}/qr-approve/${qrData.qr_token}`}
-                    size={180}
-                    level="M"
-                  />
-                )}
-                {qrStatus === 'approved' && (
-                  <div className="flex flex-col items-center gap-2 text-emerald-600">
-                    <CheckCircle2 className="h-12 w-12" />
-                    <span className="text-sm font-medium">Approved!</span>
-                  </div>
-                )}
-                {qrStatus === 'expired' && (
-                  <div className="flex flex-col items-center gap-2 text-muted-foreground">
-                    <QrCode className="h-8 w-8 opacity-30" />
-                    <span className="text-xs">Expired</span>
-                  </div>
-                )}
+            <div className="flex flex-col items-center gap-5">
+
+              {/* QR code card */}
+              <div className="w-full rounded-2xl border border-border/60 bg-card p-5 flex flex-col items-center gap-4 shadow-sm">
+                {/* Scanner area */}
+                <div
+                  className="relative flex items-center justify-center rounded-xl bg-white shadow-inner"
+                  style={{ width: 220, height: 220 }}
+                >
+                  {/* Corner brackets for scan target */}
+                  {qrStatus === 'showing' && (
+                    <>
+                      <span className="absolute top-2 left-2 h-6 w-6 border-t-2 border-l-2 border-primary rounded-tl-sm" />
+                      <span className="absolute top-2 right-2 h-6 w-6 border-t-2 border-r-2 border-primary rounded-tr-sm" />
+                      <span className="absolute bottom-2 left-2 h-6 w-6 border-b-2 border-l-2 border-primary rounded-bl-sm" />
+                      <span className="absolute bottom-2 right-2 h-6 w-6 border-b-2 border-r-2 border-primary rounded-br-sm" />
+                    </>
+                  )}
+
+                  {qrStatus === 'loading' && (
+                    <div className="flex flex-col items-center gap-2 text-muted-foreground">
+                      <Loader2 className="h-10 w-10 animate-spin" />
+                      <span className="text-xs">Generating…</span>
+                    </div>
+                  )}
+
+                  {qrStatus === 'showing' && qrData && (
+                    <QRCodeSVG
+                      value={`${window.location.origin}/qr-approve/${qrData.qr_token}`}
+                      size={192}
+                      level="M"
+                      style={{ display: 'block' }}
+                    />
+                  )}
+
+                  {qrStatus === 'approved' && (
+                    <div className="flex flex-col items-center gap-2 text-emerald-600">
+                      <CheckCircle2 className="h-14 w-14" />
+                      <span className="text-sm font-semibold">Login approved!</span>
+                    </div>
+                  )}
+
+                  {(qrStatus === 'expired' || qrStatus === 'error') && (
+                    <div className="flex flex-col items-center gap-3 text-muted-foreground">
+                      <QrCode className="h-12 w-12 opacity-20" />
+                      <span className="text-xs font-medium">
+                        {qrStatus === 'expired' ? 'Code expired' : 'Could not load'}
+                      </span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Status line */}
+                <div className="text-center min-h-[2.5rem] flex flex-col items-center justify-center gap-1">
+                  {qrStatus === 'loading' && (
+                    <p className="text-xs text-muted-foreground">Please wait…</p>
+                  )}
+                  {qrStatus === 'showing' && (
+                    <>
+                      <p className="text-sm font-semibold flex items-center gap-1.5">
+                        <Smartphone className="h-4 w-4 text-primary shrink-0" />
+                        Scan with a logged-in device
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        Expires in {Math.floor(qrSecondsLeft / 60)}:{String(qrSecondsLeft % 60).padStart(2, '0')}
+                      </p>
+                    </>
+                  )}
+                  {qrStatus === 'approved' && (
+                    <p className="text-sm font-semibold text-emerald-600">Redirecting to dashboard…</p>
+                  )}
+                  {(qrStatus === 'expired' || qrStatus === 'error') && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="gap-1.5 mt-1"
+                      onClick={() => { setQrStatus('idle') }}
+                    >
+                      <RefreshCw className="h-3.5 w-3.5" />
+                      {qrStatus === 'expired' ? 'Generate new code' : 'Try again'}
+                    </Button>
+                  )}
+                </div>
               </div>
 
-              {/* Status / countdown */}
-              {qrStatus === 'showing' && (
-                <div className="text-center space-y-1">
-                  <p className="text-sm font-medium flex items-center justify-center gap-1.5">
-                    <Smartphone className="h-4 w-4 text-primary" />
-                    Scan with a logged-in device
-                  </p>
-                  <p className="text-xs text-muted-foreground">
-                    Expires in {Math.floor(qrSecondsLeft / 60)}:{String(qrSecondsLeft % 60).padStart(2, '0')}
-                  </p>
-                </div>
-              )}
-              {qrStatus === 'approved' && (
-                <p className="text-sm font-medium text-emerald-600">Logging you in…</p>
-              )}
-              {qrStatus === 'expired' && (
-                <div className="text-center space-y-2">
-                  <p className="text-sm text-muted-foreground">QR code expired</p>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="gap-1.5"
-                    onClick={() => { setQrStatus('idle') }}
-                  >
-                    <RefreshCw className="h-3.5 w-3.5" /> Generate new code
-                  </Button>
-                </div>
-              )}
-
-              {/* Instructions */}
+              {/* How it works */}
               {(qrStatus === 'loading' || qrStatus === 'showing') && (
-                <div className="rounded-xl border border-border/40 bg-muted/30 px-4 py-3 w-full space-y-1.5 text-xs text-muted-foreground">
-                  <p className="font-medium text-foreground/70">How it works</p>
+                <div className="rounded-xl border border-border/40 bg-muted/30 px-4 py-3 w-full text-xs text-muted-foreground space-y-1.5">
+                  <p className="font-medium text-foreground/70">How to use QR login</p>
                   <ol className="ml-3 list-decimal space-y-1">
-                    <li>Open {platformName} on a device where you're logged in</li>
-                    <li>Scan this QR code with your camera</li>
-                    <li>Tap <span className="font-medium text-foreground">Approve Login</span> on that device</li>
+                    <li>Open {platformName} on a device where you're already logged in</li>
+                    <li>Point your camera at the QR code above</li>
+                    <li>Tap <span className="font-medium text-foreground">Approve Login</span></li>
                   </ol>
                 </div>
               )}

@@ -161,7 +161,9 @@ CREATE TABLE IF NOT EXISTS service_stats_monthly (
 
 -- 013: qr_login_tokens — short-lived tokens enabling QR-code-based login on another device
 -- Flow: login page calls /init (public) → QR shown → authenticated device opens URL → /approve
--- NOTE: if upgrading from an older schema, DROP TABLE qr_login_tokens to pick up nullable user_id
+-- Tokens are 5-min TTL session data; safe to DROP and recreate on each startup so the schema
+-- stays consistent across upgrades (avoids ALTER COLUMN limitations in SQLite).
+DROP TABLE IF EXISTS qr_login_tokens;
 CREATE TABLE IF NOT EXISTS qr_login_tokens (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     token         TEXT    NOT NULL UNIQUE,
