@@ -1200,18 +1200,19 @@ func StartDatabase(db *sql.DB, jwtSecret string, dbID int64) error {
 	}
 	if dbType == "sqlite" {
 		if err := ensureDatabaseVolume(dbID); err != nil {
-			db.Exec(`UPDATE databases SET status='error', updated_at=datetime('now') WHERE id=?`, dbID) //nolint
+			db.Exec(`UPDATE databases SET status='error', last_error=?, updated_at=datetime('now') WHERE id=?`, err.Error(), dbID) //nolint
 			return err
 		}
 		db.Exec( //nolint
-			`UPDATE databases SET status='running', container_id='', host_port=NULL, updated_at=datetime('now') WHERE id=?`,
+			`UPDATE databases SET status='running', container_id='', host_port=NULL, last_error='', updated_at=datetime('now') WHERE id=?`,
 			dbID)
 		return nil
 	}
 
 	// Ensure the project network exists.
 	if netErr := ensureProjectNetwork(projectID); netErr != nil {
-		db.Exec(`UPDATE databases SET status='error', updated_at=datetime('now') WHERE id=?`, dbID) //nolint
+		errMsg := fmt.Sprintf("project network unavailable: %v", netErr)
+		db.Exec(`UPDATE databases SET status='error', last_error=?, updated_at=datetime('now') WHERE id=?`, errMsg, dbID) //nolint
 		return fmt.Errorf("start database: ensure project network: %w", netErr)
 	}
 
@@ -1227,7 +1228,8 @@ func StartDatabase(db *sql.DB, jwtSecret string, dbID int64) error {
 	if image != "" && !podmanImageExists(image) {
 		slog.Info("pulling database image", "db_id", dbID, "image", image)
 		if out, pullErr := podmanCmd("pull", image).CombinedOutput(); pullErr != nil {
-			db.Exec(`UPDATE databases SET status='error', updated_at=datetime('now') WHERE id=?`, dbID) //nolint
+			errMsg := fmt.Sprintf("pull image %s: %v — %s", image, pullErr, strings.TrimSpace(string(out)))
+			db.Exec(`UPDATE databases SET status='error', last_error=?, updated_at=datetime('now') WHERE id=?`, errMsg, dbID) //nolint
 			return fmt.Errorf("pull database image %s: %v — %s", image, pullErr, strings.TrimSpace(string(out)))
 		}
 	}
@@ -1250,7 +1252,7 @@ func StartDatabase(db *sql.DB, jwtSecret string, dbID int64) error {
 	// Persist data in a named volume so it survives container re-creation.
 	volumeName := dbVolumeName(dbID)
 	if err := ensureDatabaseVolume(dbID); err != nil {
-		db.Exec(`UPDATE databases SET status='error', updated_at=datetime('now') WHERE id=?`, dbID) //nolint
+		db.Exec(`UPDATE databases SET status='error', last_error=?, updated_at=datetime('now') WHERE id=?`, err.Error(), dbID) //nolint
 		return err
 	}
 	mountPath := dbDataMountPath(dbType)
@@ -1278,12 +1280,13 @@ func StartDatabase(db *sql.DB, jwtSecret string, dbID int64) error {
 
 	out, err := podmanCmd(runArgs...).CombinedOutput()
 	if err != nil {
-		db.Exec(`UPDATE databases SET status='error', updated_at=datetime('now') WHERE id=?`, dbID) //nolint
+		errMsg := fmt.Sprintf("container start failed: %v — %s", err, strings.TrimSpace(string(out)))
+		db.Exec(`UPDATE databases SET status='error', last_error=?, updated_at=datetime('now') WHERE id=?`, errMsg, dbID) //nolint
 		return fmt.Errorf("podman run database %s: %v — %s", cName, err, strings.TrimSpace(string(out)))
 	}
 	containerID := strings.TrimSpace(string(out))
 	db.Exec( //nolint
-		`UPDATE databases SET status='running', container_id=?, updated_at=datetime('now') WHERE id=?`,
+		`UPDATE databases SET status='running', container_id=?, last_error='', updated_at=datetime('now') WHERE id=?`,
 		containerID, dbID)
 	slog.Info("database container started", "db_id", dbID, "container", cName)
 	return nil
@@ -1393,6 +1396,35 @@ func CreateDatabaseBackup(db *sql.DB, jwtSecret string, dbID int64) (string, str
 	downloadName := fmt.Sprintf("%s-%s-backup-%s.tar",
 		DBNetworkAlias(name), dbType, time.Now().UTC().Format("20060102-150405"))
 	return tmpFile.Name(), downloadName, nil
+}
+
+// GetDatabaseLogs returns the last 200 lines of stdout+stderr from the
+// database container. Returns an error when the container doesn't exist
+// (e.g. start failed before the container was created).
+func GetDatabaseLogs(dbID int64) (string, error) {
+	cName := fmt.Sprintf("fd-db-%d", dbID)
+	if !containerExists(cName) {
+		return "", fmt.Errorf("container %s does not exist (start may have failed before container creation)", cName)
+	}
+	out, err := podmanCmd("logs", "--tail", "200", cName).CombinedOutput()
+	if err != nil {
+		return string(out), fmt.Errorf("podman logs %s: %w", cName, err)
+	}
+	return string(out), nil
+}
+
+// UpdateDatabase persists configuration changes (db_version, network_public)
+// for a database record. A restart is required for the new settings to take
+// effect on the running container.
+func UpdateDatabase(db *sql.DB, dbID int64, dbVersion string, networkPublic bool) error {
+	npInt := 0
+	if networkPublic {
+		npInt = 1
+	}
+	_, err := db.Exec(
+		`UPDATE databases SET db_version=?, network_public=?, updated_at=datetime('now') WHERE id=?`,
+		dbVersion, npInt, dbID)
+	return err
 }
 
 // dbImageName returns the full image reference for a database type + version tag.

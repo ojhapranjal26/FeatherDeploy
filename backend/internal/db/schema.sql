@@ -312,3 +312,6 @@ CREATE TABLE IF NOT EXISTS databases (
     UNIQUE(project_id, name)
 );
 CREATE INDEX IF NOT EXISTS idx_databases_project ON databases(project_id);
+
+-- 019: add last_error to databases so the UI can surface why a container failed
+ALTER TABLE databases ADD COLUMN last_error TEXT NOT NULL DEFAULT '';

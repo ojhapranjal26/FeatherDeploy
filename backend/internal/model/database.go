@@ -26,6 +26,9 @@ type Database struct {
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 
+	// LastError holds the most recent error message when Status == "error".
+	LastError string `json:"last_error,omitempty"`
+
 	// Populated by GET — not persisted in the DB.
 	// ConnectionURL is the internal URL or file path made available to sibling
 	// service containers in the same project.
@@ -45,5 +48,12 @@ type CreateDatabaseRequest struct {
 	DBName        string `json:"db_name"       validate:"omitempty,max=64"`
 	DBUser        string `json:"db_user"       validate:"omitempty,max=64"`
 	DBPassword    string `json:"db_password"   validate:"omitempty,max=256"`
+	NetworkPublic bool   `json:"network_public"`
+}
+
+// UpdateDatabaseRequest is the body for PUT /api/projects/{id}/databases/{id}.
+// Only safe, restartable configuration can be changed after creation.
+type UpdateDatabaseRequest struct {
+	DBVersion     string `json:"db_version"    validate:"omitempty,max=32"`
 	NetworkPublic bool   `json:"network_public"`
 }

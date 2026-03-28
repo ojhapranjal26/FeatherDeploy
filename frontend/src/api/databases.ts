@@ -15,6 +15,7 @@ export interface DatabaseRecord {
   status: DatabaseStatus
   container_id?: string
   network_public: boolean
+  last_error?: string
   created_at: string
   updated_at: string
   connection_url?: string
@@ -30,6 +31,16 @@ export interface CreateDatabasePayload {
   db_user?: string
   db_password?: string
   network_public?: boolean
+}
+
+export interface UpdateDatabasePayload {
+  db_version?: string
+  network_public: boolean
+}
+
+export interface DatabaseLogsResponse {
+  container: string
+  logs: string
 }
 
 export interface DatabaseBackupDownload {
@@ -60,6 +71,19 @@ export const databasesApi = {
 
   delete: (projectId: string | number, databaseId: string | number): Promise<void> =>
     client.delete(`/projects/${projectId}/databases/${databaseId}`).then(() => undefined),
+
+  update: (
+    projectId: string | number,
+    databaseId: string | number,
+    data: UpdateDatabasePayload,
+  ): Promise<DatabaseRecord> =>
+    client.put<DatabaseRecord>(`/projects/${projectId}/databases/${databaseId}`, data).then((r) => r.data),
+
+  getLogs: (
+    projectId: string | number,
+    databaseId: string | number,
+  ): Promise<DatabaseLogsResponse> =>
+    client.get<DatabaseLogsResponse>(`/projects/${projectId}/databases/${databaseId}/logs`).then((r) => r.data),
 
   downloadBackup: async (
     projectId: string | number,

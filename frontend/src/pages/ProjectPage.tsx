@@ -10,7 +10,7 @@ import {
 import { toast } from 'sonner'
 import { projectsApi, usersApi, type ProjectMember } from '@/api/projects'
 import { servicesApi } from '@/api/services'
-import { databasesApi, type DatabaseRecord, type DatabaseType } from '@/api/databases'
+import { databasesApi, type DatabaseRecord, type DatabaseType, type UpdateDatabasePayload } from '@/api/databases'
 import { deploymentsApi } from '@/api/deployments'
 import type { Service } from '@/api/services'
 import { ServiceStatusBadge } from '@/components/ServiceStatusBadge'
@@ -273,6 +273,10 @@ function downloadBlob(blob: Blob, filename: string) {
 function DatabaseCard({ database, projectId, canEdit }: { database: DatabaseRecord; projectId: string; canEdit: boolean }) {
   const qc = useQueryClient()
   const [confirmDelete, setConfirmDelete] = useState(false)
+  const [logsOpen, setLogsOpen] = useState(false)
+  const [editOpen, setEditOpen] = useState(false)
+  const [editVersion, setEditVersion] = useState(database.db_version)
+  const [editPublic, setEditPublic] = useState(database.network_public)
 
   const startMutation = useMutation({
     mutationFn: () => databasesApi.start(projectId, database.id),
@@ -323,6 +327,23 @@ function DatabaseCard({ database, projectId, canEdit }: { database: DatabaseReco
     onError: (err: unknown) => toast.error((err as any)?.response?.data?.error ?? 'Failed to back up and delete database.'),
   })
 
+  const updateMutation = useMutation({
+    mutationFn: (data: UpdateDatabasePayload) => databasesApi.update(projectId, database.id, data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['databases', projectId] })
+      setEditOpen(false)
+      toast.success('Database configuration updated. Restart the database for changes to take effect.')
+    },
+    onError: (err: unknown) => toast.error((err as any)?.response?.data?.error ?? 'Failed to update database.'),
+  })
+
+  const logsQuery = useQuery({
+    queryKey: ['database-logs', database.id],
+    queryFn: () => databasesApi.getLogs(projectId, database.id),
+    enabled: logsOpen,
+    refetchInterval: logsOpen ? 5000 : false,
+  })
+
   const isSQLite = database.db_type === 'sqlite'
   const isBusy = startMutation.isPending || stopMutation.isPending || deleteMutation.isPending || backupMutation.isPending || backupAndDeleteMutation.isPending
 
@@ -359,6 +380,15 @@ function DatabaseCard({ database, projectId, canEdit }: { database: DatabaseReco
                 <Settings2 className="h-3.5 w-3.5" />
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
+                {!isSQLite && (
+                  <DropdownMenuItem onClick={() => { setEditVersion(database.db_version); setEditPublic(database.network_public); setEditOpen(true) }}>
+                    <Settings2 className="mr-2 h-3.5 w-3.5" /> Edit configuration
+                  </DropdownMenuItem>
+                )}
+                <DropdownMenuItem onClick={() => setLogsOpen(true)}>
+                  <Terminal className="mr-2 h-3.5 w-3.5" /> View logs
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
                 <DropdownMenuItem onClick={() => backupMutation.mutate()} disabled={backupMutation.isPending || backupAndDeleteMutation.isPending}>
                   <Download className="mr-2 h-3.5 w-3.5" /> Download backup
                 </DropdownMenuItem>
@@ -401,6 +431,13 @@ function DatabaseCard({ database, projectId, canEdit }: { database: DatabaseReco
             </div>
           )}
 
+          {database.status === 'error' && database.last_error && (
+            <div className="rounded-md border border-red-200 bg-red-50/80 px-2 py-1.5 text-red-900">
+              <p className="text-[10px] uppercase tracking-wide text-red-700 font-medium">Error</p>
+              <p className="mt-1 break-words font-mono text-[11px]">{database.last_error}</p>
+            </div>
+          )}
+
           {database.connection_url && (
             <div className="rounded-md border bg-muted/50 px-2 py-1.5">
               <p className="text-[10px] uppercase tracking-wide text-muted-foreground">Connection</p>
@@ -422,6 +459,82 @@ function DatabaseCard({ database, projectId, canEdit }: { database: DatabaseReco
           )}
         </CardContent>
       </Card>
+
+      {/* Logs dialog */}
+      <Dialog open={logsOpen} onOpenChange={setLogsOpen}>
+        <DialogContent className="sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Terminal className="h-4 w-4" />
+              Logs — {database.name}
+            </DialogTitle>
+            <DialogDescription>
+              Container: <span className="font-mono">fd-db-{database.id}</span>
+              {logsQuery.isFetching && <span className="ml-2 text-muted-foreground">(refreshing…)</span>}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="rounded-md border bg-black/90 p-3 max-h-96 overflow-y-auto">
+            {logsQuery.isLoading ? (
+              <p className="text-xs text-muted-foreground">Loading…</p>
+            ) : logsQuery.data?.logs ? (
+              <pre className="whitespace-pre-wrap font-mono text-[11px] text-green-300">
+                {logsQuery.data.logs}
+              </pre>
+            ) : (
+              <p className="text-xs text-muted-foreground">No logs available.</p>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" size="sm" onClick={() => setLogsOpen(false)}>Close</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Edit configuration dialog */}
+      <Dialog open={editOpen} onOpenChange={setEditOpen}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Edit database configuration</DialogTitle>
+            <DialogDescription>
+              Changes take effect after restarting the database container.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-2">
+            <div className="space-y-1.5">
+              <Label htmlFor="edit-db-version">Version tag</Label>
+              <Input
+                id="edit-db-version"
+                value={editVersion}
+                onChange={(e) => setEditVersion(e.target.value)}
+                placeholder="e.g. 16, latest, 8.4"
+                className="font-mono"
+              />
+            </div>
+            <div className="flex items-center gap-3">
+              <input
+                id="edit-db-public"
+                type="checkbox"
+                checked={editPublic}
+                onChange={(e) => setEditPublic(e.target.checked)}
+                className="h-4 w-4 rounded border-input"
+              />
+              <Label htmlFor="edit-db-public" className="cursor-pointer">
+                Expose on a host port (public access)
+              </Label>
+            </div>
+          </div>
+          <DialogFooter className="gap-2">
+            <Button variant="ghost" size="sm" onClick={() => setEditOpen(false)} disabled={updateMutation.isPending}>Cancel</Button>
+            <Button
+              size="sm"
+              disabled={updateMutation.isPending}
+              onClick={() => updateMutation.mutate({ db_version: editVersion, network_public: editPublic })}
+            >
+              {updateMutation.isPending ? 'Saving…' : 'Save changes'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={confirmDelete} onOpenChange={setConfirmDelete}>
         <DialogContent className="sm:max-w-md">

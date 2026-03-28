@@ -41,7 +41,7 @@ func (h *DatabaseHandler) List(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, err := h.db.QueryContext(r.Context(),
 		`SELECT id, project_id, name, db_type, db_version, db_name, db_user,
-		        COALESCE(host_port, 0), status, container_id, network_public, created_at, updated_at
+		        COALESCE(host_port, 0), status, container_id, network_public, last_error, created_at, updated_at
 		 FROM databases WHERE project_id=? ORDER BY created_at DESC`, projectID)
 	if err != nil {
 		slog.Error("list databases", "err", err)
@@ -56,7 +56,7 @@ func (h *DatabaseHandler) List(w http.ResponseWriter, r *http.Request) {
 		if err := rows.Scan(
 			&d.ID, &d.ProjectID, &d.Name, &d.DBType, &d.DBVersion,
 			&d.DBName, &d.DBUser, &d.HostPort, &d.Status, &d.ContainerID,
-			&npInt, &d.CreatedAt, &d.UpdatedAt,
+			&npInt, &d.LastError, &d.CreatedAt, &d.UpdatedAt,
 		); err == nil {
 			d.NetworkPublic = npInt == 1
 			d.EnvVarName = deploy.DBEnvKey(d.Name) + "_URL"
@@ -278,6 +278,88 @@ func (h *DatabaseHandler) Stop(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "stopping"})
 }
 
+// PUT /api/projects/{projectID}/databases/{databaseID}
+func (h *DatabaseHandler) Update(w http.ResponseWriter, r *http.Request) {
+	projectID, err := strconv.ParseInt(r.PathValue("projectID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errMap("invalid projectID"))
+		return
+	}
+	dbID, err := strconv.ParseInt(r.PathValue("databaseID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errMap("invalid databaseID"))
+		return
+	}
+	if !h.databaseExists(r, projectID, dbID) {
+		writeJSON(w, http.StatusNotFound, errMap("database not found"))
+		return
+	}
+
+	var req model.UpdateDatabaseRequest
+	if !v.DecodeAndValidate(w, r, &req) {
+		return
+	}
+	if req.DBVersion != "" && !imageTagRe.MatchString(req.DBVersion) {
+		writeJSON(w, http.StatusBadRequest, errMap("invalid database version"))
+		return
+	}
+
+	var dbType, currentVersion string
+	h.db.QueryRowContext(r.Context(), `SELECT db_type, db_version FROM databases WHERE id=?`, dbID). //nolint
+		Scan(&dbType, &currentVersion)
+	if dbType == model.DatabaseTypeSQLite && req.NetworkPublic {
+		writeJSON(w, http.StatusBadRequest, errMap("sqlite databases cannot be exposed publicly"))
+		return
+	}
+	version := req.DBVersion
+	if version == "" {
+		version = currentVersion
+	}
+
+	if err := deploy.UpdateDatabase(h.db, dbID, version, req.NetworkPublic); err != nil {
+		slog.Error("update database", "err", err)
+		writeJSON(w, http.StatusInternalServerError, errMap("internal error"))
+		return
+	}
+	h.getByID(w, r, projectID, dbID)
+}
+
+// GET /api/projects/{projectID}/databases/{databaseID}/logs
+func (h *DatabaseHandler) GetLogs(w http.ResponseWriter, r *http.Request) {
+	projectID, err := strconv.ParseInt(r.PathValue("projectID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errMap("invalid projectID"))
+		return
+	}
+	dbID, err := strconv.ParseInt(r.PathValue("databaseID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errMap("invalid databaseID"))
+		return
+	}
+	if !h.databaseExists(r, projectID, dbID) {
+		writeJSON(w, http.StatusNotFound, errMap("database not found"))
+		return
+	}
+
+	var lastError string
+	h.db.QueryRowContext(r.Context(), `SELECT last_error FROM databases WHERE id=?`, dbID).Scan(&lastError) //nolint
+
+	containerName := fmt.Sprintf("fd-db-%d", dbID)
+	logs, logsErr := deploy.GetDatabaseLogs(dbID)
+	if logsErr != nil {
+		// Container not found — return the stored startup error instead
+		writeJSON(w, http.StatusOK, map[string]string{
+			"container": containerName,
+			"logs":      lastError,
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{
+		"container": containerName,
+		"logs":      logs,
+	})
+}
+
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
 func (h *DatabaseHandler) getByID(w http.ResponseWriter, r *http.Request, projectID, dbID int64) {
@@ -286,11 +368,11 @@ func (h *DatabaseHandler) getByID(w http.ResponseWriter, r *http.Request, projec
 	var encPass string
 	err := h.db.QueryRowContext(r.Context(),
 		`SELECT id, project_id, name, db_type, db_version, db_name, db_user, db_password,
-		        COALESCE(host_port, 0), status, container_id, network_public, created_at, updated_at
+		        COALESCE(host_port, 0), status, container_id, network_public, last_error, created_at, updated_at
 		 FROM databases WHERE id=? AND project_id=?`, dbID, projectID,
 	).Scan(
 		&d.ID, &d.ProjectID, &d.Name, &d.DBType, &d.DBVersion, &d.DBName, &d.DBUser, &encPass,
-		&d.HostPort, &d.Status, &d.ContainerID, &npInt, &d.CreatedAt, &d.UpdatedAt,
+		&d.HostPort, &d.Status, &d.ContainerID, &npInt, &d.LastError, &d.CreatedAt, &d.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
 		writeJSON(w, http.StatusNotFound, errMap("database not found"))
