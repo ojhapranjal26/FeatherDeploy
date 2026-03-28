@@ -1010,12 +1010,22 @@ func projectNetworkName(projectID int64) string {
 }
 
 // ensureProjectNetwork creates the per-project podman bridge network if it
-// does not already exist. The --ignore flag makes podman exit 0 when the
-// network already exists, so calling this before every deployment is idempotent.
+// does not already exist. We use "network inspect" to check existence first
+// rather than relying on --ignore, which behaves inconsistently across Podman
+// versions and can silently succeed without actually creating the network.
 func ensureProjectNetwork(projectID int64) error {
 	name := projectNetworkName(projectID)
-	out, err := podmanCmd("network", "create", "--ignore", name).CombinedOutput()
+	// If the network already exists, inspect exits 0 — nothing to do.
+	if err := podmanCmd("network", "inspect", name).Run(); err == nil {
+		return nil
+	}
+	// Network does not exist; create it.
+	out, err := podmanCmd("network", "create", name).CombinedOutput()
 	if err != nil {
+		// A concurrent deployment may have created it between inspect and create.
+		if strings.Contains(strings.ToLower(string(out)), "already exists") {
+			return nil
+		}
 		return fmt.Errorf("podman network create %s: %v — %s", name, err, strings.TrimSpace(string(out)))
 	}
 	return nil
