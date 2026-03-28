@@ -76,10 +76,11 @@ func (h *QRAuthHandler) Poll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var status, qrExpiresStr, sessionToken string
+	var status, sessionToken string
+	var qrExpires time.Time
 	err := h.db.QueryRowContext(r.Context(),
 		`SELECT status, qr_expires_at, session_token FROM qr_login_tokens WHERE token=?`, token,
-	).Scan(&status, &qrExpiresStr, &sessionToken)
+	).Scan(&status, &qrExpires, &sessionToken)
 	if err == sql.ErrNoRows {
 		writeJSON(w, http.StatusNotFound, errMap("not found"))
 		return
@@ -91,8 +92,7 @@ func (h *QRAuthHandler) Poll(w http.ResponseWriter, r *http.Request) {
 
 	// Expire tokens that are still pending but past the QR TTL
 	if status == "pending" {
-		qrExp, _ := time.ParseInLocation("2006-01-02 15:04:05", qrExpiresStr, time.UTC)
-		if time.Now().UTC().After(qrExp) {
+		if time.Now().UTC().After(qrExpires.UTC()) {
 			h.db.ExecContext(r.Context(), //nolint
 				`UPDATE qr_login_tokens SET status='expired' WHERE token=?`, token)
 			writeJSON(w, http.StatusGone, errMap("QR code expired"))
@@ -140,10 +140,11 @@ func (h *QRAuthHandler) Approve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var status, qrExpiresStr string
+	var status string
+	var qrExpires time.Time
 	err := h.db.QueryRowContext(r.Context(),
 		`SELECT status, qr_expires_at FROM qr_login_tokens WHERE token=?`, token,
-	).Scan(&status, &qrExpiresStr)
+	).Scan(&status, &qrExpires)
 	if err == sql.ErrNoRows {
 		writeJSON(w, http.StatusNotFound, errMap("QR code not found"))
 		return
@@ -162,8 +163,7 @@ func (h *QRAuthHandler) Approve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	qrExp, _ := time.ParseInLocation("2006-01-02 15:04:05", qrExpiresStr, time.UTC)
-	if time.Now().UTC().After(qrExp) {
+	if time.Now().UTC().After(qrExpires.UTC()) {
 		h.db.ExecContext(r.Context(), //nolint
 			`UPDATE qr_login_tokens SET status='expired' WHERE token=?`, token)
 		writeJSON(w, http.StatusGone, errMap("QR code has expired"))

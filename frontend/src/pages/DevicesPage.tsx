@@ -1,17 +1,15 @@
-import { useState } from 'react'
+import { useState, useRef, useEffect, useCallback } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
-import { Monitor, Smartphone, Tablet, LogOut, ShieldOff, QrCode, X } from 'lucide-react'
+import { Monitor, Smartphone, Tablet, LogOut, ShieldOff, QrCode, X, Camera, CameraOff } from 'lucide-react'
 import { toast } from 'sonner'
 import { sessionsApi, type Session } from '@/api/auth'
-import { qrApi } from '@/api/auth'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog'
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { QRCodeSVG } from 'qrcode.react'
 import { useAuth } from '@/context/AuthContext'
 
 // ── Tiny user-agent parser ────────────────────────────────────────────────────
@@ -61,7 +59,131 @@ function fmtDate(s: string): string {
   })
 }
 
-// ── QR Approve Dialog ─────────────────────────────────────────────────────────
+// ── Camera QR Scanner ─────────────────────────────────────────────────────────
+
+/** Extract the qr-approve token from a raw QR value (full URL or bare token). */
+function extractToken(raw: string): string | null {
+  const m = raw.match(/qr-approve\/([a-f0-9]{64})/i)
+  if (m) return m[1]
+  if (/^[a-f0-9]{64}$/i.test(raw.trim())) return raw.trim()
+  return null
+}
+
+const hasBarcodeDetector =
+  typeof window !== 'undefined' && 'BarcodeDetector' in window
+
+interface QRScannerProps {
+  onDetect: (token: string) => void
+}
+
+function QRCameraScanner({ onDetect }: QRScannerProps) {
+  const videoRef = useRef<HTMLVideoElement>(null)
+  const [camError, setCamError] = useState<string | null>(null)
+  const [active, setActive] = useState(false)
+
+  const handleDetect = useCallback(
+    (token: string) => onDetect(token),
+    [onDetect],
+  )
+
+  useEffect(() => {
+    if (!hasBarcodeDetector) return
+
+    let stream: MediaStream | null = null
+    let rafId: number
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let detector: any
+
+    async function start() {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: 'environment' }, width: { ideal: 640 } },
+        })
+        if (!videoRef.current) return
+        videoRef.current.srcObject = stream
+        await videoRef.current.play()
+        // @ts-expect-error BarcodeDetector is not in TS lib yet
+        detector = new BarcodeDetector({ formats: ['qr_code'] })
+        setActive(true)
+      } catch {
+        setCamError('Camera access denied. Grant permission and try again.')
+        return
+      }
+
+      async function scanFrame() {
+        if (!videoRef.current || videoRef.current.readyState < 2) {
+          rafId = requestAnimationFrame(scanFrame)
+          return
+        }
+        try {
+          const barcodes = await detector.detect(videoRef.current)
+          if (barcodes.length > 0) {
+            const token = extractToken(barcodes[0].rawValue)
+            if (token) {
+              handleDetect(token)
+              return // stop scanning after first detection
+            }
+          }
+        } catch {
+          // ignore per-frame detection errors
+        }
+        rafId = requestAnimationFrame(scanFrame)
+      }
+      scanFrame()
+    }
+
+    start()
+
+    return () => {
+      cancelAnimationFrame(rafId)
+      stream?.getTracks().forEach((t) => t.stop())
+    }
+  }, [handleDetect])
+
+  if (!hasBarcodeDetector) return null
+
+  return (
+    <div className="space-y-2">
+      <div className="relative mx-auto aspect-square max-w-[260px] overflow-hidden rounded-xl bg-black">
+        <video
+          ref={videoRef}
+          className="h-full w-full object-cover"
+          muted
+          playsInline
+        />
+        {active && (
+          /* scanning overlay — animated corner brackets */
+          <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+            <div className="relative h-40 w-40">
+              {/* top-left */}
+              <span className="absolute left-0 top-0 h-6 w-6 border-l-2 border-t-2 border-white/80 rounded-tl" />
+              {/* top-right */}
+              <span className="absolute right-0 top-0 h-6 w-6 border-r-2 border-t-2 border-white/80 rounded-tr" />
+              {/* bottom-left */}
+              <span className="absolute bottom-0 left-0 h-6 w-6 border-b-2 border-l-2 border-white/80 rounded-bl" />
+              {/* bottom-right */}
+              <span className="absolute bottom-0 right-0 h-6 w-6 border-b-2 border-r-2 border-white/80 rounded-br" />
+            </div>
+          </div>
+        )}
+        {!active && !camError && (
+          <div className="absolute inset-0 flex items-center justify-center">
+            <Camera className="h-8 w-8 animate-pulse text-white/60" />
+          </div>
+        )}
+      </div>
+      {camError ? (
+        <p className="text-center text-xs text-destructive">{camError}</p>
+      ) : active ? (
+        <p className="text-center text-xs text-muted-foreground">
+          Point your camera at the QR code on the login page
+        </p>
+      ) : null}
+    </div>
+  )
+}
+
+// ── Approve Dialog ────────────────────────────────────────────────────────────
 
 interface QRDialogProps {
   open: boolean
@@ -72,79 +194,72 @@ function QRApproveDialog({ open, onClose }: QRDialogProps) {
   const navigate = useNavigate()
   const [manualToken, setManualToken] = useState('')
 
-  // Also generate a QR code for devices to scan immediately
-  const { data: qrData, isLoading: qrLoading } = useQuery({
-    queryKey: ['qr-init-devices'],
-    queryFn: qrApi.init,
-    enabled: open,
-    staleTime: 0,
-  })
+  const handleToken = useCallback(
+    (token: string) => {
+      onClose()
+      navigate(`/qr-approve/${token}`)
+    },
+    [onClose, navigate],
+  )
 
-  const approveUrl = qrData
-    ? `${window.location.origin}/qr-approve/${qrData.qr_token}`
-    : ''
-
-  const handleManualApprove = () => {
+  const handleManualSubmit = () => {
     const raw = manualToken.trim()
-    // Accept either the full URL or just the token
-    const tokenMatch = raw.match(/qr-approve\/([a-f0-9]{64})/i) ?? raw.match(/^([a-f0-9]{64})$/i)
-    const token = tokenMatch ? tokenMatch[1] : raw
-    if (!token) {
-      toast.error('Please enter a valid token or URL')
+    const token = extractToken(raw) ?? raw
+    if (token.length !== 64) {
+      toast.error('Invalid token — paste the full URL or 64-char hex token')
       return
     }
-    navigate(`/qr-approve/${token}`)
-    onClose()
+    handleToken(token)
   }
 
   return (
     <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
       <DialogContent className="max-w-sm">
         <DialogHeader>
-          <DialogTitle>Approve another device</DialogTitle>
+          <DialogTitle className="flex items-center gap-2">
+            <Camera className="h-5 w-5" />
+            Approve another device
+          </DialogTitle>
         </DialogHeader>
 
-        <div className="space-y-4 py-2">
-          {/* Show QR code that a new device's browser can scan to get the approve URL */}
-          <div className="flex flex-col items-center gap-2">
-            <p className="text-sm text-muted-foreground text-center">
-              Scan this code on a new device to approve its login
-            </p>
-            {qrLoading ? (
-              <div className="h-40 w-40 animate-pulse rounded bg-muted" />
-            ) : approveUrl ? (
-              <QRCodeSVG value={approveUrl} size={160} className="rounded" />
-            ) : null}
-          </div>
+        <div className="space-y-4 py-1">
+          <p className="text-sm text-muted-foreground">
+            On the device you want to log in, open the login page and show the QR
+            code. Then scan it below or paste the token.
+          </p>
 
-          <div className="relative flex items-center gap-2">
-            <div className="flex-1 border-t" />
-            <span className="text-xs text-muted-foreground">or paste a token</span>
-            <div className="flex-1 border-t" />
-          </div>
+          {hasBarcodeDetector ? (
+            <>
+              <QRCameraScanner onDetect={handleToken} />
+              <div className="relative flex items-center gap-2 pt-1">
+                <div className="flex-1 border-t" />
+                <span className="shrink-0 text-xs text-muted-foreground">or paste manually</span>
+                <div className="flex-1 border-t" />
+              </div>
+            </>
+          ) : (
+            <div className="flex items-center gap-2 rounded-lg border border-dashed p-3 text-sm text-muted-foreground">
+              <CameraOff className="h-4 w-4 shrink-0" />
+              Camera scanner not supported in this browser. Paste the URL or token below.
+            </div>
+          )}
 
-          <div className="space-y-1">
-            <Label htmlFor="qr-token">QR token or URL from the login page</Label>
-            <Input
-              id="qr-token"
-              placeholder="Paste token/URL here…"
-              value={manualToken}
-              onChange={(e) => setManualToken(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && handleManualApprove()}
-            />
+          <div className="space-y-1.5">
+            <Label htmlFor="qr-token">QR token / URL from the login page</Label>
+            <div className="flex gap-2">
+              <Input
+                id="qr-token"
+                placeholder="https://…/qr-approve/abc123…"
+                value={manualToken}
+                onChange={(e) => setManualToken(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleManualSubmit()}
+              />
+              <Button onClick={handleManualSubmit} disabled={!manualToken.trim()}>
+                <QrCode className="h-4 w-4" />
+              </Button>
+            </div>
           </div>
         </div>
-
-        <DialogFooter>
-          <Button variant="outline" onClick={onClose}>
-            <X className="mr-1 h-4 w-4" />
-            Cancel
-          </Button>
-          <Button onClick={handleManualApprove}>
-            <QrCode className="mr-1 h-4 w-4" />
-            Go to approve
-          </Button>
-        </DialogFooter>
       </DialogContent>
     </Dialog>
   )
