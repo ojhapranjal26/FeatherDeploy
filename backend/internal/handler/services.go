@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	caddypkg "github.com/ojhapranjal26/featherdeploy/backend/internal/caddy"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/deploy"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/model"
 	v "github.com/ojhapranjal26/featherdeploy/backend/internal/validator"
 )
@@ -194,46 +195,26 @@ func (h *ServiceHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := deploy.DeleteServiceRuntime(h.db, projectID, svcID); err != nil {
+		slog.Error("service runtime cleanup", "svc_id", svcID, "err", err)
+		writeJSON(w, http.StatusConflict, errMap("failed to delete service container or images"))
+		return
+	}
+
+	artifactDir := filepath.Join("/var/lib/featherdeploy/artifacts", fmt.Sprintf("svc-%d", svcID))
+	if removeErr := os.RemoveAll(artifactDir); removeErr != nil {
+		slog.Warn("service cleanup: remove artifacts", "svc_id", svcID, "err", removeErr)
+	}
+
 	// ── Cascade delete in DB ──────────────────────────────────────────────────
 	h.db.ExecContext(r.Context(), `DELETE FROM domains WHERE service_id=?`, svcID)       //nolint
 	h.db.ExecContext(r.Context(), `DELETE FROM env_variables WHERE service_id=?`, svcID) //nolint
 	h.db.ExecContext(r.Context(), `DELETE FROM deployments WHERE service_id=?`, svcID)   //nolint
 	h.db.ExecContext(r.Context(), `DELETE FROM services WHERE id=?`, svcID)              //nolint
+	deploy.CleanupProjectRuntimeIfUnused(h.db, projectID)
 
 	// ── Update Caddy (domain removed) ────────────────────────────────────────
 	go caddypkg.Reload(h.db)
-
-	// ── Stop and remove the container ─────────────────────────────────────────
-	cName := fmt.Sprintf("fd-svc-%d", svcID)
-	go func() {
-		exec.Command("podman", "stop", "--time", "10", cName).Run() //nolint
-		exec.Command("podman", "rm", "-f", cName).Run()             //nolint
-		// Remove associated images to free disk space
-		stableImage := fmt.Sprintf("featherdeploy/svc-%d:stable", svcID)
-		exec.Command("podman", "rmi", "-f", stableImage).Run() //nolint
-		// Remove any per-deployment tagged images
-		out, err := exec.Command("podman", "images",
-			"--format", "{{.Repository}}:{{.Tag}}",
-			"--filter", fmt.Sprintf("reference=featherdeploy/svc-%d", svcID),
-		).Output()
-		if err == nil {
-			for _, img := range splitLines(string(out)) {
-				if img != "" {
-					exec.Command("podman", "rmi", "-f", img).Run() //nolint
-				}
-			}
-		}
-		// Remove uploaded artifact archives for this service
-		artifactDir := filepath.Join("/var/lib/featherdeploy/artifacts", fmt.Sprintf("svc-%d", svcID))
-		if removeErr := os.RemoveAll(artifactDir); removeErr != nil {
-			slog.Warn("service cleanup: remove artifacts", "svc_id", svcID, "err", removeErr)
-		}
-		// Prune ALL unused images: after the service images are removed above,
-		// base images (node:20-alpine, python:3.12-slim, …) that are no longer
-		// referenced by any container can now be freed.
-		exec.Command("podman", "image", "prune", "-a", "-f").Run() //nolint
-		slog.Info("service cleanup complete", "svc_id", svcID, "container", cName)
-	}()
 
 	w.WriteHeader(http.StatusNoContent)
 }

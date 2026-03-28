@@ -762,7 +762,7 @@ export function ProjectPage() {
             </div>
           ) : (
             <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-              {databases.map((database) => (
+              {(databases ?? []).map((database) => (
                 <DatabaseCard key={database.id} database={database} projectId={projectId!} canEdit={canEditProject} />
               ))}
             </div>

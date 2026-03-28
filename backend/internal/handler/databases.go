@@ -248,6 +248,7 @@ func (h *DatabaseHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, errMap("internal error"))
 		return
 	}
+	deploy.CleanupProjectRuntimeIfUnused(h.db, projectID)
 	w.WriteHeader(http.StatusNoContent)
 }
 

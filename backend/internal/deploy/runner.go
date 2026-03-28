@@ -389,10 +389,15 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 	envArgs = append(envArgs, collectProjectDBEnvArgs(db, projectID, jwtSecret)...)
 	mountArgs := collectProjectDBMountArgs(db, projectID)
 
-	// ── 8b. Ensure the per-project podman network exists ──────────────────────
-	// All containers in the same project share this network so they can reach
-	// each other by container-name alias (e.g. http://myapi:3000).
-	networkName := fmt.Sprintf("fd-proj-%d", projectID)
+	// ── 8b. Ensure the per-project runtime group exists ───────────────────────
+	// Containers are grouped under a project pod while still joining a shared
+	// project network for alias-based communication.
+	podName := projectPodName(projectID)
+	if podErr := ensureProjectPod(projectID); podErr != nil {
+		log.add("[pod] WARNING: could not create project pod %s: %v", podName, podErr)
+		podName = ""
+	}
+	networkName := projectNetworkName(projectID)
 	if netErr := ensureProjectNetwork(projectID); netErr != nil {
 		log.add("[network] WARNING: could not create project network %s: %v", networkName, netErr)
 		networkName = ""
@@ -413,11 +418,14 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 		// from other containers in the same project.
 		runArgs = append(runArgs, "--network", networkName, "--network-alias", svcName)
 	}
+	if podName != "" {
+		runArgs = append(runArgs, "--pod", podName)
+	}
 	runArgs = append(runArgs, mountArgs...)
 	runArgs = append(runArgs, envArgs...)
 	runArgs = append(runArgs, imageName)
 
-	log.add("[podman] podman run -d --name %s -p %d:%d --network %s %s", cName, hostPort, appPort, networkName, imageName)
+	log.add("[podman] podman run -d --name %s -p %d:%d --pod %s --network %s %s", cName, hostPort, appPort, podName, networkName, imageName)
 	out, err := podmanCmd(runArgs...).CombinedOutput()
 	if err != nil {
 		log.add("ERROR: podman run failed: %v\n%s", err, strings.TrimSpace(string(out)))
@@ -999,11 +1007,34 @@ func looksLikeNpmInstall(cmd string) bool {
 
 // ─── Per-project network helpers ─────────────────────────────────────────────
 
+func projectPodName(projectID int64) string {
+	return fmt.Sprintf("fd-pod-%d", projectID)
+}
+
+func projectNetworkName(projectID int64) string {
+	return fmt.Sprintf("fd-proj-%d", projectID)
+}
+
+// ensureProjectPod creates the per-project pod if it does not already exist.
+// The pod intentionally does not share a network namespace so each container
+// can still keep its own published ports while remaining logically grouped.
+func ensureProjectPod(projectID int64) error {
+	name := projectPodName(projectID)
+	if podExists(name) {
+		return nil
+	}
+	out, err := podmanCmd("pod", "create", "--infra=false", "--share", "cgroup,ipc,uts", "--name", name).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("podman pod create %s: %v — %s", name, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
 // ensureProjectNetwork creates the per-project podman bridge network if it
 // does not already exist. The --ignore flag makes podman exit 0 when the
 // network already exists, so calling this before every deployment is idempotent.
 func ensureProjectNetwork(projectID int64) error {
-	name := fmt.Sprintf("fd-proj-%d", projectID)
+	name := projectNetworkName(projectID)
 	out, err := podmanCmd("network", "create", "--ignore", name).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("podman network create %s: %v — %s", name, err, strings.TrimSpace(string(out)))
@@ -1190,12 +1221,16 @@ func StartDatabase(db *sql.DB, jwtSecret string, dbID int64) error {
 	}
 
 	// Ensure the project network exists.
+	if podErr := ensureProjectPod(projectID); podErr != nil {
+		slog.Warn("start database: ensure project pod", "err", podErr)
+	}
 	if netErr := ensureProjectNetwork(projectID); netErr != nil {
 		slog.Warn("start database: ensure project network", "err", netErr)
 	}
 
 	cName := fmt.Sprintf("fd-db-%d", dbID)
-	networkName := fmt.Sprintf("fd-proj-%d", projectID)
+	podName := projectPodName(projectID)
+	networkName := projectNetworkName(projectID)
 	alias := DBNetworkAlias(name)
 	image := dbImageName(dbType, dbVersion)
 
@@ -1238,11 +1273,16 @@ func StartDatabase(db *sql.DB, jwtSecret string, dbID int64) error {
 		"run", "-d",
 		"--name", cName,
 		"--restart", "unless-stopped",
-		"--network", networkName,
 		"--network-alias", alias,
 		"--log-opt", "max-size=10m",
 		"--log-opt", "max-file=3",
 		"-v", volumeName + ":" + mountPath,
+	}
+	if podName != "" {
+		runArgs = append(runArgs, "--pod", podName)
+	}
+	if networkName != "" {
+		runArgs = append(runArgs, "--network", networkName)
 	}
 	// Public databases are additionally bound to a host port for external access.
 	if networkPublic == 1 && hostPort > 0 {
@@ -1269,39 +1309,57 @@ func StartDatabase(db *sql.DB, jwtSecret string, dbID int64) error {
 // StopDatabase stops and removes the database container without deleting the
 // data volume, so it can be restarted later with all data intact.
 func StopDatabase(db *sql.DB, dbID int64) error {
+	var projectID int64
 	var dbType string
-	if err := db.QueryRow(`SELECT db_type FROM databases WHERE id=?`, dbID).Scan(&dbType); err != nil && err != sql.ErrNoRows {
+	if err := db.QueryRow(`SELECT project_id, db_type FROM databases WHERE id=?`, dbID).Scan(&projectID, &dbType); err != nil && err != sql.ErrNoRows {
 		return fmt.Errorf("load database type: %w", err)
 	}
 	if dbType == "sqlite" {
 		db.Exec( //nolint
 			`UPDATE databases SET status='stopped', container_id='', host_port=NULL, updated_at=datetime('now') WHERE id=?`, dbID)
+		CleanupProjectRuntimeIfUnused(db, projectID) //nolint
 		slog.Info("sqlite database marked stopped", "db_id", dbID)
 		return nil
 	}
 	cName := fmt.Sprintf("fd-db-%d", dbID)
-	if containerExists(cName) {
-		stopCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		podmanCmdCtx(stopCtx, "stop", "--time", "10", cName).Run() //nolint
-		cancel()
-		podmanCmd("rm", "-f", cName).Run() //nolint
+	if err := removeContainerIfExists(cName); err != nil {
+		return err
 	}
 	db.Exec( //nolint
 		`UPDATE databases SET status='stopped', container_id='', updated_at=datetime('now') WHERE id=?`, dbID)
+	CleanupProjectRuntimeIfUnused(db, projectID) //nolint
 	slog.Info("database container stopped", "db_id", dbID)
 	return nil
 }
 
 func DeleteDatabase(db *sql.DB, dbID int64, purgeData bool) error {
+	var projectID int64
+	if err := db.QueryRow(`SELECT project_id FROM databases WHERE id=?`, dbID).Scan(&projectID); err != nil && err != sql.ErrNoRows {
+		return fmt.Errorf("load database project: %w", err)
+	}
 	if err := StopDatabase(db, dbID); err != nil {
 		return err
 	}
 	if !purgeData {
+		CleanupProjectRuntimeIfUnused(db, projectID) //nolint
 		return nil
 	}
 	if err := deleteDatabaseVolume(dbID); err != nil {
 		return err
 	}
+	CleanupProjectRuntimeIfUnused(db, projectID) //nolint
+	return nil
+}
+
+func DeleteServiceRuntime(db *sql.DB, projectID, svcID int64) error {
+	cName := fmt.Sprintf("fd-svc-%d", svcID)
+	if err := removeContainerIfExists(cName); err != nil {
+		return err
+	}
+	if err := deleteServiceImages(svcID); err != nil {
+		return err
+	}
+	CleanupProjectRuntimeIfUnused(db, projectID) //nolint
 	return nil
 }
 
@@ -1448,6 +1506,10 @@ func podmanCmdCtx(ctx context.Context, args ...string) *exec.Cmd {
 	return exec.CommandContext(ctx, "podman", args...)
 }
 
+func podExists(name string) bool {
+	return podmanCmd("pod", "exists", name).Run() == nil
+}
+
 // podmanBuild builds a container image using rootless podman.
 // --pull=missing tells podman to use the locally-cached base image when it
 // already exists, and only contact the registry when the image is absent.
@@ -1472,6 +1534,54 @@ func podmanBuild(dir string, log *logBuf, imageName string) error {
 // podmanImageExists returns true if the named image exists in the rootless podman store.
 func podmanImageExists(image string) bool {
 	return podmanCmd("image", "exists", image).Run() == nil
+}
+
+func removeContainerIfExists(name string) error {
+	if !containerExists(name) {
+		return nil
+	}
+	stopCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if out, err := podmanCmdCtx(stopCtx, "stop", "--time", "10", name).CombinedOutput(); err != nil {
+		return fmt.Errorf("stop container %s: %v — %s", name, err, strings.TrimSpace(string(out)))
+	}
+	if out, err := podmanCmd("rm", "-f", name).CombinedOutput(); err != nil {
+		return fmt.Errorf("remove container %s: %v — %s", name, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+func deleteServiceImages(svcID int64) error {
+	prefix := fmt.Sprintf("featherdeploy/svc-%d", svcID)
+	out, err := podmanCmd("images", "--format", "{{.Repository}}:{{.Tag}}", "--filter", "reference="+prefix+"*").Output()
+	if err != nil {
+		return fmt.Errorf("list service images: %w", err)
+	}
+	for _, img := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		img = strings.TrimSpace(img)
+		if img == "" {
+			continue
+		}
+		if rmOut, rmErr := podmanCmd("rmi", "-f", img).CombinedOutput(); rmErr != nil {
+			return fmt.Errorf("remove image %s: %v — %s", img, rmErr, strings.TrimSpace(string(rmOut)))
+		}
+	}
+	return nil
+}
+
+func CleanupProjectRuntimeIfUnused(db *sql.DB, projectID int64) {
+	if projectID == 0 {
+		return
+	}
+	var serviceCount int
+	db.QueryRow(`SELECT COUNT(*) FROM services WHERE project_id=?`, projectID).Scan(&serviceCount) //nolint
+	var databaseCount int
+	db.QueryRow(`SELECT COUNT(*) FROM databases WHERE project_id=?`, projectID).Scan(&databaseCount) //nolint
+	if serviceCount > 0 || databaseCount > 0 {
+		return
+	}
+	podmanCmd("pod", "rm", "-f", projectPodName(projectID)).Run()       //nolint
+	podmanCmd("network", "rm", "-f", projectNetworkName(projectID)).Run() //nolint
 }
 
 // trimOldDeployLogs nullifies the deploy_log column for all but the most recent
