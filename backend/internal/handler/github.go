@@ -155,6 +155,17 @@ func (h *GitHubHandler) Disconnect(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "disconnected"})
 }
 
+// errGitHubTokenExpired is returned by GitHub API helpers when the stored token
+// is no longer valid (expired, revoked, or permissions removed).
+var errGitHubTokenExpired = fmt.Errorf("github_token_expired")
+
+// clearUserGitHubToken wipes the stored OAuth token for the given user.
+func (h *GitHubHandler) clearUserGitHubToken(ctx context.Context, userID int64) {
+	h.db.ExecContext(ctx, //nolint
+		`UPDATE users SET github_access_token='', github_login='', updated_at=datetime('now') WHERE id=?`,
+		userID)
+}
+
 // ─── GET /api/github/repos ───────────────────────────────────────────────────
 // List the authenticated user's GitHub repositories (requires connected GitHub)
 func (h *GitHubHandler) ListRepos(w http.ResponseWriter, r *http.Request) {
@@ -172,6 +183,12 @@ func (h *GitHubHandler) ListRepos(w http.ResponseWriter, r *http.Request) {
 	// Fetch repos from GitHub API
 	repos, err := h.fetchRepos(accessToken)
 	if err != nil {
+		if err == errGitHubTokenExpired {
+			// Token is stale — auto-clear it so the frontend reflects "not connected"
+			h.clearUserGitHubToken(r.Context(), claims.UserID)
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "github_token_expired"})
+			return
+		}
 		slog.Error("github list repos", "err", err)
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "failed to fetch repositories from GitHub"})
 		return
@@ -181,7 +198,10 @@ func (h *GitHubHandler) ListRepos(w http.ResponseWriter, r *http.Request) {
 }
 
 // ─── GET /api/github/status ──────────────────────────────────────────────────
-// Returns whether the current user has a GitHub account connected
+// Returns whether the current user has a GitHub account connected.
+// Also validates the stored token against the GitHub API so stale tokens are
+// detected and cleared automatically (instead of the user noticing failures
+// and having to manually disconnect+reconnect).
 func (h *GitHubHandler) Status(w http.ResponseWriter, r *http.Request) {
 	claims := mw.GetClaims(r.Context())
 
@@ -189,6 +209,17 @@ func (h *GitHubHandler) Status(w http.ResponseWriter, r *http.Request) {
 	_ = h.db.QueryRowContext(r.Context(),
 		`SELECT github_access_token, github_login FROM users WHERE id = ?`, claims.UserID,
 	).Scan(&accessToken, &ghLogin)
+
+	if accessToken != "" {
+		// Validate the token is still live. If GitHub returns 401/403 the token
+		// was revoked or expired; auto-clear it so the frontend shows "not connected".
+		if !h.isTokenValid(r.Context(), accessToken) {
+			slog.Warn("github token expired or revoked — auto-clearing", "user_id", claims.UserID)
+			h.clearUserGitHubToken(r.Context(), claims.UserID)
+			accessToken = ""
+			ghLogin = ""
+		}
+	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"connected":    accessToken != "",
@@ -280,8 +311,8 @@ func (h *GitHubHandler) fetchRepos(token string) ([]model.GitHubRepo, error) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == http.StatusUnauthorized {
-		return nil, fmt.Errorf("github token expired or revoked")
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return nil, errGitHubTokenExpired
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20)) // 4 MB max
@@ -294,6 +325,23 @@ func (h *GitHubHandler) fetchRepos(token string) ([]model.GitHubRepo, error) {
 		return nil, fmt.Errorf("decode repos: %w", err)
 	}
 	return repos, nil
+}
+
+// isTokenValid does a cheap GET /user call to confirm the token is still live.
+func (h *GitHubHandler) isTokenValid(ctx context.Context, token string) bool {
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.github.com/user", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	client := &http.Client{Timeout: 8 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		// Network error — don't clear the token, assume it's still valid
+		return true
+	}
+	defer resp.Body.Close()
+	// Consume body to allow connection reuse
+	io.Copy(io.Discard, io.LimitReader(resp.Body, 4096)) //nolint
+	return resp.StatusCode != http.StatusUnauthorized && resp.StatusCode != http.StatusForbidden
 }
 
 func randomState() (string, error) {
@@ -336,6 +384,11 @@ func (h *GitHubHandler) ListBranches(w http.ResponseWriter, r *http.Request) {
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		h.clearUserGitHubToken(r.Context(), claims.UserID)
+		writeJSON(w, http.StatusUnauthorized, errMap("github_token_expired"))
+		return
+	}
 	if resp.StatusCode == http.StatusNotFound {
 		writeJSON(w, http.StatusNotFound, errMap("repository not found"))
 		return
@@ -384,6 +437,11 @@ func (h *GitHubHandler) GetTree(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		h.clearUserGitHubToken(r.Context(), claims.UserID)
+		writeJSON(w, http.StatusUnauthorized, errMap("github_token_expired"))
+		return
+	}
 	if resp.StatusCode == http.StatusNotFound {
 		// Empty or not a directory — return empty list
 		writeJSON(w, http.StatusOK, map[string]any{"entries": []any{}})

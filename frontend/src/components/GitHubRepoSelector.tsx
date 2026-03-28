@@ -1,8 +1,8 @@
-import { useState, useCallback } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useState, useCallback, useEffect } from 'react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Search, Github, ChevronRight, ArrowLeft, FolderOpen,
-  Check, Lock, Globe, Loader2, Link2, Link2Off, RefreshCw, Home,
+  Check, Lock, Globe, Loader2, Link2, Link2Off, RefreshCw, Home, AlertCircle,
 } from 'lucide-react'
 import { githubApi, type GitHubRepo } from '@/api/github'
 import { Button } from '@/components/ui/button'
@@ -26,9 +26,15 @@ interface Props {
   onChange: (value: RepoSelection) => void
 }
 
+// Returns true when an axios error carries error='github_token_expired'
+function isTokenExpired(err: unknown): boolean {
+  return (err as any)?.response?.data?.error === 'github_token_expired'
+}
+
 // ─── Main component ───────────────────────────────────────────────────────────
 
 export function GitHubRepoSelector({ value, onChange }: Props) {
+  const queryClient = useQueryClient()
   const [tab, setTab] = useState<'github' | 'manual'>('github')
 
   // GitHub browser state
@@ -41,12 +47,21 @@ export function GitHubRepoSelector({ value, onChange }: Props) {
     queryFn: githubApi.status,
   })
 
-  const { data: repos, isLoading: reposLoading, refetch: refetchRepos } = useQuery({
+  const { data: repos, isLoading: reposLoading, isError: reposIsError, error: reposError, refetch: refetchRepos } = useQuery({
     queryKey: ['github-repos'],
     queryFn: githubApi.listRepos,
     enabled: status?.connected === true,
     staleTime: 60_000,
+    retry: false,
   })
+
+  // When the GitHub token expires, invalidate the status query so the UI
+  // reflects the server-side token clear immediately.
+  useEffect(() => {
+    if (reposIsError && isTokenExpired(reposError)) {
+      queryClient.invalidateQueries({ queryKey: ['github-status'] })
+    }
+  }, [reposIsError, reposError]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const repoParts = selectedRepo ? selectedRepo.full_name.split('/') : []
   const repoOwner = repoParts[0] ?? ''
@@ -192,6 +207,19 @@ export function GitHubRepoSelector({ value, onChange }: Props) {
                       <Skeleton className="h-4 w-48" />
                     </div>
                   ))
+                ) : reposIsError && isTokenExpired(reposError) ? (
+                  <div className="flex flex-col items-center gap-3 px-4 py-6 text-center">
+                    <div className="flex h-9 w-9 items-center justify-center rounded-full bg-amber-50 dark:bg-amber-950">
+                      <AlertCircle className="h-4.5 w-4.5 text-amber-500" />
+                    </div>
+                    <p className="text-sm font-medium">GitHub token expired</p>
+                    <p className="text-xs text-muted-foreground max-w-xs">
+                      Your GitHub connection has expired. Reconnect to continue browsing repositories.
+                    </p>
+                    <Button size="sm" variant="outline" className="gap-1.5" onClick={connectGitHub}>
+                      <Github className="h-3.5 w-3.5" /> Reconnect GitHub
+                    </Button>
+                  </div>
                 ) : filteredRepos.length === 0 ? (
                   <p className="px-3 py-4 text-center text-xs text-muted-foreground">
                     {repoSearch ? 'No repositories match your search.' : 'No repositories found.'}

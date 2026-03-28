@@ -75,6 +75,7 @@ function OAuthTab() {
   const [loading, setLoading] = useState(true)
   const [disconnecting, setDisconnecting] = useState(false)
   const [connecting, setConnecting] = useState(false)
+  const [tokenExpiredBanner, setTokenExpiredBanner] = useState(false)
   const { user } = useAuth()
 
   const canConnect = user?.role === 'superadmin' || user?.role === 'admin'
@@ -82,7 +83,14 @@ function OAuthTab() {
   const load = () => {
     setLoading(true)
     apiFetch<GitHubOAuthStatus>('/api/github/status')
-      .then(setStatus)
+      .then((s) => {
+        // If the server cleared the token (connected→false) without user action,
+        // the status endpoint auto-detects staleness — show a banner.
+        setStatus((prev) => {
+          if (prev?.connected && !s.connected) setTokenExpiredBanner(true)
+          return s
+        })
+      })
       .catch(() => toast.error('Failed to load GitHub OAuth status.'))
       .finally(() => setLoading(false))
   }
@@ -125,6 +133,19 @@ function OAuthTab() {
         <div className="flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200">
           <AlertCircle className="h-4 w-4 shrink-0" />
           GitHub integration is restricted to admins and super-admins. Contact your administrator to connect GitHub for deployments.
+        </div>
+      )}
+
+      {tokenExpiredBanner && (
+        <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200">
+          <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
+          <div className="flex-1">
+            <p className="font-medium">GitHub token expired</p>
+            <p className="mt-0.5 text-xs opacity-80">Your GitHub token was revoked or expired and has been cleared. Reconnect to restore access to your repositories.</p>
+          </div>
+          <button type="button" className="shrink-0 opacity-60 hover:opacity-100" onClick={() => setTokenExpiredBanner(false)}>
+            <XCircle className="h-4 w-4" />
+          </button>
         </div>
       )}
       <p className="text-sm text-muted-foreground">

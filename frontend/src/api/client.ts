@@ -18,8 +18,11 @@ client.interceptors.response.use(
   (err) => {
     // Don't redirect on 401 for the login endpoint itself — let the form's
     // catch block show the "invalid credentials" toast instead.
+    // Don't redirect for GitHub OAuth endpoints — a 401 there means the user's
+    // GitHub token expired (github_token_expired), not their app session.
     const isLoginEndpoint = err.config?.url?.includes('/auth/login')
-    if (err.response?.status === 401 && !isLoginEndpoint) {
+    const isGithubEndpoint = err.config?.url?.startsWith('/github/')
+    if (err.response?.status === 401 && !isLoginEndpoint && !isGithubEndpoint) {
       localStorage.removeItem('token')
       window.location.href = '/login'
     }

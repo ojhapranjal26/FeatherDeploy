@@ -215,7 +215,14 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 		log.add("[artifact] extracted successfully")
 	} else {
 		// ── 2a. Inject GitHub App installation token for HTTPS GitHub repos ──────
+		// First try the GitHub App installation token (server-wide, preferred).
+		// If the App is not configured or the URL is unchanged, fall back to the
+		// deploying user's personal GitHub OAuth token.
 		repoURL = injectGitHubAppToken(context.Background(), db, repoURL, log)
+		if strings.HasPrefix(repoURL, "https://github.com/") {
+			// App token not injected — try user OAuth token
+			repoURL = injectUserOAuthToken(context.Background(), db, userID, repoURL, log)
+		}
 
 		// ── 2b. SSH key setup for private / SSH repos ─────────────────────────
 		if IsSSHURL(repoURL) {
@@ -622,6 +629,27 @@ func injectGitHubAppToken(ctx context.Context, db *sql.DB, repoURL string, log *
 // Returns the original URL unchanged on any error.
 func InjectGitHubAppToken(ctx context.Context, db *sql.DB, repoURL string) string {
 	return injectGitHubAppToken(ctx, db, repoURL, &logBuf{})
+}
+
+// injectUserOAuthToken rewrites an https://github.com/... URL to include the
+// deploying user's stored GitHub OAuth token. This is the fallback when no
+// GitHub App installation token is available.
+// Returns the original URL unchanged if the user has no token stored.
+func injectUserOAuthToken(ctx context.Context, db *sql.DB, userID int64, repoURL string, log *logBuf) string {
+	if !strings.HasPrefix(repoURL, "https://github.com/") {
+		return repoURL
+	}
+	var token string
+	if err := db.QueryRowContext(ctx,
+		`SELECT github_access_token FROM users WHERE id=?`, userID,
+	).Scan(&token); err != nil || token == "" {
+		// No OAuth token — try unauthenticated (public repos only)
+		return repoURL
+	}
+	// https://github.com/owner/repo.git → https://oauth2:<token>@github.com/owner/repo.git
+	rest := strings.TrimPrefix(repoURL, "https://github.com/")
+	log.add("[clone] using GitHub OAuth token for authentication")
+	return "https://oauth2:" + token + "@github.com/" + rest
 }
 
 // githubAppInstallToken exchanges the App JWT for a short-lived installation token.
