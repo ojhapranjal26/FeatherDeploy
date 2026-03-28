@@ -3,10 +3,10 @@ import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { ChevronLeft, Rocket, Clock, Search, Loader2, CheckCircle2, Plus, Trash2, Eye, EyeOff, ExternalLink, Terminal, Code2, CircleDot, Cpu, MemoryStick, Network, HardDrive, Activity, Copy, Download, Upload, X, Lock, Globe, Pencil, Check, GitBranch, GitFork, Settings2, Unlink, RotateCcw } from 'lucide-react'
 import {
-  AreaChart, Area, ResponsiveContainer, Tooltip, XAxis, YAxis, CartesianGrid,
+  AreaChart, Area, BarChart, Bar, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis, CartesianGrid, ReferenceLine,
 } from 'recharts'
 import { toast } from 'sonner'
-import { servicesApi, type DetectionResult, type UpdateServicePayload } from '@/api/services'
+import { servicesApi, statsApi, type DetectionResult, type UpdateServicePayload, type StatsRange, type StatsHistoryResponse } from '@/api/services'
 import { GitHubRepoSelector, type RepoSelection } from '@/components/GitHubRepoSelector'
 import { useContainerLogs } from '@/hooks/useContainerLogs'
 import { useContainerStatsSSE } from '@/hooks/useContainerStatsSSE'
@@ -1377,6 +1377,18 @@ const fmtBytes = (b: number) => {
   return `${b} B`
 }
 
+const fmtHour = (h: number) => {
+  const suffix = h < 12 ? 'AM' : 'PM'
+  const display = h % 12 === 0 ? 12 : h % 12
+  return `${display}${suffix}`
+}
+
+const fmtTs = (ms: number) =>
+  new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })
+
+const fmtTsFull = (ms: number) =>
+  new Date(ms).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+
 function ContainerStatsPanel({
   projectId,
   serviceId,
@@ -1386,131 +1398,384 @@ function ContainerStatsPanel({
   serviceId: string | undefined
   enabled: boolean
 }) {
-  const { latest, history, status } = useContainerStatsSSE(projectId, serviceId, enabled)
+  const { latest, history: liveHistory, status } = useContainerStatsSSE(projectId, serviceId, enabled)
+  const [mode, setMode] = useState<'live' | 'history'>('live')
+  const [range, setRange] = useState<StatsRange>('24h')
 
-  const cpuData  = history.map(p => ({ t: p.ts, v: Number(p.cpuPct.toFixed(2)) }))
-  const memData  = history.map(p => ({ t: p.ts, v: Number(p.memPct.toFixed(2)) }))
+  const { data: histData, isLoading: histLoading } = useQuery<StatsHistoryResponse>({
+    queryKey: ['stats-history', projectId, serviceId, range],
+    queryFn: () => statsApi.getHistory(projectId!, serviceId!, range),
+    enabled: !!projectId && !!serviceId && mode === 'history',
+    refetchInterval: 60_000, // refresh every minute
+  })
+
+  const cpuData = liveHistory.map(p => ({ t: p.ts, v: Number(p.cpuPct.toFixed(2)) }))
+  const memData = liveHistory.map(p => ({ t: p.ts, v: Number(p.memPct.toFixed(2)) }))
+
+  // History chart data
+  const hCpuData  = (histData?.points ?? []).map(p => ({ t: p.ts, v: Number(p.cpu_pct.toFixed(2)) }))
+  const hMemData  = (histData?.points ?? []).map(p => ({ t: p.ts, v: Number(p.mem_pct.toFixed(2)) }))
+  const hNetData  = (histData?.points ?? []).map(p => ({ t: p.ts, vIn: p.net_in, vOut: p.net_out }))
+  const hBlkData  = (histData?.points ?? []).map(p => ({ t: p.ts, vIn: p.blk_in, vOut: p.blk_out }))
+  const hourlyData = (histData?.hourly_avg ?? []).map(h => ({
+    hour: fmtHour(h.hour),
+    rawHour: h.hour,
+    cpu: h.cpu_avg,
+    mem: h.mem_avg,
+    count: h.samples,
+  }))
+
+  // Find peak hour for the callout
+  const peakCPUHour = hourlyData.length > 0
+    ? hourlyData.reduce((a, b) => b.cpu > a.cpu ? b : a)
+    : null
+
+  const RANGES: StatsRange[] = ['1h', '6h', '24h', '7d']
 
   return (
     <div className="space-y-5">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h2 className="font-medium flex items-center gap-2">
-            <Activity className="h-4 w-4 text-muted-foreground" /> Container Resources
-          </h2>
-          <p className="text-xs text-muted-foreground mt-0.5">Live stats from the running container, updated every 2 s.</p>
+      {/* ── Mode / range controls ──────────────────────────────────────────── */}
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <div className="flex items-center gap-1.5 rounded-lg border border-border/60 p-0.5 bg-muted/40">
+          <button
+            className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${mode === 'live' ? 'bg-background shadow-sm text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
+            onClick={() => setMode('live')}
+          >Live</button>
+          <button
+            className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${mode === 'history' ? 'bg-background shadow-sm text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
+            onClick={() => setMode('history')}
+          >History</button>
         </div>
-        <div className="flex items-center gap-1.5 text-xs">
-          <CircleDot className={`h-3 w-3 ${
-            status === 'running' ? 'text-emerald-500 animate-pulse' :
-            status === 'not_found' ? 'text-amber-500' : 'text-muted-foreground'
-          }`} />
-          <span className="text-muted-foreground capitalize">{status}</span>
-        </div>
+
+        {mode === 'history' && (
+          <div className="flex items-center gap-1 rounded-lg border border-border/60 p-0.5 bg-muted/40">
+            {RANGES.map(r => (
+              <button
+                key={r}
+                className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${range === r ? 'bg-background shadow-sm text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
+                onClick={() => setRange(r)}
+              >{r.toUpperCase()}</button>
+            ))}
+          </div>
+        )}
+
+        {mode === 'live' && (
+          <div className="flex items-center gap-1.5 text-xs">
+            <CircleDot className={`h-3 w-3 ${
+              status === 'running'   ? 'text-emerald-500 animate-pulse' :
+              status === 'not_found' ? 'text-amber-500' : 'text-muted-foreground'
+            }`} />
+            <span className="text-muted-foreground capitalize">{status}</span>
+          </div>
+        )}
       </div>
 
-      {status === 'not_found' && (
-        <div className="rounded-lg border border-dashed border-border py-10 text-center text-sm text-muted-foreground">
-          Container is not running — stats unavailable.
-        </div>
-      )}
-
-      {(status === 'connecting' && !latest) && (
-        <div className="grid gap-4 sm:grid-cols-2">
-          {[...Array(4)].map((_, i) => (
-            <div key={i} className="h-32 rounded-xl bg-muted animate-pulse" />
-          ))}
-        </div>
-      )}
-
-      {latest && (
+      {/* ══════════════════════════ LIVE MODE ══════════════════════════════ */}
+      {mode === 'live' && (
         <>
-          {/* Summary cards */}
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-            <div className="rounded-xl border border-border/60 bg-card p-4">
-              <div className="flex items-center gap-2 mb-2 text-muted-foreground text-xs font-medium uppercase tracking-wide">
-                <Cpu className="h-3.5 w-3.5" /> CPU
-              </div>
-              <p className="text-3xl font-bold tabular-nums">{latest.cpuPct.toFixed(1)}<span className="text-lg font-normal text-muted-foreground">%</span></p>
+          {status === 'not_found' && (
+            <div className="rounded-lg border border-dashed border-border py-10 text-center text-sm text-muted-foreground">
+              Container is not running — stats unavailable.
             </div>
-            <div className="rounded-xl border border-border/60 bg-card p-4">
-              <div className="flex items-center gap-2 mb-2 text-muted-foreground text-xs font-medium uppercase tracking-wide">
-                <MemoryStick className="h-3.5 w-3.5" /> Memory
-              </div>
-              <p className="text-3xl font-bold tabular-nums">{latest.memPct.toFixed(1)}<span className="text-lg font-normal text-muted-foreground">%</span></p>
-              <p className="text-xs text-muted-foreground mt-1">{fmtBytes(latest.memUsed)} / {fmtBytes(latest.memTotal)}</p>
-            </div>
-            <div className="rounded-xl border border-border/60 bg-card p-4">
-              <div className="flex items-center gap-2 mb-2 text-muted-foreground text-xs font-medium uppercase tracking-wide">
-                <Network className="h-3.5 w-3.5" /> Network I/O
-              </div>
-              <p className="text-sm font-medium tabular-nums">↑ {fmtBytes(latest.netOut)}</p>
-              <p className="text-sm font-medium tabular-nums mt-0.5">↓ {fmtBytes(latest.netIn)}</p>
-            </div>
-            <div className="rounded-xl border border-border/60 bg-card p-4">
-              <div className="flex items-center gap-2 mb-2 text-muted-foreground text-xs font-medium uppercase tracking-wide">
-                <HardDrive className="h-3.5 w-3.5" /> Block I/O
-              </div>
-              <p className="text-sm font-medium tabular-nums">↑ {fmtBytes(latest.blkOut)}</p>
-              <p className="text-sm font-medium tabular-nums mt-0.5">↓ {fmtBytes(latest.blkIn)}</p>
-              <p className="text-xs text-muted-foreground mt-1">{latest.pids} PIDs</p>
-            </div>
-          </div>
+          )}
 
-          {/* CPU chart */}
-          <div className="rounded-xl border border-border/60 bg-card p-4">
-            <p className="text-sm font-medium mb-3 flex items-center gap-2">
-              <Cpu className="h-4 w-4 text-muted-foreground" /> CPU Usage
-            </p>
-            <ResponsiveContainer width="100%" height={160}>
-              <AreaChart data={cpuData} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
-                <defs>
-                  <linearGradient id="cpuGrad" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor="#6366f1" stopOpacity={0.35} />
-                    <stop offset="100%" stopColor="#6366f1" stopOpacity={0.03} />
-                  </linearGradient>
-                </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" strokeOpacity={0.5} />
-                <XAxis dataKey="t" hide />
-                <YAxis domain={[0, 100]} tickFormatter={v => `${v}%`} tick={{ fontSize: 10 }} width={36} />
-                <Tooltip
-                  contentStyle={{ fontSize: 12, borderRadius: 8 }}
-                  formatter={(v: unknown) => [`${Number(v).toFixed(2)}%`, 'CPU']}
-                  labelFormatter={() => ''}
-                />
-                <Area type="monotone" dataKey="v" stroke="#6366f1" strokeWidth={2}
-                  fill="url(#cpuGrad)" dot={false} isAnimationActive={false} />
-              </AreaChart>
-            </ResponsiveContainer>
-          </div>
+          {(status === 'connecting' && !latest) && (
+            <div className="grid gap-4 sm:grid-cols-2">
+              {[...Array(4)].map((_, i) => (
+                <div key={i} className="h-32 rounded-xl bg-muted animate-pulse" />
+              ))}
+            </div>
+          )}
 
-          {/* Memory chart */}
-          <div className="rounded-xl border border-border/60 bg-card p-4">
-            <p className="text-sm font-medium mb-3 flex items-center gap-2">
-              <MemoryStick className="h-4 w-4 text-muted-foreground" /> Memory Usage
-            </p>
-            <ResponsiveContainer width="100%" height={160}>
-              <AreaChart data={memData} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
-                <defs>
-                  <linearGradient id="memGrad" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor="#10b981" stopOpacity={0.35} />
-                    <stop offset="100%" stopColor="#10b981" stopOpacity={0.03} />
-                  </linearGradient>
-                </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" strokeOpacity={0.5} />
-                <XAxis dataKey="t" hide />
-                <YAxis domain={[0, 100]} tickFormatter={v => `${v}%`} tick={{ fontSize: 10 }} width={36} />
-                <Tooltip
-                  contentStyle={{ fontSize: 12, borderRadius: 8 }}
-                  formatter={(v: unknown) => [`${Number(v).toFixed(2)}%`, 'Memory']}
-                  labelFormatter={() => ''}
-                />
-                <Area type="monotone" dataKey="v" stroke="#10b981" strokeWidth={2}
-                  fill="url(#memGrad)" dot={false} isAnimationActive={false} />
-              </AreaChart>
-            </ResponsiveContainer>
-          </div>
+          {latest && (
+            <>
+              {/* Summary cards */}
+              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+                <div className="rounded-xl border border-border/60 bg-card p-4">
+                  <div className="flex items-center gap-2 mb-2 text-muted-foreground text-xs font-medium uppercase tracking-wide">
+                    <Cpu className="h-3.5 w-3.5" /> CPU
+                  </div>
+                  <p className="text-3xl font-bold tabular-nums">{latest.cpuPct.toFixed(1)}<span className="text-lg font-normal text-muted-foreground">%</span></p>
+                </div>
+                <div className="rounded-xl border border-border/60 bg-card p-4">
+                  <div className="flex items-center gap-2 mb-2 text-muted-foreground text-xs font-medium uppercase tracking-wide">
+                    <MemoryStick className="h-3.5 w-3.5" /> Memory
+                  </div>
+                  <p className="text-3xl font-bold tabular-nums">{latest.memPct.toFixed(1)}<span className="text-lg font-normal text-muted-foreground">%</span></p>
+                  <p className="text-xs text-muted-foreground mt-1">{fmtBytes(latest.memUsed)} / {fmtBytes(latest.memTotal)}</p>
+                </div>
+                <div className="rounded-xl border border-border/60 bg-card p-4">
+                  <div className="flex items-center gap-2 mb-2 text-muted-foreground text-xs font-medium uppercase tracking-wide">
+                    <Network className="h-3.5 w-3.5" /> Network I/O
+                  </div>
+                  <p className="text-sm font-medium tabular-nums">↑ {fmtBytes(latest.netOut)}</p>
+                  <p className="text-sm font-medium tabular-nums mt-0.5">↓ {fmtBytes(latest.netIn)}</p>
+                </div>
+                <div className="rounded-xl border border-border/60 bg-card p-4">
+                  <div className="flex items-center gap-2 mb-2 text-muted-foreground text-xs font-medium uppercase tracking-wide">
+                    <HardDrive className="h-3.5 w-3.5" /> Block I/O
+                  </div>
+                  <p className="text-sm font-medium tabular-nums">↑ {fmtBytes(latest.blkOut)}</p>
+                  <p className="text-sm font-medium tabular-nums mt-0.5">↓ {fmtBytes(latest.blkIn)}</p>
+                  <p className="text-xs text-muted-foreground mt-1">{latest.pids} PIDs</p>
+                </div>
+              </div>
+
+              {/* CPU chart */}
+              <div className="rounded-xl border border-border/60 bg-card p-4">
+                <p className="text-sm font-medium mb-3 flex items-center gap-2">
+                  <Cpu className="h-4 w-4 text-muted-foreground" /> CPU Usage
+                </p>
+                <ResponsiveContainer width="100%" height={160}>
+                  <AreaChart data={cpuData} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
+                    <defs>
+                      <linearGradient id="cpuGrad" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0%" stopColor="#6366f1" stopOpacity={0.35} />
+                        <stop offset="100%" stopColor="#6366f1" stopOpacity={0.03} />
+                      </linearGradient>
+                    </defs>
+                    <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" strokeOpacity={0.5} />
+                    <XAxis dataKey="t" hide />
+                    <YAxis domain={[0, 100]} tickFormatter={v => `${v}%`} tick={{ fontSize: 10 }} width={36} />
+                    <Tooltip
+                      contentStyle={{ fontSize: 12, borderRadius: 8 }}
+                      formatter={(v: unknown) => [`${Number(v).toFixed(2)}%`, 'CPU']}
+                      labelFormatter={() => ''}
+                    />
+                    <Area type="monotone" dataKey="v" stroke="#6366f1" strokeWidth={2}
+                      fill="url(#cpuGrad)" dot={false} isAnimationActive={false} />
+                  </AreaChart>
+                </ResponsiveContainer>
+              </div>
+
+              {/* Memory chart */}
+              <div className="rounded-xl border border-border/60 bg-card p-4">
+                <p className="text-sm font-medium mb-3 flex items-center gap-2">
+                  <MemoryStick className="h-4 w-4 text-muted-foreground" /> Memory Usage
+                </p>
+                <ResponsiveContainer width="100%" height={160}>
+                  <AreaChart data={memData} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
+                    <defs>
+                      <linearGradient id="memGrad" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0%" stopColor="#10b981" stopOpacity={0.35} />
+                        <stop offset="100%" stopColor="#10b981" stopOpacity={0.03} />
+                      </linearGradient>
+                    </defs>
+                    <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" strokeOpacity={0.5} />
+                    <XAxis dataKey="t" hide />
+                    <YAxis domain={[0, 100]} tickFormatter={v => `${v}%`} tick={{ fontSize: 10 }} width={36} />
+                    <Tooltip
+                      contentStyle={{ fontSize: 12, borderRadius: 8 }}
+                      formatter={(v: unknown) => [`${Number(v).toFixed(2)}%`, 'Memory']}
+                      labelFormatter={() => ''}
+                    />
+                    <Area type="monotone" dataKey="v" stroke="#10b981" strokeWidth={2}
+                      fill="url(#memGrad)" dot={false} isAnimationActive={false} />
+                  </AreaChart>
+                </ResponsiveContainer>
+              </div>
+            </>
+          )}
+        </>
+      )}
+
+      {/* ══════════════════════════ HISTORY MODE ═══════════════════════════ */}
+      {mode === 'history' && (
+        <>
+          {histLoading && (
+            <div className="grid gap-4 sm:grid-cols-2">
+              {[...Array(6)].map((_, i) => (
+                <div key={i} className="h-32 rounded-xl bg-muted animate-pulse" />
+              ))}
+            </div>
+          )}
+
+          {!histLoading && histData && (
+            <>
+              {/* ── Peak values ─────────────────────────────────────────── */}
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                {[
+                  { label: 'Peak CPU', icon: Cpu, value: `${histData.peaks.cpu.value.toFixed(1)}%`, ts: histData.peaks.cpu.ts, color: 'text-violet-500' },
+                  { label: 'Peak Memory', icon: MemoryStick, value: `${histData.peaks.mem.value.toFixed(1)}%`, ts: histData.peaks.mem.ts, color: 'text-emerald-500' },
+                  { label: 'Peak Net In', icon: Network, value: fmtBytes(histData.peaks.net_in.value), ts: histData.peaks.net_in.ts, color: 'text-sky-500' },
+                  { label: 'Peak Net Out', icon: Network, value: fmtBytes(histData.peaks.net_out.value), ts: histData.peaks.net_out.ts, color: 'text-orange-500' },
+                ].map(({ label, icon: Icon, value, ts, color }) => (
+                  <div key={label} className="rounded-xl border border-border/60 bg-card p-4">
+                    <div className={`flex items-center gap-2 mb-1 text-xs font-medium uppercase tracking-wide ${color}`}>
+                      <Icon className="h-3.5 w-3.5" /> {label}
+                    </div>
+                    <p className="text-2xl font-bold tabular-nums">{value}</p>
+                    {ts > 0 && (
+                      <p className="text-xs text-muted-foreground mt-1">{fmtTsFull(ts)}</p>
+                    )}
+                  </div>
+                ))}
+              </div>
+
+              {histData.points.length === 0 ? (
+                <div className="rounded-lg border border-dashed py-12 text-center text-sm text-muted-foreground">
+                  No data yet for this range. Stats are sampled every 60 s while the container is running.
+                </div>
+              ) : (
+                <>
+                  {/* ── CPU over time ───────────────────────────────────── */}
+                  <div className="rounded-xl border border-border/60 bg-card p-4">
+                    <p className="text-sm font-medium mb-3 flex items-center gap-2">
+                      <Cpu className="h-4 w-4 text-muted-foreground" /> CPU % — {range.toUpperCase()}
+                    </p>
+                    <ResponsiveContainer width="100%" height={160}>
+                      <AreaChart data={hCpuData} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
+                        <defs>
+                          <linearGradient id="hCpuGrad" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="0%" stopColor="#6366f1" stopOpacity={0.35} />
+                            <stop offset="100%" stopColor="#6366f1" stopOpacity={0.03} />
+                          </linearGradient>
+                        </defs>
+                        <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" strokeOpacity={0.5} />
+                        <XAxis dataKey="t" tickFormatter={fmtTs} tick={{ fontSize: 9 }} interval="preserveStartEnd" />
+                        <YAxis domain={[0, 100]} tickFormatter={v => `${v}%`} tick={{ fontSize: 10 }} width={36} />
+                        <Tooltip
+                          contentStyle={{ fontSize: 12, borderRadius: 8 }}
+                          formatter={(v: unknown) => [`${Number(v).toFixed(2)}%`, 'CPU']}
+                          labelFormatter={(l) => fmtTsFull(Number(l))}
+                        />
+                        <ReferenceLine y={histData.peaks.cpu.value} stroke="#6366f1" strokeDasharray="4 4" strokeOpacity={0.5} />
+                        <Area type="monotone" dataKey="v" stroke="#6366f1" strokeWidth={2}
+                          fill="url(#hCpuGrad)" dot={false} isAnimationActive={false} />
+                      </AreaChart>
+                    </ResponsiveContainer>
+                  </div>
+
+                  {/* ── Memory over time ─────────────────────────────────── */}
+                  <div className="rounded-xl border border-border/60 bg-card p-4">
+                    <p className="text-sm font-medium mb-3 flex items-center gap-2">
+                      <MemoryStick className="h-4 w-4 text-muted-foreground" /> Memory % — {range.toUpperCase()}
+                    </p>
+                    <ResponsiveContainer width="100%" height={160}>
+                      <AreaChart data={hMemData} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
+                        <defs>
+                          <linearGradient id="hMemGrad" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="0%" stopColor="#10b981" stopOpacity={0.35} />
+                            <stop offset="100%" stopColor="#10b981" stopOpacity={0.03} />
+                          </linearGradient>
+                        </defs>
+                        <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" strokeOpacity={0.5} />
+                        <XAxis dataKey="t" tickFormatter={fmtTs} tick={{ fontSize: 9 }} interval="preserveStartEnd" />
+                        <YAxis domain={[0, 100]} tickFormatter={v => `${v}%`} tick={{ fontSize: 10 }} width={36} />
+                        <Tooltip
+                          contentStyle={{ fontSize: 12, borderRadius: 8 }}
+                          formatter={(v: unknown) => [`${Number(v).toFixed(2)}%`, 'Mem']}
+                          labelFormatter={(l) => fmtTsFull(Number(l))}
+                        />
+                        <ReferenceLine y={histData.peaks.mem.value} stroke="#10b981" strokeDasharray="4 4" strokeOpacity={0.5} />
+                        <Area type="monotone" dataKey="v" stroke="#10b981" strokeWidth={2}
+                          fill="url(#hMemGrad)" dot={false} isAnimationActive={false} />
+                      </AreaChart>
+                    </ResponsiveContainer>
+                  </div>
+
+                  {/* ── Network I/O over time ──────────────────────────── */}
+                  <div className="rounded-xl border border-border/60 bg-card p-4">
+                    <p className="text-sm font-medium mb-3 flex items-center gap-2">
+                      <Network className="h-4 w-4 text-muted-foreground" /> Network I/O — {range.toUpperCase()}
+                    </p>
+                    <ResponsiveContainer width="100%" height={160}>
+                      <AreaChart data={hNetData} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
+                        <defs>
+                          <linearGradient id="netInGrad" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="0%" stopColor="#0ea5e9" stopOpacity={0.3} />
+                            <stop offset="100%" stopColor="#0ea5e9" stopOpacity={0.02} />
+                          </linearGradient>
+                          <linearGradient id="netOutGrad" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="0%" stopColor="#f97316" stopOpacity={0.3} />
+                            <stop offset="100%" stopColor="#f97316" stopOpacity={0.02} />
+                          </linearGradient>
+                        </defs>
+                        <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" strokeOpacity={0.5} />
+                        <XAxis dataKey="t" tickFormatter={fmtTs} tick={{ fontSize: 9 }} interval="preserveStartEnd" />
+                        <YAxis tickFormatter={v => fmtBytes(v)} tick={{ fontSize: 9 }} width={52} />
+                        <Tooltip
+                          contentStyle={{ fontSize: 12, borderRadius: 8 }}
+                          formatter={(v: unknown) => [fmtBytes(Number(v)), '']}
+                          labelFormatter={(l) => fmtTsFull(Number(l))}
+                        />
+                        <Legend iconSize={8} wrapperStyle={{ fontSize: 11 }} />
+                        <Area type="monotone" dataKey="vIn" name="Rx" stroke="#0ea5e9" strokeWidth={2}
+                          fill="url(#netInGrad)" dot={false} isAnimationActive={false} />
+                        <Area type="monotone" dataKey="vOut" name="Tx" stroke="#f97316" strokeWidth={2}
+                          fill="url(#netOutGrad)" dot={false} isAnimationActive={false} />
+                      </AreaChart>
+                    </ResponsiveContainer>
+                  </div>
+
+                  {/* ── Block I/O over time ────────────────────────────── */}
+                  <div className="rounded-xl border border-border/60 bg-card p-4">
+                    <p className="text-sm font-medium mb-3 flex items-center gap-2">
+                      <HardDrive className="h-4 w-4 text-muted-foreground" /> Block I/O — {range.toUpperCase()}
+                    </p>
+                    <ResponsiveContainer width="100%" height={160}>
+                      <AreaChart data={hBlkData} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
+                        <defs>
+                          <linearGradient id="blkInGrad" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="0%" stopColor="#a855f7" stopOpacity={0.3} />
+                            <stop offset="100%" stopColor="#a855f7" stopOpacity={0.02} />
+                          </linearGradient>
+                          <linearGradient id="blkOutGrad" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="0%" stopColor="#ec4899" stopOpacity={0.3} />
+                            <stop offset="100%" stopColor="#ec4899" stopOpacity={0.02} />
+                          </linearGradient>
+                        </defs>
+                        <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" strokeOpacity={0.5} />
+                        <XAxis dataKey="t" tickFormatter={fmtTs} tick={{ fontSize: 9 }} interval="preserveStartEnd" />
+                        <YAxis tickFormatter={v => fmtBytes(v)} tick={{ fontSize: 9 }} width={52} />
+                        <Tooltip
+                          contentStyle={{ fontSize: 12, borderRadius: 8 }}
+                          formatter={(v: unknown) => [fmtBytes(Number(v)), '']}
+                          labelFormatter={(l) => fmtTsFull(Number(l))}
+                        />
+                        <Legend iconSize={8} wrapperStyle={{ fontSize: 11 }} />
+                        <Area type="monotone" dataKey="vIn" name="Read" stroke="#a855f7" strokeWidth={2}
+                          fill="url(#blkInGrad)" dot={false} isAnimationActive={false} />
+                        <Area type="monotone" dataKey="vOut" name="Write" stroke="#ec4899" strokeWidth={2}
+                          fill="url(#blkOutGrad)" dot={false} isAnimationActive={false} />
+                      </AreaChart>
+                    </ResponsiveContainer>
+                  </div>
+                </>
+              )}
+
+              {/* ── Busiest hours of the day ───────────────────────────── */}
+              {hourlyData.length > 0 && (
+                <div className="rounded-xl border border-border/60 bg-card p-4">
+                  <div className="flex items-start justify-between mb-3">
+                    <p className="text-sm font-medium flex items-center gap-2">
+                      <Activity className="h-4 w-4 text-muted-foreground" /> Busiest hours of the day (UTC)
+                    </p>
+                    {peakCPUHour && (
+                      <p className="text-xs text-muted-foreground">
+                        Peak at <span className="font-medium text-foreground">{peakCPUHour.hour}</span> — avg CPU <span className="font-medium text-violet-500">{peakCPUHour.cpu}%</span>
+                      </p>
+                    )}
+                  </div>
+                  <ResponsiveContainer width="100%" height={160}>
+                    <BarChart data={hourlyData} margin={{ top: 4, right: 8, bottom: 0, left: 0 }} barGap={2}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" strokeOpacity={0.4} vertical={false} />
+                      <XAxis dataKey="hour" tick={{ fontSize: 9 }} />
+                      <YAxis tickFormatter={v => `${v}%`} tick={{ fontSize: 10 }} width={32} domain={[0, 100]} />
+                      <Tooltip
+                        contentStyle={{ fontSize: 12, borderRadius: 8 }}
+                        formatter={(v: unknown, name) => [`${Number(v).toFixed(1)}%`, name === 'cpu' ? 'Avg CPU' : 'Avg Mem']}
+                        labelFormatter={(l) => `Hour: ${l}`}
+                      />
+                      <Legend iconSize={8} wrapperStyle={{ fontSize: 11 }} />
+                      <Bar dataKey="cpu" name="CPU" fill="#6366f1" radius={[2, 2, 0, 0]} maxBarSize={20} isAnimationActive={false} />
+                      <Bar dataKey="mem" name="Memory" fill="#10b981" radius={[2, 2, 0, 0]} maxBarSize={20} isAnimationActive={false} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              )}
+            </>
+          )}
         </>
       )}
     </div>

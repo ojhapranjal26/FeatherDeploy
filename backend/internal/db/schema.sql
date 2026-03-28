@@ -126,8 +126,25 @@ CREATE TABLE IF NOT EXISTS github_app_config (
     updated_at      DATETIME NOT NULL DEFAULT (datetime('now'))
 );
 
+-- 011: service_stats — periodic container snapshots for historical analysis
+CREATE TABLE IF NOT EXISTS service_stats (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    service_id  INTEGER NOT NULL REFERENCES services(id) ON DELETE CASCADE,
+    cpu_pct     REAL    NOT NULL DEFAULT 0,
+    mem_used    INTEGER NOT NULL DEFAULT 0,
+    mem_total   INTEGER NOT NULL DEFAULT 0,
+    mem_pct     REAL    NOT NULL DEFAULT 0,
+    net_in      INTEGER NOT NULL DEFAULT 0,
+    net_out     INTEGER NOT NULL DEFAULT 0,
+    blk_in      INTEGER NOT NULL DEFAULT 0,
+    blk_out     INTEGER NOT NULL DEFAULT 0,
+    pids        INTEGER NOT NULL DEFAULT 0,
+    recorded_at DATETIME NOT NULL DEFAULT (datetime('now'))
+);
+
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_project_members_user    ON project_members(user_id);
+CREATE INDEX IF NOT EXISTS idx_service_stats_svc_time  ON service_stats(service_id, recorded_at);
 CREATE INDEX IF NOT EXISTS idx_services_project        ON services(project_id);
 CREATE INDEX IF NOT EXISTS idx_deployments_service     ON deployments(service_id);
 CREATE INDEX IF NOT EXISTS idx_env_variables_service   ON env_variables(service_id);

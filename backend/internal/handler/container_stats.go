@@ -290,6 +290,11 @@ func (h *ContainerStatsHandler) Stream(w http.ResponseWriter, r *http.Request) {
 
 // collectContainerStats runs podman stats --no-stream for cName and returns
 // the parsed event. Returns a "not_found" event if the container is absent.
+// Exported so the background stats collector in main can reuse it.
+func CollectContainerStats(cName string) ContainerStatsEvent {
+	return collectContainerStats(cName)
+}
+
 func collectContainerStats(cName string) ContainerStatsEvent {
 	cmd := exec.Command("podman", "stats", "--no-stream", "--format", "json", cName)
 	var outBuf, errBuf bytes.Buffer

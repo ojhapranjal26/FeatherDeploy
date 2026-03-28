@@ -133,6 +133,10 @@ func serve() {
 	//  • Services whose container is actually running get status='running';
 	//    services whose container is gone get status='error'.
 	go reconcileServiceStates(db)
+
+	// Start the background stats collector: samples every running container once
+	// per minute and writes to service_stats for historical analysis.
+	go startStatsCollector(db)
 	// One worker = fully sequential deployments: when two services are deployed
 	// simultaneously they queue up rather than running in parallel. This prevents
 	// the build process (npm install, podman build, …) from saturating CPU/RAM
@@ -198,6 +202,7 @@ func serve() {
 	settingsH := handler.NewSettingsHandler(db, cfgStore)
 	statsH := handler.NewStatsHandler(db)
 	containerStatsH := handler.NewContainerStatsHandler()
+	statsHistH := handler.NewStatsHistoryHandler(db)
 	systemH := handler.NewSystemHandler()
 
 	// ─── Router ──────────────────────────────────────────────────────────────
@@ -396,6 +401,9 @@ func serve() {
 				r.Get("/api/projects/{projectID}/services/{serviceID}/env/{key}/reveal", envH.Reveal)
 				// ── Container live stats SSE and Domains ─────────────────
 				// NOTE: /stats/stream is an SSE route; registered in no-timeout group below.
+
+				// ── Historical stats ──────────────────────────────────────
+				r.Get("/api/projects/{projectID}/services/{serviceID}/stats/history", statsHistH.History)
 
 				// ── Domains ──────────────────────────────────────────────
 				r.Get("/api/projects/{projectID}/services/{serviceID}/domains", domainH.List)
@@ -715,4 +723,56 @@ func diskUsage(path string) (used, total int64) {
 		}
 	}
 	return
+}
+
+// startStatsCollector samples every running container once per minute and
+// inserts a row into service_stats for historical analysis.  Records older
+// than 7 days are pruned once per hour to bound storage.
+func startStatsCollector(db *sql.DB) {
+	collect := func() {
+		rows, err := db.Query(`SELECT id FROM services WHERE status='running'`)
+		if err != nil {
+			return
+		}
+		var ids []int64
+		for rows.Next() {
+			var id int64
+			if rows.Scan(&id) == nil {
+				ids = append(ids, id)
+			}
+		}
+		rows.Close()
+
+		for _, svcID := range ids {
+			cName := fmt.Sprintf("fd-svc-%d", svcID)
+			ev := handler.CollectContainerStats(cName)
+			if ev.Status != "running" {
+				continue
+			}
+			db.Exec( //nolint
+				`INSERT INTO service_stats
+				 (service_id, cpu_pct, mem_used, mem_total, mem_pct, net_in, net_out, blk_in, blk_out, pids)
+				 VALUES (?,?,?,?,?,?,?,?,?,?)`,
+				svcID, ev.CPUPct, ev.MemUsed, ev.MemTotal, ev.MemPct,
+				ev.NetIn, ev.NetOut, ev.BlkIn, ev.BlkOut, ev.PIDs)
+		}
+	}
+
+	// Immediate first sample, then every 60 s
+	collect()
+
+	sampleTicker := time.NewTicker(60 * time.Second)
+	pruneTicker := time.NewTicker(1 * time.Hour)
+	defer sampleTicker.Stop()
+	defer pruneTicker.Stop()
+
+	for {
+		select {
+		case <-sampleTicker.C:
+			collect()
+		case <-pruneTicker.C:
+			db.Exec(`DELETE FROM service_stats WHERE recorded_at < datetime('now', '-7 days')`) //nolint
+			slog.Debug("stats collector: pruned records older than 7 days")
+		}
+	}
 }

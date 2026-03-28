@@ -92,3 +92,55 @@ export const servicesApi = {
   restart: (projectId: string | number, serviceId: string | number): Promise<{ status: string }> =>
     client.post<{ status: string }>(`/projects/${projectId}/services/${serviceId}/restart`).then((r) => r.data),
 }
+
+// ── Historical stats ──────────────────────────────────────────────────────────
+
+export interface StatPoint {
+  ts: number       // unix ms
+  cpu_pct: number
+  mem_pct: number
+  mem_used: number
+  mem_total: number
+  net_in: number
+  net_out: number
+  blk_in: number
+  blk_out: number
+  pids: number
+}
+
+export interface PeakValue {
+  value: number
+  ts: number
+}
+
+export interface StatsHistoryResponse {
+  range: '1h' | '6h' | '24h' | '7d'
+  points: StatPoint[]
+  peaks: {
+    cpu: PeakValue
+    mem: PeakValue
+    net_in: PeakValue
+    net_out: PeakValue
+  }
+  hourly_avg: {
+    hour: number    // 0–23 UTC
+    cpu_avg: number
+    mem_avg: number
+    samples: number
+  }[]
+}
+
+export type StatsRange = '1h' | '6h' | '24h' | '7d'
+
+export const statsApi = {
+  getHistory: (
+    projectId: string | number,
+    serviceId: string | number,
+    range: StatsRange,
+  ): Promise<StatsHistoryResponse> =>
+    client
+      .get<StatsHistoryResponse>(`/projects/${projectId}/services/${serviceId}/stats/history`, {
+        params: { range },
+      })
+      .then((r) => r.data),
+}
