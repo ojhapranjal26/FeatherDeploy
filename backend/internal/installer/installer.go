@@ -453,10 +453,17 @@ func ensureNetworkingBackend(username, homedir string) {
 		}
 	}
 
-	// Ensure /run/featherdeploy-runtime exists before we need it for any
-	// podman command (migrate, smoke-test). Normally created by systemd's
-	// RuntimeDirectory= at service start; here we pre-create it.
-	rtDir := "/run/featherdeploy-runtime"
+	// Compute the correct XDG_RUNTIME_DIR from the user's actual numeric UID.
+	// /run/user/<uid> is created and managed by systemd-logind when linger is
+	// enabled. Using the real UID (not a custom path like /run/featherdeploy-
+	// runtime) matches what the running service process uses, so networks and
+	// container state created here and by the service are in the same location.
+	rtDir := "/run/featherdeploy-runtime" // fallback if id -u fails
+	if uidOut, uidErr := exec.Command("id", "-u", username).Output(); uidErr == nil {
+		if uid := strings.TrimSpace(string(uidOut)); uid != "" && uid != "0" {
+			rtDir = "/run/user/" + uid
+		}
+	}
 	if err := os.MkdirAll(rtDir, 0700); err == nil {
 		exec.Command("chown", username+":"+username, rtDir).Run() //nolint
 	}

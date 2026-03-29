@@ -439,6 +439,21 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 	log.add("[podman] podman run -d --name %s -p %d:%d --network %s %s", cName, hostPort, appPort, networkName, imageName)
 	out, err := podmanCmd(runArgs...).CombinedOutput()
 	if err != nil {
+		outStr := strings.TrimSpace(string(out))
+		// "network not found" means the network config JSON exists but the
+		// runtime namespace state is gone (split-brain from XDG_RUNTIME_DIR
+		// change).  Force-remove the stale entry and recreate, then retry once.
+		if strings.Contains(outStr, "network not found") || strings.Contains(outStr, "unable to find network") {
+			log.add("[network] stale network state detected — force-recreating %s and retrying", networkName)
+			podmanCmd("network", "rm", "-f", networkName).Run() //nolint
+			if recreateErr := ensureProjectNetwork(projectID); recreateErr == nil {
+				out, err = podmanCmd(runArgs...).CombinedOutput()
+			} else {
+				log.add("[network] recreate failed: %v", recreateErr)
+			}
+		}
+	}
+	if err != nil {
 		log.add("ERROR: podman run failed: %v\n%s", err, strings.TrimSpace(string(out)))
 		markFailed(db, depID, svcID, log.text())
 		return
@@ -1096,11 +1111,28 @@ func classifyNetworkError(out string) string {
 // does not already exist. We use "network inspect" to check existence first
 // rather than relying on --ignore, which behaves inconsistently across Podman
 // versions and can silently succeed without actually creating the network.
+//
+// If the network exists but has NO actively-running containers, it is treated
+// as stale state from a previous XDG_RUNTIME_DIR context (the network config
+// JSON exists in persistent storage but the runtime namespace state is gone)
+// and is force-removed before being recreated fresh.  This is the root cause
+// of "network not found" errors after a service restart that changes
+// XDG_RUNTIME_DIR: inspect reads the JSON and returns 0, but podman run tries
+// to wire up the network namespace via the runtime state which no longer exists.
 func ensureProjectNetwork(projectID int64) error {
 	name := projectNetworkName(projectID)
-	// If the network already exists, inspect exits 0 — nothing to do.
+
 	if err := podmanCmd("network", "inspect", name).Run(); err == nil {
-		return nil
+		// Network config exists.  Check whether any containers are actively
+		// running on it.  If none are, the network may be stale runtime state —
+		// remove it so it is recreated with the current XDG_RUNTIME_DIR context.
+		ctrOut, _ := podmanCmd("ps", "-q", "--filter", "network="+name).Output()
+		if strings.TrimSpace(string(ctrOut)) != "" {
+			// Live containers present — the network is in use, leave it alone.
+			return nil
+		}
+		// No running containers — safe to remove and recreate.
+		podmanCmd("network", "rm", name).Run() //nolint
 	}
 	// Network does not exist; create it.
 	out, err := podmanCmd("network", "create", name).CombinedOutput()
