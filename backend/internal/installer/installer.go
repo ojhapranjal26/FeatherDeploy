@@ -299,6 +299,18 @@ func die(format string, args ...any) {
 // `podman build` / `podman run` fails with "no subuid ranges found".
 func setupPodmanRootless(username string) {
 	fmt.Printf("\n── Configuring rootless Podman for %s ──────────────────\n", username)
+
+	// Stop any running services owned by this user before making user/storage
+	// changes (e.g. usermod -d).  During a fresh install nothing is running and
+	// these are no-ops; during a reinstall they prevent usermod from failing with
+	// "user is currently used by process".
+	exec.Command("systemctl", "stop", "featherdeploy").Run() //nolint
+	exec.Command("systemctl", "stop", "rqlite").Run()        //nolint
+	if pkillOut, err := exec.Command("pkill", "-u", username).CombinedOutput(); err == nil {
+		_ = pkillOut
+		time.Sleep(500 * time.Millisecond)
+	}
+
 	ensureSubIDEntry(username, "/etc/subuid", "100000", "65536")
 	ensureSubIDEntry(username, "/etc/subgid", "100000", "65536")
 
@@ -725,6 +737,19 @@ func configureCrun() {
 
 	writeFile(confFile, s, 0644)
 	fmt.Println("  ✓ crun + cgroupfs configured in", confFile)
+
+	// Write a system-wide policy.json so Podman can start at all.
+	// Without this file every `podman build` fails with:
+	//   "open /etc/containers/policy.json: no such file or directory"
+	// The 'insecureAcceptAnything' type skips signature verification, which is
+	// the correct default for a self-hosted PaaS pulling arbitrary user images.
+	policyFile := filepath.Join(confDir, "policy.json")
+	if _, err := os.Stat(policyFile); os.IsNotExist(err) {
+		const policyJSON = `{"default":[{"type":"insecureAcceptAnything"}]}`
+		if err2 := os.WriteFile(policyFile, []byte(policyJSON+"\n"), 0644); err2 == nil {
+			fmt.Println("  ✓ policy.json (insecureAcceptAnything) written to", policyFile)
+		}
+	}
 
 	// Write a system-wide registries.conf so short image names (e.g.
 	// "php:8.2-fpm-alpine") resolve to docker.io.  Without this Podman exits
