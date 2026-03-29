@@ -1142,6 +1142,9 @@ func classifyNetworkError(out string) string {
 //
 //  3. After network create, we poll inspect for up to 5 s so we never hand
 //     back to the caller before the network is confirmed visible.
+//     We then require a tiny container to start on the network as the final
+//     readiness check, because inspect can succeed before run is actually
+//     able to resolve the network in the runtime state.
 func ensureProjectNetwork(projectID int64) error {
 	// Serialize all network operations for this project to prevent races
 	// between concurrent deployments and the startup reconcile goroutine.
@@ -1183,10 +1186,21 @@ func ensureProjectNetwork(projectID int64) error {
 	// netavark bridges are wired asynchronously on some kernels.
 	for i := 0; i < 10; i++ {
 		if podmanCmd("network", "inspect", name).Run() == nil {
-			// Extra 300 ms for libpod to finish registering internally
-			// before the caller passes it to 'podman run'.
+			// Extra settle before the caller passes it to 'podman run'.
 			time.Sleep(300 * time.Millisecond)
-			return nil
+			// Final readiness check: a container must actually start on the
+			// network. If this fails with "network not found" we back off and
+			// retry, because the runtime state is still catching up.
+			runOut, runErr := podmanCmd("run", "--rm", "--network", name, "docker.io/library/alpine", "true").CombinedOutput()
+			if runErr == nil {
+				return nil
+			}
+			outStr := strings.TrimSpace(string(runOut))
+			if strings.Contains(outStr, "network not found") || strings.Contains(outStr, "unable to find network") {
+				time.Sleep(1 * time.Second)
+				continue
+			}
+			return fmt.Errorf("podman run --network %s failed during readiness check: %v — %s", name, runErr, outStr)
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
