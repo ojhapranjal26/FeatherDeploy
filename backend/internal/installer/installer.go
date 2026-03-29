@@ -416,6 +416,14 @@ func ensureNetworkingBackend(username, homedir string) {
 		}
 	}
 
+	// Ensure /run/featherdeploy-runtime exists before we need it for any
+	// podman command (migrate, smoke-test). Normally created by systemd's
+	// RuntimeDirectory= at service start; here we pre-create it.
+	rtDir := "/run/featherdeploy-runtime"
+	if err := os.MkdirAll(rtDir, 0700); err == nil {
+		exec.Command("chown", username+":"+username, rtDir).Run() //nolint
+	}
+
 	// ── Ensure the service user's home dir in /etc/passwd is correct ─────────
 	// Podman calls getpwuid() internally and ignores the $HOME env var.
 	// If /etc/passwd lists /home/<username> (useradd default) but the actual
@@ -437,6 +445,34 @@ func ensureNetworkingBackend(username, homedir string) {
 			fmt.Printf("  ✓ home dir updated to %s\n", dataDir)
 			// Refresh homedir so the smoke test uses the correct path.
 			homedir = dataDir
+
+			// When the home dir changes, podman's container storage is now at a
+			// different path. Purge the stale state from the OLD home to avoid
+			// split-brain: podman finding partial state in two different locations
+			// causes "network not found" at runtime even though network create
+			// appeared to succeed.
+			if passwdHome != "" && passwdHome != "/" && passwdHome != dataDir {
+				staleContainers := filepath.Join(passwdHome, ".local", "share", "containers")
+				if _, statErr := os.Stat(staleContainers); statErr == nil {
+					fmt.Printf("  Removing stale container storage at old home: %s\n", staleContainers)
+					os.RemoveAll(staleContainers) //nolint
+				}
+			}
+			// Also clean up any partial state at the new home so podman starts fresh.
+			newContainers := filepath.Join(dataDir, ".local", "share", "containers")
+			if _, statErr := os.Stat(newContainers); statErr == nil {
+				fmt.Printf("  Removing partial container storage at new home: %s\n", newContainers)
+				os.RemoveAll(newContainers) //nolint
+			}
+			// Re-initialize podman storage at the correct home.
+			migrateEnv := fmt.Sprintf("HOME=%s XDG_RUNTIME_DIR=%s", dataDir, rtDir)
+			migrateCmd := exec.Command("su", "-s", "/bin/sh", username, "-c",
+				migrateEnv+" podman system migrate 2>&1")
+			if migrateOut, migrateErr := migrateCmd.CombinedOutput(); migrateErr == nil {
+				fmt.Println("  ✓ podman storage re-initialized at new home")
+			} else {
+				fmt.Printf("  NOTE: podman system migrate: %s\n", strings.TrimSpace(string(migrateOut)))
+			}
 		}
 	} else {
 		fmt.Printf("  ✓ home dir is already %s\n", dataDir)
@@ -449,15 +485,6 @@ func ensureNetworkingBackend(username, homedir string) {
 
 	// Run a quick smoke-test as the service user:
 	// create a test network, then immediately remove it.
-	//
-	// /run/featherdeploy-runtime is normally created by systemd's
-	// RuntimeDirectory= directive when the service starts.  At install /
-	// update time the service hasn't started yet, so we create it here.
-	rtDir := "/run/featherdeploy-runtime"
-	if err := os.MkdirAll(rtDir, 0700); err == nil {
-		exec.Command("chown", username+":"+username, rtDir).Run() //nolint
-	}
-
 	testEnv := fmt.Sprintf("HOME=%s XDG_RUNTIME_DIR=%s", homedir, rtDir)
 	smoke := fmt.Sprintf(
 		"%s podman network create fd-nettest 2>&1 && %s podman network rm fd-nettest 2>/dev/null",
