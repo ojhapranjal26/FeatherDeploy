@@ -543,13 +543,20 @@ func ensureNetworkingBackend(username, homedir string) {
 	// where the network is created in one path and looked up in another, which
 	// manifests as exit 127 / "network not found" in podman run.
 	netCfgDir := filepath.Join(homedir, ".config", "containers", "networks")
-	graphRoot := filepath.Join(homedir, ".local", "share", "containers", "storage")
 	if mkErr := os.MkdirAll(userConfDir, 0755); mkErr == nil {
 		os.MkdirAll(netCfgDir, 0755) //nolint
+		// Note: graph_root is intentionally NOT hardcoded here.  Pinning it
+		// causes a "database configuration mismatch" error when an existing
+		// install used a different graph_root (e.g. after a home-dir change).
+		// Podman resolves graph_root correctly from $XDG_DATA_HOME which we
+		// always set to homedir/.local/share in podmanEnv().
+		// network_config_dir IS hardcoded so both 'podman network create' and
+		// 'podman run --network' always read/write the same JSON directory,
+		// eliminating the split-brain that caused "network not found".
 		contConf := fmt.Sprintf(
-			"[engine]\ncgroup_manager = \"cgroupfs\"\ngraph_root = \"%s\"\n\n"+
+			"[engine]\ncgroup_manager = \"cgroupfs\"\n\n"+
 				"[network]\nnetwork_backend = \"netavark\"\nnetwork_config_dir = \"%s\"\n",
-			graphRoot, netCfgDir)
+			netCfgDir)
 		os.WriteFile(filepath.Join(userConfDir, "containers.conf"), []byte(contConf), 0644) //nolint
 		// Remove any storage.conf that overrides runroot — the default
 		// $XDG_RUNTIME_DIR/containers is correct and must not be changed.
@@ -559,7 +566,42 @@ func ensureNetworkingBackend(username, homedir string) {
 			fmt.Println("  ✓ removed bad storage.conf (was overriding runroot, causing network not found)")
 		}
 		exec.Command("chown", "-R", username+":"+username, userConfDir).Run() //nolint
-		fmt.Printf("  ✓ per-user containers.conf: graph_root=%s network_config_dir=%s\n", graphRoot, netCfgDir)
+		fmt.Printf("  ✓ per-user containers.conf: network_config_dir=%s\n", netCfgDir)
+	}
+
+	// Clean up the old /run/featherdeploy-runtime/containers/libpod state that
+	// earlier versions of the installer created.  If this stale DB exists, podman
+	// prints "database run root does not match" on every call because the DB
+	// remembers the old runroot.  Removing it lets podman recreate it fresh with
+	// the current runroot (/run/user/<uid>/containers).
+	oldRunRoot := "/run/featherdeploy-runtime/containers/libpod"
+	if _, statErr := os.Stat(oldRunRoot); statErr == nil {
+		os.RemoveAll(oldRunRoot) //nolint
+		fmt.Println("  ✓ removed stale /run/featherdeploy-runtime libpod state (was causing DB run root mismatch)")
+	}
+	// Also remove any stale libpod DB at the new runroot path that might still
+	// remember the old runroot value — podman system migrate will recreate it.
+	newLibpod := filepath.Join(rtDir, "containers", "libpod")
+	if _, statErr := os.Stat(newLibpod); statErr == nil {
+		os.RemoveAll(newLibpod) //nolint
+		fmt.Println("  ✓ cleared libpod state at new runroot (podman will rebuild on first start)")
+	}
+	// Run podman system migrate unconditionally so the container/network state
+	// DB is always rebuilt against the current home + runroot.  This is safe
+	// because the service is stopped during update.
+	migrateEnvFull := fmt.Sprintf(
+		"HOME=%s XDG_RUNTIME_DIR=%s XDG_CONFIG_HOME=%s XDG_DATA_HOME=%s XDG_CACHE_HOME=%s",
+		homedir, rtDir,
+		homedir+"/.config",
+		homedir+"/.local/share",
+		homedir+"/.cache",
+	)
+	migrateFullCmd := exec.Command("su", "-s", "/bin/sh", username, "-c",
+		"cd / && "+migrateEnvFull+" podman system migrate 2>&1")
+	if migrateOut, migrateErr := migrateFullCmd.CombinedOutput(); migrateErr == nil {
+		fmt.Println("  ✓ podman system migrate completed")
+	} else {
+		fmt.Printf("  NOTE: podman system migrate: %s\n", strings.TrimSpace(string(migrateOut)))
 	}
 
 	// Ensure the data dir exists and is owned by the service user.

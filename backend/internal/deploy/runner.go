@@ -445,8 +445,13 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 		// change).  Force-remove the stale entry and recreate, then retry once.
 		if strings.Contains(outStr, "network not found") || strings.Contains(outStr, "unable to find network") {
 			log.add("[network] stale network state detected — force-recreating %s and retrying", networkName)
+			// Remove stale network config so ensureProjectNetwork starts clean.
 			podmanCmd("network", "rm", "-f", networkName).Run() //nolint
+			// Give netavark a moment to clean up the old state before recreating.
+			time.Sleep(1 * time.Second)
 			if recreateErr := ensureProjectNetwork(projectID); recreateErr == nil {
+				// Brief settle before the run to let netavark finish wiring.
+				time.Sleep(500 * time.Millisecond)
 				out, err = podmanCmd(runArgs...).CombinedOutput()
 			} else {
 				log.add("[network] recreate failed: %v", recreateErr)
@@ -1693,38 +1698,14 @@ func podmanEnv() []string {
 }
 
 func podmanCmd(args ...string) *exec.Cmd {
-	// Prepend --root so every podman invocation uses the exact same graphroot
-	// regardless of how containers.conf or XDG variables are resolved by the
-	// podman binary.  This eliminates any remaining split-brain between
-	// 'podman network create' and 'podman run --network'.
-	home := os.Getenv("HOME")
-	if home == "" {
-		home = "/var/lib/featherdeploy"
-	}
-	graphRoot := home + "/.local/share/containers/storage"
-	runRoot := fmt.Sprintf("/run/user/%d/containers", os.Getuid())
-	globalArgs := []string{
-		"--root", graphRoot,
-		"--runroot", runRoot,
-	}
-	cmd := exec.Command("podman", append(globalArgs, args...)...)
+	cmd := exec.Command("podman", args...)
 	cmd.Env = podmanEnv()
 	return cmd
 }
 
 // podmanCmdCtx is like podmanCmd but accepts a context for timeout control.
 func podmanCmdCtx(ctx context.Context, args ...string) *exec.Cmd {
-	home := os.Getenv("HOME")
-	if home == "" {
-		home = "/var/lib/featherdeploy"
-	}
-	graphRoot := home + "/.local/share/containers/storage"
-	runRoot := fmt.Sprintf("/run/user/%d/containers", os.Getuid())
-	globalArgs := []string{
-		"--root", graphRoot,
-		"--runroot", runRoot,
-	}
-	cmd := exec.CommandContext(ctx, "podman", append(globalArgs, args...)...)
+	cmd := exec.CommandContext(ctx, "podman", args...)
 	cmd.Env = podmanEnv()
 	return cmd
 }
