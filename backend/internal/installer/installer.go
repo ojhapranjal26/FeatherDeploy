@@ -427,6 +427,97 @@ func ensureNetworkingBackend(username, homedir string) {
 		}
 	}
 
+	// Check for aardvark-dns.  This binary is REQUIRED for named bridge
+	// networks: netavark always spawns aardvark-dns as a subprocess to run
+	// the per-network DNS forwarder.  When aardvark-dns is absent, netavark
+	// exits 127 ("command not found") and Podman maps this to the misleading
+	// error "unable to find network with name or ID X: network not found".
+	// This is the most common cause of the "network not found" bug on
+	// Debian/Ubuntu where apt-get install podman does NOT pull in aardvark-dns
+	// as a required dependency (it is only a Recommends).
+	aardvarkPaths := []string{
+		"/usr/lib/podman/aardvark-dns",
+		"/usr/libexec/podman/aardvark-dns",
+		"/usr/lib/aardvark-dns/aardvark-dns",
+		"/usr/bin/aardvark-dns",
+	}
+	aardvarkFound := false
+	for _, p := range aardvarkPaths {
+		if _, err := os.Stat(p); err == nil {
+			fmt.Printf("  \u2713 aardvark-dns found at %s\n", p)
+			aardvarkFound = true
+			break
+		}
+	}
+	if !aardvarkFound {
+		fmt.Println("  WARNING: aardvark-dns not found — attempting to install it...")
+		for pm, args := range map[string][]string{
+			"dnf":     {"dnf", "install", "-y", "aardvark-dns"},
+			"apt-get": {"apt-get", "install", "-y", "-q", "aardvark-dns"},
+			"yum":     {"yum", "install", "-y", "--skip-broken", "aardvark-dns"},
+			"pacman":  {"pacman", "-S", "--noconfirm", "aardvark-dns"},
+		} {
+			if _, lookErr := exec.LookPath(pm); lookErr == nil {
+				cmd2 := exec.Command(args[0], args[1:]...)
+				cmd2.Stdout = os.Stdout
+				cmd2.Stderr = os.Stderr
+				if err2 := cmd2.Run(); err2 == nil {
+					// Re-check after install
+					for _, p := range aardvarkPaths {
+						if _, statErr := os.Stat(p); statErr == nil {
+							fmt.Printf("  \u2713 aardvark-dns installed at %s\n", p)
+							aardvarkFound = true
+							break
+						}
+					}
+				} else {
+					fmt.Printf("  WARNING: could not install aardvark-dns via %s: %v\n", pm, err2)
+				}
+				break
+			}
+		}
+		if !aardvarkFound {
+			// aardvark-dns is missing and could not be installed.  This IS the
+			// primary cause of "podman run --network name: network not found".
+			fmt.Println("  !! CRITICAL: aardvark-dns could not be installed.")
+			fmt.Println("  !! Named bridge networks will NOT work without it.")
+			fmt.Println("  !! Install it manually:")
+			fmt.Println("       sudo apt-get install -y aardvark-dns   # Debian/Ubuntu")
+			fmt.Println("       sudo dnf install -y aardvark-dns       # RHEL/AlmaLinux/Rocky")
+		}
+	}
+
+	// If aardvark-dns landed in /usr/bin/ or /usr/lib/aardvark-dns/ but NOT in
+	// Podman's compiled-in helper search path, create a symlink.  Netavark
+	// locates aardvark-dns relative to itself (both in /usr/lib/podman/ on
+	// RHEL, and in /usr/libexec/podman/ on Fedora) so adding a symlink there
+	// guarantees netavark finds it regardless of which directory the distro
+	// package chose for the actual binary.
+	aardvarkSrcPaths := []string{
+		"/usr/lib/aardvark-dns/aardvark-dns",
+		"/usr/bin/aardvark-dns",
+		"/usr/local/bin/aardvark-dns",
+	}
+	aardvarkDstDirs := []string{"/usr/lib/podman", "/usr/libexec/podman"}
+	for _, src := range aardvarkSrcPaths {
+		if _, statErr := os.Stat(src); statErr != nil {
+			continue
+		}
+		for _, dstDir := range aardvarkDstDirs {
+			dstPath := filepath.Join(dstDir, "aardvark-dns")
+			if _, statErr := os.Stat(dstPath); statErr == nil {
+				continue // already present — real binary or existing symlink
+			}
+			if mkErr := os.MkdirAll(dstDir, 0755); mkErr != nil {
+				continue
+			}
+			if lnErr := os.Symlink(src, dstPath); lnErr == nil {
+				fmt.Printf("  \u2713 symlinked %s → %s\n", dstPath, src)
+			}
+		}
+		break
+	}
+
 	// Check for pasta (rootless network helper from the passt package).
 	// pasta is preferred over slirp4netns because it does NOT interact with
 	// the systemd user session (no dbus user.slice move), which eliminates
@@ -511,8 +602,8 @@ func ensureNetworkingBackend(username, homedir string) {
 	if !found {
 		fmt.Println("  WARNING: netavark not found — attempting to install networking packages...")
 		for pm, args := range map[string][]string{
-			"dnf": {"dnf", "install", "-y", "netavark", "aardvark-dns"},
-			"apt-get": {"apt-get", "install", "-y", "-q", "netavark"},
+			"dnf":     {"dnf", "install", "-y", "netavark", "aardvark-dns"},
+			"apt-get": {"apt-get", "install", "-y", "-q", "netavark", "aardvark-dns"},
 			"yum":     {"yum", "install", "-y", "--skip-broken", "netavark", "aardvark-dns"},
 			"pacman":  {"pacman", "-S", "--noconfirm", "netavark"},
 		} {
@@ -526,7 +617,7 @@ func ensureNetworkingBackend(username, homedir string) {
 					fmt.Printf("  WARNING: could not install networking packages via %s: %v\n", pm, err2)
 					fmt.Println("  !! If deployments fail with 'network not found', run manually:")
 					fmt.Println("       sudo dnf install -y netavark aardvark-dns   # RHEL/AlmaLinux/Rocky")
-					fmt.Println("       sudo apt-get install -y netavark             # Ubuntu/Debian")
+					fmt.Println("       sudo apt-get install -y netavark aardvark-dns  # Ubuntu/Debian")
 				}
 				break
 			}
@@ -963,12 +1054,14 @@ type pkgCmd struct {
 var pkgManagers = map[string]pkgCmd{
 	"apt-get": {
 		update: []string{"apt-get", "update", "-y"},
-		// passt provides the 'pasta' binary, which is the modern replacement for
-		// slirp4netns as Podman's rootless network helper.  pasta does NOT try to
-		// move its process into the systemd user.slice via dbus, eliminating the
-		// "connect: permission denied on /run/user/<uid>/bus" error that slirp4netns
-		// triggers when no user-session dbus socket is present.
-		install: []string{"apt-get", "install", "-y", "podman", "crun", "caddy", "netavark", "passt"},
+		// aardvark-dns is REQUIRED by netavark bridge networking — without it,
+		// netavark cannot start the per-network DNS forwarder and 'podman run
+		// --network <name>' fails with the misleading error "network not found"
+		// (netavark tries to exec aardvark-dns, gets ENOENT, exits 127, and
+		// Podman maps the helper failure to "unable to find network").
+		// passt (pasta) is the modern rootless network namespace helper that
+		// does NOT interact with systemd dbus, replacing problematic slirp4netns.
+		install: []string{"apt-get", "install", "-y", "podman", "crun", "caddy", "netavark", "aardvark-dns", "passt"},
 	},
 	"dnf": {
 		update: []string{"dnf", "check-update"},
@@ -1092,6 +1185,22 @@ func configureCrun() {
 	const helperBinDirs = `helper_binaries_dir = ["/usr/libexec/podman", "/usr/lib/podman", "/usr/local/lib/podman", "/usr/bin", "/usr/local/bin"]`
 	if !strings.Contains(ns, "helper_binaries_dir") {
 		ns = strings.Replace(ns, "[engine]", "[engine]\n"+helperBinDirs, 1)
+	} else {
+		// Ensure /usr/bin is included for distros that install pasta/slirp4netns there
+		if !strings.Contains(ns, "/usr/bin") {
+			ns = regexp.MustCompile(`(?m)^\s*helper_binaries_dir\s*=.*$`).
+				ReplaceAllString(ns, helperBinDirs)
+		}
+	}
+
+	// slirp4netns_args: pass --disable-sandbox to prevent slirp4netns from
+	// attempting to move to the systemd user.slice via dbus.  Without this,
+	// slirp4netns logs "failed to move rootless netns process to user.slice"
+	// on every container start when no user-session dbus socket is present.
+	// --disable-sandbox disables cgroup isolation (which requires the dbus move)
+	// but keeps the network namespace setup working correctly.
+	if !strings.Contains(ns, "slirp4netns_args") {
+		ns = strings.Replace(ns, "[network]", "[network]\nslirp4netns_args = [\"--disable-sandbox\"]", 1)
 	}
 
 	writeFile(confFile, ns, 0644)
@@ -1504,6 +1613,12 @@ func RunUpdate() {
 	// them if absent so `podman run --network <name>` stops failing with exit 127.
 	fmt.Println("\n── Ensuring Podman named-network backend (netavark) ────────────")
 	homedir := userHomeDir(svcUser)
+	// configureCrun rewrites the system-wide /etc/containers/containers.conf to
+	// ensure: crun runtime, cgroupfs cgroup manager, netavark backend,
+	// helper_binaries_dir (so Podman finds pasta/slirp4netns in /usr/bin), and
+	// slirp4netns_args=[--disable-sandbox] (suppresses dbus user.slice errors).
+	// This must be called on every update so new config keys are always present.
+	configureCrun()
 	ensureNetworkingBackend(svcUser, homedir)
 
 	// ── Restart rqlite + featherdeploy ───────────────────────────────────────

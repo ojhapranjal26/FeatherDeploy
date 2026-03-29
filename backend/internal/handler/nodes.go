@@ -522,11 +522,11 @@ configure_crun() {
 if command -v apt-get >/dev/null 2>&1; then
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -y -q
-  apt-get install -y -q curl podman crun caddy openssh-server 2>/dev/null || apt-get install -y -q curl podman caddy openssh-server
+  apt-get install -y -q curl podman crun caddy openssh-server netavark aardvark-dns passt 2>/dev/null || apt-get install -y -q curl podman caddy openssh-server
 elif command -v dnf >/dev/null 2>&1; then
-  dnf install -y -q curl podman crun caddy openssh-server 2>/dev/null || dnf install -y -q curl podman caddy openssh-server
+  dnf install -y -q curl podman crun caddy openssh-server netavark aardvark-dns passt 2>/dev/null || dnf install -y -q curl podman caddy openssh-server
 elif command -v yum >/dev/null 2>&1; then
-  yum install -y -q curl podman openssh-server 2>/dev/null || yum install -y -q curl podman openssh-server
+  yum install -y -q curl podman openssh-server netavark aardvark-dns 2>/dev/null || yum install -y -q curl podman openssh-server
 elif command -v apk >/dev/null 2>&1; then
   apk add --no-cache curl podman caddy crun openssh 2>/dev/null || apk add --no-cache curl podman caddy openssh
 fi

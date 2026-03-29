@@ -1067,9 +1067,9 @@ func CheckNetworkingBackend() error {
 		podmanCmd("network", "rm", testNet).Run() //nolint
 		return fmt.Errorf(
 			"podman network create appeared to succeed but inspect failed (%v)\n"+
-				"This usually means the networking backend (netavark) is missing.\n"+
+				"This usually means the networking backend (netavark) is missing or aardvark-dns is not installed.\n"+
 				"  RHEL 9 / AlmaLinux / Rocky: sudo dnf install -y netavark aardvark-dns\n"+
-				"  Ubuntu / Debian:             sudo apt-get install -y netavark",
+				"  Ubuntu / Debian:             sudo apt-get install -y netavark aardvark-dns",
 			verErr)
 	}
 
@@ -1117,10 +1117,14 @@ func classifyNetworkError(out string) string {
 			"  sudo chown featherdeploy:featherdeploy " + rtDir + "\n" +
 			"  sudo systemctl restart featherdeploy"
 	default:
-		return "Named networks require the netavark networking back-end:\n" +
-			"  RHEL 9 / AlmaLinux / Rocky: sudo dnf install -y netavark aardvark-dns\n" +
-			"  Ubuntu / Debian:             sudo apt-get install -y netavark\n" +
-			"  Then restart: sudo systemctl restart featherdeploy"
+		// The most common cause of "network not found" on Debian/Ubuntu is
+		// aardvark-dns not being installed.  netavark requires aardvark-dns to
+		// start the per-network DNS forwarder.  When it's missing, netavark exits
+		// 127 ("command not found") and Podman maps this to "unable to find network".
+		return "Named bridge networks require both netavark AND aardvark-dns:\n" +
+			"  Ubuntu / Debian:             sudo apt-get install -y aardvark-dns netavark\n" +
+			"  RHEL 9 / AlmaLinux / Rocky: sudo dnf install -y aardvark-dns netavark\n" +
+			"  Then run: sudo featherdeploy update"
 	}
 }
 
@@ -1175,9 +1179,20 @@ func ensureProjectNetwork(projectID int64) error {
 			return nil
 		}
 		hint := ""
-		if strings.Contains(err.Error(), "127") || strings.Contains(string(out), "127") {
-			hint = "\n  Fix (RHEL/AlmaLinux/Rocky): sudo dnf install -y netavark aardvark-dns" +
-				"\n  Fix (Ubuntu/Debian):         sudo apt-get install -y netavark"
+		// Network not found during run typically means one of two things:
+		// 1. netavark is installed but aardvark-dns is MISSING — netavark tries
+		//    to exec aardvark-dns for DNS setup, gets ENOENT (exit 127), and
+		//    Podman maps this to "unable to find network" (NOT a network lookup
+		//    failure, despite the message).  This is the most common cause on
+		//    Debian/Ubuntu where aardvark-dns is not a required apt dependency.
+		// 2. netavark itself is missing.
+		if strings.Contains(err.Error(), "127") || strings.Contains(string(out), "127") ||
+			strings.Contains(strings.ToLower(string(out)), "network not found") ||
+			strings.Contains(strings.ToLower(string(out)), "unable to find network") {
+			hint = "\n  Most likely cause: aardvark-dns is not installed." +
+				"\n  Fix (Ubuntu/Debian):         sudo apt-get install -y aardvark-dns" +
+				"\n  Fix (RHEL/AlmaLinux/Rocky): sudo dnf install -y aardvark-dns" +
+				"\n  Then run: sudo featherdeploy update"
 		}
 		return fmt.Errorf("podman network create %s: %v — %s%s", name, err, strings.TrimSpace(string(out)), hint)
 	}
@@ -1207,7 +1222,14 @@ func ensureProjectNetwork(projectID int64) error {
 
 	lsOut, _ := podmanCmd("network", "ls").CombinedOutput()
 	return fmt.Errorf(
-		"network %s still not visible after 5s\npodman network ls:\n%s\nLikely cause: netavark not installed.\n  sudo dnf install -y netavark aardvark-dns",
+		"network %s still not visible after 5s\npodman network ls:\n%s\n"+
+			"Most likely cause: aardvark-dns is not installed.\n"+
+			"  'podman run --network' requires aardvark-dns for DNS setup.\n"+
+			"  When aardvark-dns is missing, netavark exits 127 and Podman\n"+
+			"  reports 'network not found' (even though the network JSON exists).\n"+
+			"  Fix (Ubuntu/Debian):         sudo apt-get install -y aardvark-dns\n"+
+			"  Fix (RHEL/AlmaLinux/Rocky): sudo dnf install -y aardvark-dns netavark\n"+
+			"  Then run: sudo featherdeploy update",
 		name, strings.TrimSpace(string(lsOut)))
 }
 
