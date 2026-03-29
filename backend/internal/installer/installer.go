@@ -433,10 +433,12 @@ func ensureNetworkingBackend(username, homedir string) {
 	// the "connect: permission denied on /run/user/<uid>/bus" error.
 	pastaPaths := []string{"/usr/bin/pasta", "/usr/local/bin/pasta", "/usr/libexec/pasta"}
 	pastaFound := false
+	pastaActualPath := "" // real path of the pasta binary, used for symlinking
 	for _, p := range pastaPaths {
 		if _, err := os.Stat(p); err == nil {
 			fmt.Printf("  \u2713 pasta found at %s\n", p)
 			pastaFound = true
+			pastaActualPath = p
 			break
 		}
 	}
@@ -458,6 +460,7 @@ func ensureNetworkingBackend(username, homedir string) {
 						if _, statErr := os.Stat(p); statErr == nil {
 							fmt.Printf("  \u2713 pasta installed at %s\n", p)
 							pastaFound = true
+							pastaActualPath = p
 							break
 						}
 					}
@@ -474,7 +477,36 @@ func ensureNetworkingBackend(username, homedir string) {
 			fmt.Println("        but installing passt eliminates them entirely.")
 		}
 	}
-	_ = pastaFound // used implicitly via containers.conf written later in this function
+
+	// Podman searches for helper binaries (pasta, slirp4netns) in a compiled-in
+	// list of directories: /usr/libexec/podman, /usr/lib/podman, etc.  It does
+	// NOT search $PATH for them.  On Debian/Ubuntu, pasta is installed in
+	// /usr/bin/pasta (via the passt package), which is NOT in Podman's helper
+	// search path.  When containers.conf says default_rootless_network_cmd="pasta"
+	// and Podman can't find pasta in its helper dirs, it exits 127 ("command not
+	// found") and falls back to slirp4netns, causing the dbus user.slice errors.
+	//
+	// Fix: create symlinks in every Podman helper dir so the binary is found
+	// regardless of which Podman version is installed.
+	if pastaFound && pastaActualPath != "" {
+		podmanHelperDirs := []string{
+			"/usr/libexec/podman",
+			"/usr/lib/podman",
+			"/usr/local/lib/podman",
+		}
+		for _, helperDir := range podmanHelperDirs {
+			linkPath := filepath.Join(helperDir, "pasta")
+			if _, statErr := os.Stat(linkPath); statErr == nil {
+				continue // already exists — real binary or existing symlink
+			}
+			if mkErr := os.MkdirAll(helperDir, 0755); mkErr != nil {
+				continue
+			}
+			if lnErr := os.Symlink(pastaActualPath, linkPath); lnErr == nil {
+				fmt.Printf("  \u2713 symlinked %s → %s\n", linkPath, pastaActualPath)
+			}
+		}
+	}
 
 	if !found {
 		fmt.Println("  WARNING: netavark not found — attempting to install networking packages...")
@@ -1029,6 +1061,39 @@ func configureCrun() {
 	} else {
 		ns = strings.Replace(ns, "[network]", "[network]\nnetwork_backend = \"netavark\"", 1)
 	}
+
+	// Set default_rootless_network_cmd = "pasta" if pasta is available.
+	// This is the SYSTEM-LEVEL override — Podman reads this before the
+	// per-user containers.conf. Without it, some Podman builds ignore the
+	// user-level setting and default to slirp4netns, causing the dbus error.
+	pastaSystemPaths := []string{"/usr/bin/pasta", "/usr/local/bin/pasta", "/usr/libexec/pasta"}
+	pastaSystemFound := false
+	for _, pp := range pastaSystemPaths {
+		if _, statErr := os.Stat(pp); statErr == nil {
+			pastaSystemFound = true
+			break
+		}
+	}
+	if pastaSystemFound {
+		if strings.Contains(ns, "default_rootless_network_cmd") {
+			ns = regexp.MustCompile(`(?m)^\s*default_rootless_network_cmd\s*=.*$`).
+				ReplaceAllString(ns, `default_rootless_network_cmd = "pasta"`)
+		} else {
+			ns = strings.Replace(ns, "[network]", "[network]\ndefault_rootless_network_cmd = \"pasta\"", 1)
+		}
+	}
+
+	// Add helper_binaries_dir so Podman searches /usr/bin and /usr/local/bin for
+	// helper binaries (pasta, slirp4netns, etc.).  On Debian/Ubuntu, pasta is
+	// installed to /usr/bin/pasta by the passt package, but Podman's compiled-in
+	// helper search path only includes /usr/libexec/podman and /usr/lib/podman.
+	// Without this, Podman can't find pasta, exits 127, and falls back to
+	// slirp4netns — which causes the user.slice/dbus permission error.
+	const helperBinDirs = `helper_binaries_dir = ["/usr/libexec/podman", "/usr/lib/podman", "/usr/local/lib/podman", "/usr/bin", "/usr/local/bin"]`
+	if !strings.Contains(ns, "helper_binaries_dir") {
+		ns = strings.Replace(ns, "[engine]", "[engine]\n"+helperBinDirs, 1)
+	}
+
 	writeFile(confFile, ns, 0644)
 	fmt.Println("  ✓ network_backend=netavark set in", confFile)
 	// Without this file every `podman build` fails with:
@@ -1317,7 +1382,12 @@ Environment=XDG_RUNTIME_DIR=/run/user/{{.UID}}
 Environment=XDG_CONFIG_HOME={{.DataDir}}/.config
 Environment=XDG_DATA_HOME={{.DataDir}}/.local/share
 Environment=XDG_CACHE_HOME={{.DataDir}}/.cache
-Environment=DBUS_SESSION_BUS_ADDRESS=
+# Disable dbus: an empty value is treated identically to "unset" by sd-bus,
+# which then falls back to the default /run/user/<uid>/bus socket and causes
+# slirp4netns to attempt a user.slice cgroup move that fails with
+# "connect: permission denied". "disabled:" is an invalid address that makes
+# sd-bus abort immediately without touching any real socket.
+Environment=DBUS_SESSION_BUS_ADDRESS=disabled:
 # Guarantee /run/user/<uid> exists before ExecStart in case systemd-logind
 # has not yet created it (e.g. first boot, or linger just enabled).
 # The '+' prefix runs this pre-start command as root.
