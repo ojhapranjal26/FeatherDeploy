@@ -529,22 +529,24 @@ func ensureNetworkingBackend(username, homedir string) {
 		fmt.Printf("  ✓ home dir is already %s\n", dataDir)
 	}
 
-	// After computing rtDir and fixing home dir, write per-user storage.conf
-	// and containers.conf so both RunInstall and RunUpdate paths have correct
-	// configs.  These are also written in setupPodmanRootless (InstallRun path)
-	// but ensureNetworkingBackend is the only path called by RunUpdate, so
-	// we write them here too to keep both paths in sync.
+	// After computing rtDir and fixing home dir, write per-user containers.conf
+	// and registries.conf, and remove any broken storage.conf.
+	// These are also written in setupPodmanRootless; we repeat it here so
+	// RunUpdate (which calls ensureNetworkingBackend but not setupPodmanRootless)
+	// also applies the correct config.
 	userConfDir := filepath.Join(homedir, ".config", "containers")
 	if mkErr := os.MkdirAll(userConfDir, 0755); mkErr == nil {
 		contConf := "[engine]\ncgroup_manager = \"cgroupfs\"\n\n[network]\nnetwork_backend = \"netavark\"\n"
 		os.WriteFile(filepath.Join(userConfDir, "containers.conf"), []byte(contConf), 0644) //nolint
-		stConf := fmt.Sprintf("[storage]\ndriver = \"overlay\"\ngraphroot = \"%s/.local/share/containers/storage\"\nrunroot = \"%s/storage\"\n", homedir, rtDir)
-		os.WriteFile(filepath.Join(userConfDir, "storage.conf"), []byte(stConf), 0644) //nolint
-		// Pre-create the runroot directory.
-		os.MkdirAll(rtDir+"/storage", 0700)                                            //nolint
-		exec.Command("chown", "-R", username+":"+username, userConfDir).Run()          //nolint
-		exec.Command("chown", username+":"+username, rtDir+"/storage").Run()           //nolint
-		fmt.Printf("  ✓ per-user containers.conf + storage.conf updated (runroot=%s/storage)\n", rtDir)
+		// Remove any storage.conf that overrides runroot — the default
+		// $XDG_RUNTIME_DIR/containers is correct and must not be changed.
+		storagePath := filepath.Join(userConfDir, "storage.conf")
+		if _, statErr := os.Stat(storagePath); statErr == nil {
+			os.Remove(storagePath)
+			fmt.Println("  ✓ removed bad storage.conf (was overriding runroot, causing network not found)")
+		}
+		exec.Command("chown", "-R", username+":"+username, userConfDir).Run() //nolint
+		fmt.Printf("  ✓ per-user containers.conf updated (runroot=default=$XDG_RUNTIME_DIR/containers)\n")
 	}
 
 	// Ensure the data dir exists and is owned by the service user.
@@ -1110,7 +1112,7 @@ Environment=XDG_RUNTIME_DIR=/run/user/{{.UID}}
 # Guarantee /run/user/<uid> exists before ExecStart in case systemd-logind
 # has not yet created it (e.g. first boot, or linger just enabled).
 # The '+' prefix runs this pre-start command as root.
-ExecStartPre=+/bin/bash -c 'mkdir -p /run/user/{{.UID}} /run/user/{{.UID}}/storage && chown {{.User}}:{{.User}} /run/user/{{.UID}} /run/user/{{.UID}}/storage && chmod 700 /run/user/{{.UID}} /run/user/{{.UID}}/storage'
+ExecStartPre=+/bin/bash -c 'mkdir -p /run/user/{{.UID}} /run/user/{{.UID}}/containers && chown {{.User}}:{{.User}} /run/user/{{.UID}} /run/user/{{.UID}}/containers && chmod 700 /run/user/{{.UID}} /run/user/{{.UID}}/containers'
 ExecStart={{.Bin}} serve
 Restart=always
 RestartSec=5s
