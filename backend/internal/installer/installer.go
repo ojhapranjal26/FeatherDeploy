@@ -576,22 +576,34 @@ func ensureNetworkingBackend(username, homedir string) {
 		fmt.Printf("  ✓ per-user containers.conf: network_config_dir=%s\n", netCfgDir)
 	}
 
-	// Clean up the old /run/featherdeploy-runtime/containers/libpod state that
-	// earlier versions of the installer created.  If this stale DB exists, podman
-	// prints "database run root does not match" on every call because the DB
-	// remembers the old runroot.  Removing it lets podman recreate it fresh with
-	// the current runroot (/run/user/<uid>/containers).
-	oldRunRoot := "/run/featherdeploy-runtime/containers/libpod"
-	if _, statErr := os.Stat(oldRunRoot); statErr == nil {
-		os.RemoveAll(oldRunRoot) //nolint
-		fmt.Println("  ✓ removed stale /run/featherdeploy-runtime libpod state (was causing DB run root mismatch)")
+	// THE KEY FIX: delete the PERSISTENT libpod SQLite DB at the graph-root
+	// static dir.  This DB was written by an earlier installer version that used
+	// a storage.conf with runroot=/run/featherdeploy-runtime/containers.
+	// Podman 4.x stores the runRoot inside this DB and restores it on EVERY
+	// podman invocation ("Overriding run root ... from database"), completely
+	// ignoring storage.conf, XDG env, or --network-config-dir flags.  The only
+	// safe remedy is to delete the DB so podman recreates it fresh with the
+	// correct runRoot (XDG_RUNTIME_DIR/containers = /run/user/<uid>/containers).
+	// Only the libpod subdir is removed — overlay/ (images) and volumes/ are kept.
+	staticLibpod := filepath.Join(homedir, ".local", "share", "containers", "storage", "libpod")
+	if _, statErr := os.Stat(staticLibpod); statErr == nil {
+		os.RemoveAll(staticLibpod) //nolint
+		fmt.Println("  ✓ cleared persistent libpod DB (stale runRoot was overriding all podman paths; will recreate fresh)")
+	}
+	// Remove the entire /run/featherdeploy-runtime tree.  It was the old
+	// custom XDG runtime dir from a previous installer; the current installer
+	// uses /run/user/<uid> instead.  Any stale libpod state under it would
+	// also cause 'database run root does not match' on next podman call.
+	if _, statErr := os.Stat("/run/featherdeploy-runtime"); statErr == nil {
+		os.RemoveAll("/run/featherdeploy-runtime") //nolint
+		fmt.Println("  ✓ removed stale /run/featherdeploy-runtime (replaced by /run/user/<uid>)")
 	}
 	// Also remove any stale libpod DB at the new runroot path that might still
 	// remember the old runroot value — podman system migrate will recreate it.
 	newLibpod := filepath.Join(rtDir, "containers", "libpod")
 	if _, statErr := os.Stat(newLibpod); statErr == nil {
 		os.RemoveAll(newLibpod) //nolint
-		fmt.Println("  ✓ cleared libpod state at new runroot (podman will rebuild on first start)")
+		fmt.Println("  ✓ cleared ephemeral libpod state at new runroot")
 	}
 	// Run podman system migrate unconditionally so the container/network state
 	// DB is always rebuilt against the current home + runroot.  This is safe
@@ -629,15 +641,21 @@ func ensureNetworkingBackend(username, homedir string) {
 		homedir+"/.cache",
 	)
 	testNetCfgDir := filepath.Join(homedir, ".local", "share", "containers", "storage", "networks")
+	testGraphRoot := filepath.Join(homedir, ".local", "share", "containers", "storage")
+	testRunRoot := rtDir + "/containers"
+	// Ensure the runroot directory exists before the smoke test (the systemd
+	// ExecStartPre normally creates it, but we're running outside the service).
+	os.MkdirAll(testRunRoot, 0700)                                        //nolint
+	exec.Command("chown", username+":"+username, testRunRoot).Run()        //nolint
 	smoke := fmt.Sprintf(
-		"%s podman --cgroup-manager cgroupfs --network-config-dir %s network rm -f %s >/dev/null 2>&1 || true; "+
-			"%s podman --cgroup-manager cgroupfs --network-config-dir %s network create %s 2>&1 && "+
-			"%s podman --cgroup-manager cgroupfs --network-config-dir %s run --rm --network %s docker.io/library/alpine true 2>&1 && "+
-			"%s podman --cgroup-manager cgroupfs --network-config-dir %s network rm -f %s 2>/dev/null",
-		testEnv, testNetCfgDir, testNetName,
-		testEnv, testNetCfgDir, testNetName,
-		testEnv, testNetCfgDir, testNetName,
-		testEnv, testNetCfgDir, testNetName)
+		"%s podman --cgroup-manager cgroupfs --root %s --runroot %s --network-config-dir %s network rm -f %s >/dev/null 2>&1 || true; "+
+			"%s podman --cgroup-manager cgroupfs --root %s --runroot %s --network-config-dir %s network create %s 2>&1 && "+
+			"%s podman --cgroup-manager cgroupfs --root %s --runroot %s --network-config-dir %s run --rm --network %s docker.io/library/alpine true 2>&1 && "+
+			"%s podman --cgroup-manager cgroupfs --root %s --runroot %s --network-config-dir %s network rm -f %s 2>/dev/null",
+		testEnv, testGraphRoot, testRunRoot, testNetCfgDir, testNetName,
+		testEnv, testGraphRoot, testRunRoot, testNetCfgDir, testNetName,
+		testEnv, testGraphRoot, testRunRoot, testNetCfgDir, testNetName,
+		testEnv, testGraphRoot, testRunRoot, testNetCfgDir, testNetName)
 	// Prefix with 'cd /' so su doesn't inherit CWD=/root (permission denied).
 	smokecmd := exec.Command("su", "-s", "/bin/sh", username, "-c", "cd / && "+smoke)
 	if out, err := smokecmd.CombinedOutput(); err != nil {

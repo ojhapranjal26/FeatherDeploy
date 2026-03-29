@@ -1108,13 +1108,13 @@ func classifyNetworkError(out string) string {
 			"  sudo systemctl restart featherdeploy"
 	case strings.Contains(out, "no such file or directory") &&
 		(strings.Contains(out, "runtime") || strings.Contains(out, "XDG")):
-		// XDG_RUNTIME_DIR doesn't exist — created by systemd RuntimeDirectory=
-		// on service start; if missing it means the service isn't running via
-		// the expected systemd unit.
-		return "XDG_RUNTIME_DIR (/run/featherdeploy-runtime) does not exist.\n" +
+		// XDG_RUNTIME_DIR/containers doesn't exist — created by the service's
+		// ExecStartPre before the main process starts.
+		rtDir := fmt.Sprintf("/run/user/%d", os.Getuid())
+		return "XDG_RUNTIME_DIR (" + rtDir + ") does not exist.\n" +
 			"It is created automatically when the service starts via its systemd unit.\n" +
-			"  sudo mkdir -p /run/featherdeploy-runtime\n" +
-			"  sudo chown featherdeploy:featherdeploy /run/featherdeploy-runtime\n" +
+			"  sudo mkdir -p " + rtDir + "\n" +
+			"  sudo chown featherdeploy:featherdeploy " + rtDir + "\n" +
 			"  sudo systemctl restart featherdeploy"
 	default:
 		return "Named networks require the netavark networking back-end:\n" +
@@ -1748,11 +1748,16 @@ func podmanCmd(args ...string) *exec.Cmd {
 	if home == "" {
 		home = "/var/lib/featherdeploy"
 	}
-	// Podman documents that rootless netavark stores networks under
-	// $graphroot/networks, where graphroot defaults to
-	// $XDG_DATA_HOME/containers/storage.
-	networkCfgDir := filepath.Join(home, ".local", "share", "containers", "storage", "networks")
-	cmd := exec.Command("podman", append([]string{"--cgroup-manager", "cgroupfs", "--network-config-dir", networkCfgDir}, args...)...)
+	// Podman 4.x stores runRoot/tmpDir in its SQLite DB and overrides the
+	// configured values on every invocation ("Overriding run root ... from
+	// database").  Passing --root and --runroot explicitly on the CLI takes
+	// precedence over the DB so a stale database from an old installer version
+	// can never redirect netavark state to a wrong path (causing "network not
+	// found" even when the network JSON exists and 'network inspect' succeeds).
+	graphRoot := filepath.Join(home, ".local", "share", "containers", "storage")
+	networkCfgDir := filepath.Join(graphRoot, "networks")
+	runRoot := fmt.Sprintf("/run/user/%d/containers", os.Getuid())
+	cmd := exec.Command("podman", append([]string{"--cgroup-manager", "cgroupfs", "--root", graphRoot, "--runroot", runRoot, "--network-config-dir", networkCfgDir}, args...)...)
 	cmd.Env = podmanEnv()
 	return cmd
 }
@@ -1763,8 +1768,10 @@ func podmanCmdCtx(ctx context.Context, args ...string) *exec.Cmd {
 	if home == "" {
 		home = "/var/lib/featherdeploy"
 	}
-	networkCfgDir := filepath.Join(home, ".local", "share", "containers", "storage", "networks")
-	cmd := exec.CommandContext(ctx, "podman", append([]string{"--cgroup-manager", "cgroupfs", "--network-config-dir", networkCfgDir}, args...)...)
+	graphRoot := filepath.Join(home, ".local", "share", "containers", "storage")
+	networkCfgDir := filepath.Join(graphRoot, "networks")
+	runRoot := fmt.Sprintf("/run/user/%d/containers", os.Getuid())
+	cmd := exec.CommandContext(ctx, "podman", append([]string{"--cgroup-manager", "cgroupfs", "--root", graphRoot, "--runroot", runRoot, "--network-config-dir", networkCfgDir}, args...)...)
 	cmd.Env = podmanEnv()
 	return cmd
 }
