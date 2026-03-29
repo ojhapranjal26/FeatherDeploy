@@ -1739,7 +1739,13 @@ func podmanEnv() []string {
 		"XDG_CONFIG_HOME="+home+"/.config",
 		"XDG_DATA_HOME="+home+"/.local/share",
 		"XDG_CACHE_HOME="+home+"/.cache",
-		"DBUS_SESSION_BUS_ADDRESS=",
+		// Set to an invalid address rather than empty string.  An empty
+		// DBUS_SESSION_BUS_ADDRESS is treated identically to "unset" by sd-bus:
+		// it falls back to the default /run/user/<uid>/bus socket, causing
+		// slirp4netns to attempt a user.slice cgroup move that fails with
+		// "connect: permission denied".  An invalid address makes sd-bus abort
+		// the connection immediately, which is what we want.
+		"DBUS_SESSION_BUS_ADDRESS=disabled:",
 	)
 }
 
