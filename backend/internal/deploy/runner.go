@@ -1693,14 +1693,38 @@ func podmanEnv() []string {
 }
 
 func podmanCmd(args ...string) *exec.Cmd {
-	cmd := exec.Command("podman", args...)
+	// Prepend --root so every podman invocation uses the exact same graphroot
+	// regardless of how containers.conf or XDG variables are resolved by the
+	// podman binary.  This eliminates any remaining split-brain between
+	// 'podman network create' and 'podman run --network'.
+	home := os.Getenv("HOME")
+	if home == "" {
+		home = "/var/lib/featherdeploy"
+	}
+	graphRoot := home + "/.local/share/containers/storage"
+	runRoot := fmt.Sprintf("/run/user/%d/containers", os.Getuid())
+	globalArgs := []string{
+		"--root", graphRoot,
+		"--runroot", runRoot,
+	}
+	cmd := exec.Command("podman", append(globalArgs, args...)...)
 	cmd.Env = podmanEnv()
 	return cmd
 }
 
 // podmanCmdCtx is like podmanCmd but accepts a context for timeout control.
 func podmanCmdCtx(ctx context.Context, args ...string) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, "podman", args...)
+	home := os.Getenv("HOME")
+	if home == "" {
+		home = "/var/lib/featherdeploy"
+	}
+	graphRoot := home + "/.local/share/containers/storage"
+	runRoot := fmt.Sprintf("/run/user/%d/containers", os.Getuid())
+	globalArgs := []string{
+		"--root", graphRoot,
+		"--runroot", runRoot,
+	}
+	cmd := exec.CommandContext(ctx, "podman", append(globalArgs, args...)...)
 	cmd.Env = podmanEnv()
 	return cmd
 }

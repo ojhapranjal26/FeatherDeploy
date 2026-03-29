@@ -535,8 +535,21 @@ func ensureNetworkingBackend(username, homedir string) {
 	// RunUpdate (which calls ensureNetworkingBackend but not setupPodmanRootless)
 	// also applies the correct config.
 	userConfDir := filepath.Join(homedir, ".config", "containers")
+	// Hardcode the network_config_dir to an absolute path so podman never
+	// computes it from XDG_CONFIG_HOME at runtime.  In Podman 4.x (netavark),
+	// 'podman network create' and 'podman run --network' BOTH resolve the
+	// network config directory through this setting.  Without it, any
+	// difference in XDG_CONFIG_HOME between the two calls causes a split-brain
+	// where the network is created in one path and looked up in another, which
+	// manifests as exit 127 / "network not found" in podman run.
+	netCfgDir := filepath.Join(homedir, ".config", "containers", "networks")
+	graphRoot := filepath.Join(homedir, ".local", "share", "containers", "storage")
 	if mkErr := os.MkdirAll(userConfDir, 0755); mkErr == nil {
-		contConf := "[engine]\ncgroup_manager = \"cgroupfs\"\n\n[network]\nnetwork_backend = \"netavark\"\n"
+		os.MkdirAll(netCfgDir, 0755) //nolint
+		contConf := fmt.Sprintf(
+			"[engine]\ncgroup_manager = \"cgroupfs\"\ngraph_root = \"%s\"\n\n"+
+				"[network]\nnetwork_backend = \"netavark\"\nnetwork_config_dir = \"%s\"\n",
+			graphRoot, netCfgDir)
 		os.WriteFile(filepath.Join(userConfDir, "containers.conf"), []byte(contConf), 0644) //nolint
 		// Remove any storage.conf that overrides runroot — the default
 		// $XDG_RUNTIME_DIR/containers is correct and must not be changed.
@@ -546,7 +559,7 @@ func ensureNetworkingBackend(username, homedir string) {
 			fmt.Println("  ✓ removed bad storage.conf (was overriding runroot, causing network not found)")
 		}
 		exec.Command("chown", "-R", username+":"+username, userConfDir).Run() //nolint
-		fmt.Printf("  ✓ per-user containers.conf updated (runroot=default=$XDG_RUNTIME_DIR/containers)\n")
+		fmt.Printf("  ✓ per-user containers.conf: graph_root=%s network_config_dir=%s\n", graphRoot, netCfgDir)
 	}
 
 	// Ensure the data dir exists and is owned by the service user.
@@ -556,7 +569,15 @@ func ensureNetworkingBackend(username, homedir string) {
 
 	// Run a quick smoke-test as the service user:
 	// create a test network, then immediately remove it.
-	testEnv := fmt.Sprintf("HOME=%s XDG_RUNTIME_DIR=%s", homedir, rtDir)
+	// Inject the full XDG env (same as podmanEnv() in runner.go) so the
+	// smoke test reads the same containers.conf the running service will use.
+	testEnv := fmt.Sprintf(
+		"HOME=%s XDG_RUNTIME_DIR=%s XDG_CONFIG_HOME=%s XDG_DATA_HOME=%s XDG_CACHE_HOME=%s",
+		homedir, rtDir,
+		homedir+"/.config",
+		homedir+"/.local/share",
+		homedir+"/.cache",
+	)
 	smoke := fmt.Sprintf(
 		"%s podman network create fd-nettest 2>&1 && %s podman network rm fd-nettest 2>/dev/null",
 		testEnv, testEnv)
