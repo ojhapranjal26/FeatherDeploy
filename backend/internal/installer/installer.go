@@ -936,7 +936,13 @@ StartLimitIntervalSec=120
 StartLimitBurst=5
 StandardOutput=journal
 StandardError=journal
-PrivateTmp=yes
+# PrivateTmp must NOT be set here. Rootless podman re-execs itself into a new
+# user namespace (via newuidmap) to set up UID mapping. The child process does
+# not inherit systemd's private /tmp bind-mount, so any build context written
+# to /tmp by the parent becomes invisible to the podman build worker — causing
+# "cannot chdir to /tmp/fd-dep-XXX: No such file or directory".
+# Security isolation is provided by podman's own user namespaces instead.
+#
 # NoNewPrivileges must NOT be set: rootless podman forks newuidmap/newgidmap which
 # are setuid-root binaries. NoNewPrivileges blocks their setuid bit, causing
 # "write to uid_map failed: Operation not permitted" errors on every build/run.

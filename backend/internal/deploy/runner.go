@@ -84,6 +84,22 @@ var (
 	jobCh     chan deployJob
 )
 
+// buildTmpDir returns the base directory for deployment work dirs.
+// We deliberately avoid /tmp because the systemd unit previously used
+// PrivateTmp=yes, and rootless podman re-execs itself into a new user
+// namespace where the private /tmp bind-mount is not inherited — making
+// any /tmp path invisible to the podman build worker.  Using a subdir of
+// HOME (the service data dir) is always accessible from within podman.
+func buildTmpDir() string {
+	home := os.Getenv("HOME")
+	if home == "" {
+		home = "/var/lib/featherdeploy"
+	}
+	dir := filepath.Join(home, "tmp")
+	os.MkdirAll(dir, 0755) //nolint
+	return dir
+}
+
 // InitQueue starts the deployment worker pool. concurrency defaults to
 // runtime.NumCPU() when <= 0. Call once at server startup.
 func InitQueue(concurrency int) {
@@ -196,7 +212,7 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 	isArtifact := deployType == "artifact" && artifactPath != ""
 
 	// ── 2. Source: either git clone or artifact extraction ───────────────────
-	workDir, err := os.MkdirTemp("", fmt.Sprintf("fd-dep-%d-*", depID))
+	workDir, err := os.MkdirTemp(buildTmpDir(), fmt.Sprintf("fd-dep-%d-*", depID))
 	if err != nil {
 		log.add("ERROR: create work dir: %v", err)
 		markFailed(db, depID, svcID, log.text())
@@ -245,7 +261,7 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 			// Retry without explicit branch (use repo default)
 			log.add("[clone] branch %q not found — retrying with default branch", repoBranch)
 			os.RemoveAll(workDir)
-			workDir2, _ := os.MkdirTemp("", fmt.Sprintf("fd-dep-%d-*", depID))
+			workDir2, _ := os.MkdirTemp(buildTmpDir(), fmt.Sprintf("fd-dep-%d-*", depID))
 			workDir = workDir2
 			if err2 := gitCloneDefault(workDir, sshKeyFile, repoURL, log); err2 != nil {
 				log.add("ERROR: git clone failed: %v", err2)
