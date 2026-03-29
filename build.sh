@@ -19,10 +19,6 @@ SYSTEMD_UNIT="/etc/systemd/system/featherdeploy.service"
 RQLITE_UNIT="/etc/systemd/system/rqlite.service"
 DATA_DB="/var/lib/featherdeploy/deploy.db"
 RQLITE_DATA_DIR="/var/lib/featherdeploy/rqlite-data"
-RQLITE_VER="8.36.5"
-    x86_64)           echo "amd64" ;;
-    aarch64|arm64)    echo "arm64" ;;
-    armv7l|armv6l)    echo "arm"   ;;
 SVC_USER="featherdeploy"
 
 # -- 0. Must run as root
