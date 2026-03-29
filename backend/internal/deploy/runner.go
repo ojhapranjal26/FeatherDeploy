@@ -1073,6 +1073,19 @@ func CheckNetworkingBackend() error {
 			verErr)
 	}
 
+	// Run a tiny container on the network.  create/inspect only validate the
+	// network JSON, but 'podman run --network' is the operation that exercises
+	// rootless netns setup, cgroup-manager interaction and port-forward helper
+	// startup.  This catches the exact class of failures that previously slipped
+	// past startup checks and only showed up during deployments.
+	runOut, runErr := podmanCmd("run", "--rm", "--network", testNet, "docker.io/library/alpine", "true").CombinedOutput()
+	if runErr != nil {
+		podmanCmd("network", "rm", testNet).Run() //nolint
+		outStr := strings.TrimSpace(string(runOut))
+		return fmt.Errorf("podman run --network %s failed (%v): %s\n\n%s",
+			testNet, runErr, outStr, classifyNetworkError(outStr))
+	}
+
 	// Remove
 	podmanCmd("network", "rm", testNet).Run() //nolint
 	return nil
@@ -1725,7 +1738,7 @@ func podmanCmd(args ...string) *exec.Cmd {
 	// $graphroot/networks, where graphroot defaults to
 	// $XDG_DATA_HOME/containers/storage.
 	networkCfgDir := filepath.Join(home, ".local", "share", "containers", "storage", "networks")
-	cmd := exec.Command("podman", append([]string{"--network-config-dir", networkCfgDir}, args...)...)
+	cmd := exec.Command("podman", append([]string{"--cgroup-manager", "cgroupfs", "--network-config-dir", networkCfgDir}, args...)...)
 	cmd.Env = podmanEnv()
 	return cmd
 }
@@ -1737,7 +1750,7 @@ func podmanCmdCtx(ctx context.Context, args ...string) *exec.Cmd {
 		home = "/var/lib/featherdeploy"
 	}
 	networkCfgDir := filepath.Join(home, ".local", "share", "containers", "storage", "networks")
-	cmd := exec.CommandContext(ctx, "podman", append([]string{"--network-config-dir", networkCfgDir}, args...)...)
+	cmd := exec.CommandContext(ctx, "podman", append([]string{"--cgroup-manager", "cgroupfs", "--network-config-dir", networkCfgDir}, args...)...)
 	cmd.Env = podmanEnv()
 	return cmd
 }

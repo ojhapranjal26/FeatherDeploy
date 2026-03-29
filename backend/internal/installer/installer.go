@@ -617,7 +617,7 @@ func ensureNetworkingBackend(username, homedir string) {
 	}
 
 	// Run a quick smoke-test as the service user:
-	// create a test network, then immediately remove it.
+	// create a test network, run a tiny container on it, then remove it.
 	// Inject the full XDG env (same as podmanEnv() in runner.go) so the
 	// smoke test reads the same containers.conf the running service will use.
 	testEnv := fmt.Sprintf(
@@ -627,9 +627,14 @@ func ensureNetworkingBackend(username, homedir string) {
 		homedir+"/.local/share",
 		homedir+"/.cache",
 	)
+	testNetCfgDir := filepath.Join(homedir, ".local", "share", "containers", "storage", "networks")
 	smoke := fmt.Sprintf(
-		"%s podman network create fd-nettest 2>&1 && %s podman network rm fd-nettest 2>/dev/null",
-		testEnv, testEnv)
+		"%s podman --cgroup-manager cgroupfs --network-config-dir %s network create fd-nettest 2>&1 && "+
+			"%s podman --cgroup-manager cgroupfs --network-config-dir %s run --rm --network fd-nettest docker.io/library/alpine true 2>&1 && "+
+			"%s podman --cgroup-manager cgroupfs --network-config-dir %s network rm fd-nettest 2>/dev/null",
+		testEnv, testNetCfgDir,
+		testEnv, testNetCfgDir,
+		testEnv, testNetCfgDir)
 	// Prefix with 'cd /' so su doesn't inherit CWD=/root (permission denied).
 	smokecmd := exec.Command("su", "-s", "/bin/sh", username, "-c", "cd / && "+smoke)
 	if out, err := smokecmd.CombinedOutput(); err != nil {
