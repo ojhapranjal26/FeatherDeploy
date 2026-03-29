@@ -330,6 +330,17 @@ func setupPodmanRootless(username string) {
 		if err2 := os.WriteFile(confFile, []byte(userConf), 0644); err2 == nil {
 			fmt.Printf("  ✓ per-user containers.conf (cgroupfs) written to %s\n", confFile)
 		}
+
+		// Write a registries.conf so that short image names like "php:8.2-fpm-alpine"
+		// resolve to docker.io without requiring a fully-qualified reference.
+		// Without this file Podman exits 125: "short-name did not resolve to an alias
+		// and no containers-registries.conf(5) was found".
+		regFile := filepath.Join(confDir, "registries.conf")
+		const regConf = "unqualified-search-registries = [\"docker.io\"]\n"
+		if err2 := os.WriteFile(regFile, []byte(regConf), 0644); err2 == nil {
+			fmt.Printf("  ✓ per-user registries.conf (docker.io) written to %s\n", regFile)
+		}
+
 		// Ensure the service user owns the entire .config tree.
 		mustRun("chown", "-R", username+":"+username, filepath.Join(homedir, ".config"))
 	}
@@ -714,6 +725,18 @@ func configureCrun() {
 
 	writeFile(confFile, s, 0644)
 	fmt.Println("  ✓ crun + cgroupfs configured in", confFile)
+
+	// Write a system-wide registries.conf so short image names (e.g.
+	// "php:8.2-fpm-alpine") resolve to docker.io.  Without this Podman exits
+	// 125 with "short-name did not resolve to an alias and no
+	// containers-registries.conf(5) was found".
+	regFile := filepath.Join(confDir, "registries.conf")
+	if _, err := os.Stat(regFile); os.IsNotExist(err) {
+		const regConf = "unqualified-search-registries = [\"docker.io\"]\n"
+		if err2 := os.WriteFile(regFile, []byte(regConf), 0644); err2 == nil {
+			fmt.Println("  ✓ registries.conf (docker.io) written to", regFile)
+		}
+	}
 }
 
 // installRqlite downloads and installs the rqlite binary if not already present.
