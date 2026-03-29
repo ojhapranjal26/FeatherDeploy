@@ -895,7 +895,8 @@ ExecStartPre=/bin/bash -c 'mkdir -p {{.DataDir}}/rqlite-data && chown -R {{.User
 ExecStart=/usr/local/bin/rqlited \
   -node-id=main \
   -http-addr=127.0.0.1:4001 \
-  -raft-addr=0.0.0.0:4002 \
+  -raft-addr=127.0.0.1:4002 \
+  -raft-adv-addr=127.0.0.1:4002 \
   -bootstrap-expect=1 \
   {{.DataDir}}/rqlite-data
 Restart=always
