@@ -335,7 +335,9 @@ func setupPodmanRootless(username string) {
 	}
 
 	// Tell Podman to migrate its storage to use the new UID mapping.
-	cmd := exec.Command("su", "-s", "/bin/sh", username, "-c", "podman system migrate")
+	// Prefix with 'cd /' so su doesn't inherit the caller's CWD (e.g. /root)
+	// which featherdeploy lacks read permission on.
+	cmd := exec.Command("su", "-s", "/bin/sh", username, "-c", "cd / && podman system migrate")
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
@@ -467,7 +469,7 @@ func ensureNetworkingBackend(username, homedir string) {
 			// Re-initialize podman storage at the correct home.
 			migrateEnv := fmt.Sprintf("HOME=%s XDG_RUNTIME_DIR=%s", dataDir, rtDir)
 			migrateCmd := exec.Command("su", "-s", "/bin/sh", username, "-c",
-				migrateEnv+" podman system migrate 2>&1")
+				"cd / && "+migrateEnv+" podman system migrate 2>&1")
 			if migrateOut, migrateErr := migrateCmd.CombinedOutput(); migrateErr == nil {
 				fmt.Println("  ✓ podman storage re-initialized at new home")
 			} else {
@@ -489,7 +491,8 @@ func ensureNetworkingBackend(username, homedir string) {
 	smoke := fmt.Sprintf(
 		"%s podman network create fd-nettest 2>&1 && %s podman network rm fd-nettest 2>/dev/null",
 		testEnv, testEnv)
-	smokecmd := exec.Command("su", "-s", "/bin/sh", username, "-c", smoke)
+	// Prefix with 'cd /' so su doesn't inherit CWD=/root (permission denied).
+	smokecmd := exec.Command("su", "-s", "/bin/sh", username, "-c", "cd / && "+smoke)
 	if out, err := smokecmd.CombinedOutput(); err != nil {
 		outStr := strings.TrimSpace(string(out))
 		fmt.Printf("  WARNING: named network smoke-test failed: %v\n  output: %s\n", err, outStr)
