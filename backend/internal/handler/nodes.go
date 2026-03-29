@@ -17,8 +17,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"github.com/ojhapranjal26/featherdeploy/backend/internal/crypto"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/heartbeat"
+	crypto "github.com/ojhapranjal26/featherdeploy/backend/internal/crypto"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/middleware"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/model"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/pki"
@@ -29,9 +29,9 @@ import (
 type NodeHandler struct {
 	db         *sql.DB
 	jwtSecret  string // used to encrypt/decrypt the CA private key in DB
-	envFile    string // path to the main server's env file (shared with nodes)
-	binaryPath string // path to featherdeploy-node binary
-	domain     string // public domain of this main server
+	envFile    string
+	binaryPath string
+	domain     string
 }
 
 func NewNodeHandler(db *sql.DB, jwtSecret, envFile, binaryPath, domain string) *NodeHandler {
@@ -157,15 +157,13 @@ func (h *NodeHandler) Add(w http.ResponseWriter, r *http.Request) {
 }
 
 // DELETE /api/nodes/{nodeID} — remove a node
-	apt-get install -y -q curl uidmap slirp4netns netavark aardvark-dns passt containernetworking-plugins 2>/dev/null || true
+func (h *NodeHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	nodeID, err := strconv.ParseInt(chi.URLParam(r, "nodeID"), 10, 64)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, errMap("invalid node ID"))
-	dnf install -y -q curl shadow-utils slirp4netns netavark aardvark-dns passt containernetworking-plugins 2>/dev/null || true
 		return
 	}
 	res, err := h.db.ExecContext(r.Context(), `DELETE FROM nodes WHERE id=?`, nodeID)
-	yum install -y -q curl shadow-utils slirp4netns netavark aardvark-dns passt containernetworking-plugins 2>/dev/null || true
 	if err != nil {
 		slog.Error("delete node", "err", err)
 		writeJSON(w, http.StatusInternalServerError, errMap("internal error"))
