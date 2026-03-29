@@ -363,7 +363,7 @@ func setupPodmanRootless(username string) {
 		mustRun("chown", "-R", username+":"+username, filepath.Join(homedir, ".config"))
 	}
 
-	// Tell Podman to migrate its storage to use the new UID mapping.
+	// Compute service user's UID and runtime dir for directory creation below.
 	uid2 := "1000"
 	if uidOut2, err2 := exec.Command("id", "-u", username).Output(); err2 == nil {
 		if us := strings.TrimSpace(string(uidOut2)); us != "" {
@@ -374,25 +374,9 @@ func setupPodmanRootless(username string) {
 	if err2 := os.MkdirAll(mRtDir, 0700); err2 == nil {
 		exec.Command("chown", username+":"+username, mRtDir).Run() //nolint
 	}
-	mRunRoot := mRtDir + "/containers"
-	os.MkdirAll(mRunRoot, 0700)                                        //nolint
-	exec.Command("chown", username+":"+username, mRunRoot).Run()       //nolint
-	mGraphRoot := filepath.Join(dataDir, ".local", "share", "containers", "storage")
-	migrateEnv := fmt.Sprintf(
-		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=%s XDG_RUNTIME_DIR=%s DBUS_SESSION_BUS_ADDRESS=",
-		dataDir, mRtDir)
-	cmd := exec.Command("su", "-s", "/bin/sh", username, "-c",
-		fmt.Sprintf("cd / && %s podman --cgroup-manager cgroupfs --root %s --runroot %s system migrate",
-			migrateEnv, mGraphRoot, mRunRoot))
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		slog.Warn("podman system migrate failed (non-fatal)", "err", err)
-	}
-	// Always clean up any partially-written libpod DB from above migrate so
-	// ensureNetworkingBackend starts with a clean slate.
-	os.RemoveAll(filepath.Join(mGraphRoot, "libpod")) //nolint
-	os.RemoveAll(filepath.Join(mRunRoot, "libpod"))   //nolint
+	// NOTE: we intentionally skip 'podman system migrate' here.
+	// ensureNetworkingBackend (called below) performs a full DB wipe and smoke
+	// test that achieves the same result without the migrate failure modes.
 
 	// Verify that named (bridge) networking actually works.
 	// `podman build` uses slirp4netns (works without netavark), but
@@ -584,70 +568,54 @@ func ensureNetworkingBackend(username, homedir string) {
 		fmt.Printf("  ✓ per-user containers.conf: network_config_dir=%s\n", netCfgDir)
 	}
 
-	// THE KEY FIX: delete the PERSISTENT libpod SQLite DB at the graph-root
-	// static dir.  This DB was written by an earlier installer version that used
-	// a storage.conf with runroot=/run/featherdeploy-runtime/containers.
-	// Podman 4.x stores the runRoot inside this DB and restores it on EVERY
-	// podman invocation ("Overriding run root ... from database"), completely
-	// ignoring storage.conf, XDG env, or --network-config-dir flags.  The only
-	// safe remedy is to delete the DB so podman recreates it fresh with the
-	// correct runRoot (XDG_RUNTIME_DIR/containers = /run/user/<uid>/containers).
-	// Only the libpod subdir is removed — overlay/ (images) and volumes/ are kept.
-	staticLibpod := filepath.Join(homedir, ".local", "share", "containers", "storage", "libpod")
-	if _, statErr := os.Stat(staticLibpod); statErr == nil {
-		os.RemoveAll(staticLibpod) //nolint
-		fmt.Println("  ✓ cleared persistent libpod DB (stale runRoot was overriding all podman paths; will recreate fresh)")
-	}
-	// Remove the entire /run/featherdeploy-runtime tree.  It was the old
-	// custom XDG runtime dir from a previous installer; the current installer
-	// uses /run/user/<uid> instead.  Any stale libpod state under it would
-	// also cause 'database run root does not match' on next podman call.
-	if _, statErr := os.Stat("/run/featherdeploy-runtime"); statErr == nil {
-		os.RemoveAll("/run/featherdeploy-runtime") //nolint
-		fmt.Println("  ✓ removed stale /run/featherdeploy-runtime (replaced by /run/user/<uid>)")
-	}
-	// Also remove any stale libpod DB at the new runroot path that might still
-	// remember the old runroot value — podman system migrate will recreate it.
-	newLibpod := filepath.Join(rtDir, "containers", "libpod")
-	if _, statErr := os.Stat(newLibpod); statErr == nil {
-		os.RemoveAll(newLibpod) //nolint
-		fmt.Println("  ✓ cleared ephemeral libpod state at new runroot")
-	}
-	// Run podman system migrate so the DB is rebuilt against the current
-	// home + runroot.  This is safe because the service is stopped during update.
+	// ── Wipe ALL stale Podman state databases ───────────────────────────────
+	// There are TWO separate SQLite databases that store runRoot:
 	//
-	// IMPORTANT: include PATH so podman can exec /usr/bin/crun inside the su
-	// shell.  Without it su(1) inherits a minimal PATH that omits /usr/bin,
-	// causing "default OCI runtime crun not found" which leaves a partially-
-	// written DB with runroot="" — causing "database run root does not match"
-	// on every subsequent podman call.
+	//  1. $graphRoot/db.sql  — containers/storage layer DB (tracks image
+	//     layers, containers).  This is written on the FIRST ever podman call
+	//     with whatever runRoot was active then.  Old installs wrote it with
+	//     runRoot="" (env not set) or runRoot="/run/featherdeploy-runtime/..."
+	//     (from storage.conf).  When this mismatches the current configured
+	//     runRoot, EVERY podman call fails: "database run root X does not
+	//     match our run root Y".
 	//
-	// Pass --root and --runroot explicitly so the freshly-created DB records
-	// the correct paths immediately, not whatever the environment resolves to.
-	migrateGraphRoot := filepath.Join(homedir, ".local", "share", "containers", "storage")
-	migrateRunRoot := rtDir + "/containers"
-	os.MkdirAll(migrateRunRoot, 0700)                                          //nolint
-	exec.Command("chown", username+":"+username, migrateRunRoot).Run()         //nolint
-	migrateEnvFull := fmt.Sprintf(
-		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=%s XDG_RUNTIME_DIR=%s XDG_CONFIG_HOME=%s XDG_DATA_HOME=%s XDG_CACHE_HOME=%s DBUS_SESSION_BUS_ADDRESS=",
-		homedir, rtDir,
-		homedir+"/.config",
-		homedir+"/.local/share",
-		homedir+"/.cache",
-	)
-	migrateFullCmd := exec.Command("su", "-s", "/bin/sh", username, "-c",
-		fmt.Sprintf("cd / && %s podman --cgroup-manager cgroupfs --root %s --runroot %s system migrate 2>&1",
-			migrateEnvFull, migrateGraphRoot, migrateRunRoot))
-	if migrateOut, migrateErr := migrateFullCmd.CombinedOutput(); migrateErr == nil {
-		fmt.Println("  ✓ podman system migrate completed")
-	} else {
-		fmt.Printf("  NOTE: podman system migrate: %s\n", strings.TrimSpace(string(migrateOut)))
+	//  2. $graphRoot/libpod/  — libpod/podman state DB (containers, pods).
+	//
+	// We delete BOTH.  Image data lives in $graphRoot/overlay/ and is NOT
+	// touched.  Both DBs are automatically recreated on the next podman call
+	// (the smoke test below).  Because every podman call now passes --root and
+	// --runroot explicitly (see podmanCmd in runner.go), the new DB is always
+	// created with the correct values.
+	graphRoot := filepath.Join(homedir, ".local", "share", "containers", "storage")
+	runRoot := rtDir + "/containers"
+
+	for _, staleDB := range []string{
+		filepath.Join(graphRoot, "db.sql"),                 // containers/storage DB
+		filepath.Join(graphRoot, "libpod"),                 // libpod state dir
+		filepath.Join(runRoot, "libpod"),                   // ephemeral libpod state
+		"/run/featherdeploy-runtime",                       // old custom XDG_RUNTIME_DIR
+	} {
+		if _, statErr := os.Stat(staleDB); statErr == nil {
+			if err := os.RemoveAll(staleDB); err == nil {
+				fmt.Printf("  ✓ deleted stale Podman DB: %s\n", staleDB)
+			} else {
+				fmt.Printf("  WARNING: could not delete %s: %v\n", staleDB, err)
+			}
+		}
 	}
-	// Always delete any partial libpod DB that migrate may have created
-	// before we run the smoke test.  The first real podman call (smoke test
-	// or service start) will recreate it correctly using --root/--runroot.
-	os.RemoveAll(filepath.Join(migrateGraphRoot, "libpod")) //nolint
-	os.RemoveAll(filepath.Join(migrateRunRoot, "libpod"))   //nolint
+
+	// Ensure the runroot container dir exists and is owned by the service user.
+	// (The systemd ExecStartPre creates it at service start, but the smoke test
+	// below runs outside the service.)
+	os.MkdirAll(runRoot, 0700)                                    //nolint
+	exec.Command("chown", username+":"+username, runRoot).Run()   //nolint
+
+	// NOTE: We deliberately do NOT run 'podman system migrate' here.
+	// system migrate calls podman initialization which writes a DB entry.
+	// If the DB is empty (just deleted) or partially written, migrate itself
+	// fails with "database run root does not match" and may leave a corrupted
+	// DB behind.  Since we just wiped all DBs, the smoke test below will
+	// trigger a clean first-run initialization that writes the correct values.
 
 	// Ensure the data dir exists and is owned by the service user.
 	if err := os.MkdirAll(dataDir, 0755); err == nil {
