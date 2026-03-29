@@ -1615,13 +1615,47 @@ func deleteDatabaseVolume(dbID int64) error {
 // user. The service user has /etc/subuid + /etc/subgid entries and the systemd
 // unit provides HOME + XDG_RUNTIME_DIR so rootless podman has a valid user
 // store and networking namespace. No sudo required.
+// podmanEnv returns an environment slice for podman sub-processes.
+// It inherits the current process environment but forces the correct values
+// for HOME (container image/network storage) and XDG_RUNTIME_DIR (socket/
+// network namespace path). Using the values from the current process means
+// the systemd unit's Environment= directives are always honoured.
+// DBUS_SESSION_BUS_ADDRESS is stripped so podman and its helpers (slirp4netns,
+// crun) don't try to contact /run/user/0/bus when no user session dbus daemon
+// is running — they skip the non-critical cgroup-move step instead.
+func podmanEnv() []string {
+	raw := os.Environ()
+	env := make([]string, 0, len(raw)+2)
+	for _, e := range raw {
+		k := strings.SplitN(e, "=", 2)[0]
+		switch k {
+		case "HOME", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS":
+			continue
+		}
+		env = append(env, e)
+	}
+	home := os.Getenv("HOME")
+	if home == "" {
+		home = "/var/lib/featherdeploy"
+	}
+	rtDir := os.Getenv("XDG_RUNTIME_DIR")
+	if rtDir == "" {
+		rtDir = "/run/featherdeploy-runtime"
+	}
+	return append(env, "HOME="+home, "XDG_RUNTIME_DIR="+rtDir)
+}
+
 func podmanCmd(args ...string) *exec.Cmd {
-	return exec.Command("podman", args...)
+	cmd := exec.Command("podman", args...)
+	cmd.Env = podmanEnv()
+	return cmd
 }
 
 // podmanCmdCtx is like podmanCmd but accepts a context for timeout control.
 func podmanCmdCtx(ctx context.Context, args ...string) *exec.Cmd {
-	return exec.CommandContext(ctx, "podman", args...)
+	cmd := exec.CommandContext(ctx, "podman", args...)
+	cmd.Env = podmanEnv()
+	return cmd
 }
 
 // podmanBuild builds a container image using rootless podman.

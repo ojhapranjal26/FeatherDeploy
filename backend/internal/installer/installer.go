@@ -1049,8 +1049,18 @@ EnvironmentFile={{.EnvFile}}
 # RuntimeDirectory creates /run/featherdeploy-runtime owned by the service user
 # before the process starts, making it available as a stable XDG runtime dir.
 Environment=HOME={{.DataDir}}
-RuntimeDirectory=featherdeploy-runtime
-Environment=XDG_RUNTIME_DIR=/run/featherdeploy-runtime
+# Use the standard rootless-podman runtime dir: /run/user/<uid>.
+# loginctl enable-linger (run during install) causes systemd-logind to create
+# and maintain this directory permanently, even without an interactive login.
+# Using /run/user/%U (where %U = numeric UID) is required because podman's
+# internal sub-processes (slirp4netns, netavark, crun) all hard-compute the
+# user session socket at /run/user/<getuid()>/... and fail if they find a
+# non-standard path instead.
+Environment=XDG_RUNTIME_DIR=/run/user/%U
+# Guarantee /run/user/<uid> exists before ExecStart in case systemd-logind
+# has not yet created it (e.g. first boot, or linger just enabled).
+# The '+'  prefix runs this as root so it can create dirs under /run/user/.
+ExecStartPre=+/bin/bash -c 'u=$(id -u {{.User}}); d=/run/user/$u; mkdir -p $d; chown {{.User}}:{{.User}} $d; chmod 700 $d'
 ExecStart={{.Bin}} serve
 Restart=always
 RestartSec=5s
@@ -1124,6 +1134,24 @@ func RunUpdate() {
 	}
 	writeSystemdService(svcUser)
 	fmt.Printf("  ✓ systemd unit updated (User=%s)\n", svcUser)
+
+	// Re-enable linger for the service user so /run/user/<uid> is created
+	// and maintained by systemd-logind (required for the new unit's
+	// XDG_RUNTIME_DIR=/run/user/%U to exist at service start).
+	if out, err := exec.Command("loginctl", "enable-linger", svcUser).CombinedOutput(); err != nil {
+		slog.Warn("loginctl enable-linger failed (non-fatal)", "err", err, "out", string(out))
+	} else {
+		fmt.Printf("  ✓ loginctl enable-linger %s\n", svcUser)
+	}
+	// Pre-create /run/user/<uid> now so it exists before the service restarts.
+	if uidOut, err := exec.Command("id", "-u", svcUser).Output(); err == nil {
+		uidStr := strings.TrimSpace(string(uidOut))
+		rtDir := "/run/user/" + uidStr
+		if err2 := os.MkdirAll(rtDir, 0700); err2 == nil {
+			exec.Command("chown", svcUser+":"+svcUser, rtDir).Run() //nolint
+			fmt.Printf("  ✓ /run/user/%s ready\n", uidStr)
+		}
+	}
 
 	// Stop services and kill all user processes before any user/storage changes.
 	// killUserProcesses polls until pgrep confirms zero processes, then SIGKILLs
