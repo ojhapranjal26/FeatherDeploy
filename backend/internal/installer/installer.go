@@ -997,12 +997,21 @@ func RunUpdate() {
 	writeSystemdService(svcUser)
 	fmt.Printf("  ✓ systemd unit updated (User=%s)\n", svcUser)
 
-	// ── Stop the service before making any user/storage changes ─────────────
-	// usermod -d refuses to run while the target user has running processes.
-	// We stop featherdeploy here, fix home-dir / networking, then restart below.
-	fmt.Println("\n── Stopping featherdeploy for maintenance ───────────────────────")
-	exec.Command("systemctl", "stop", "featherdeploy").Run() //nolint — may not be running
-	fmt.Println("  ✓ featherdeploy stopped (or was not running)")
+	// ── Stop ALL services running as svcUser before any user/storage changes ──
+	// usermod -d refuses to run while the target user has any active processes.
+	// Both featherdeploy AND rqlite run as svcUser, so both must be stopped.
+	fmt.Println("\n── Stopping services for maintenance ───────────────────────────")
+	exec.Command("systemctl", "stop", "featherdeploy").Run() //nolint
+	exec.Command("systemctl", "stop", "rqlite").Run()        //nolint
+	fmt.Println("  ✓ featherdeploy and rqlite stopped (or were not running)")
+	// Belt-and-suspenders: kill any stray processes still owned by svcUser
+	// (e.g. lingering `su` shells from previous smoke-tests).
+	if pkillOut, err := exec.Command("pkill", "-u", svcUser).CombinedOutput(); err == nil {
+		fmt.Printf("  ✓ killed remaining %s processes\n", svcUser)
+		time.Sleep(500 * time.Millisecond) // let processes exit
+	} else {
+		_ = pkillOut // exit 1 = no processes found — that's fine
+	}
 
 	// ── Ensure Podman networking backend is installed ─────────────────────────
 	// Existing installs may be missing netavark/aardvark-dns; this step installs
