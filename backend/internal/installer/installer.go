@@ -1049,18 +1049,16 @@ EnvironmentFile={{.EnvFile}}
 # RuntimeDirectory creates /run/featherdeploy-runtime owned by the service user
 # before the process starts, making it available as a stable XDG runtime dir.
 Environment=HOME={{.DataDir}}
-# Use the standard rootless-podman runtime dir: /run/user/<uid>.
-# loginctl enable-linger (run during install) causes systemd-logind to create
-# and maintain this directory permanently, even without an interactive login.
-# Using /run/user/%U (where %U = numeric UID) is required because podman's
-# internal sub-processes (slirp4netns, netavark, crun) all hard-compute the
-# user session socket at /run/user/<getuid()>/... and fail if they find a
-# non-standard path instead.
-Environment=XDG_RUNTIME_DIR=/run/user/%U
+# XDG_RUNTIME_DIR is the standard rootless-podman runtime directory.
+# We embed the service user's numeric UID directly (resolved at install/update
+# time) rather than using the %U specifier, which systemd documents as
+# defaulting to 0 when the user lookup fails — causing '/run/user/0 is not
+# owned by the current user' errors on every podman call.
+Environment=XDG_RUNTIME_DIR=/run/user/{{.UID}}
 # Guarantee /run/user/<uid> exists before ExecStart in case systemd-logind
 # has not yet created it (e.g. first boot, or linger just enabled).
-# The '+'  prefix runs this as root so it can create dirs under /run/user/.
-ExecStartPre=+/bin/bash -c 'u=$(id -u {{.User}}); d=/run/user/$u; mkdir -p $d; chown {{.User}}:{{.User}} $d; chmod 700 $d'
+# The '+' prefix runs this pre-start command as root.
+ExecStartPre=+/bin/bash -c 'mkdir -p /run/user/{{.UID}} && chown {{.User}}:{{.User}} /run/user/{{.UID}} && chmod 700 /run/user/{{.UID}}'
 ExecStart={{.Bin}} serve
 Restart=always
 RestartSec=5s
@@ -1084,10 +1082,20 @@ WantedBy=multi-user.target
 `
 
 func writeSystemdService(svcUser string) {
+	// Resolve the service user's numeric UID at install/update time and embed
+	// it directly in the unit. Using the %U systemd specifier is unreliable:
+	// it defaults to 0 when the user lookup fails, making every podman call
+	// fail with "XDG_RUNTIME_DIR /run/user/0 is not owned by current user".
+	uid := "1000" // safe fallback
+	if out, err := exec.Command("id", "-u", svcUser).Output(); err == nil {
+		if s := strings.TrimSpace(string(out)); s != "" {
+			uid = s
+		}
+	}
 	tmpl := template.Must(template.New("svc").Parse(systemdTmpl))
 	var buf strings.Builder
-	tmpl.Execute(&buf, struct{ User, EnvFile, Bin, DataDir string }{
-		svcUser, envFile, binDest, dataDir,
+	tmpl.Execute(&buf, struct{ User, EnvFile, Bin, DataDir, UID string }{
+		svcUser, envFile, binDest, dataDir, uid,
 	})
 	writeFile(systemdUnit, buf.String(), 0644)
 }

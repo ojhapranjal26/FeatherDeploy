@@ -1618,11 +1618,17 @@ func deleteDatabaseVolume(dbID int64) error {
 // podmanEnv returns an environment slice for podman sub-processes.
 // It inherits the current process environment but forces the correct values
 // for HOME (container image/network storage) and XDG_RUNTIME_DIR (socket/
-// network namespace path). Using the values from the current process means
-// the systemd unit's Environment= directives are always honoured.
+// network namespace path).
+//
+// XDG_RUNTIME_DIR is ALWAYS computed from os.Getuid() — the real numeric
+// UID of the running process.  Reading $XDG_RUNTIME_DIR from the parent
+// environment is unreliable: if the systemd %U specifier failed (its
+// documented fallback is 0), the inherited value is /run/user/0, causing
+// every podman call to log "not owned by the current user" and fail build.
+//
 // DBUS_SESSION_BUS_ADDRESS is stripped so podman and its helpers (slirp4netns,
-// crun) don't try to contact /run/user/0/bus when no user session dbus daemon
-// is running — they skip the non-critical cgroup-move step instead.
+// crun) don't try to contact a non-existent user dbus socket and fail with
+// "connect: permission denied".
 func podmanEnv() []string {
 	raw := os.Environ()
 	env := make([]string, 0, len(raw)+2)
@@ -1638,10 +1644,9 @@ func podmanEnv() []string {
 	if home == "" {
 		home = "/var/lib/featherdeploy"
 	}
-	rtDir := os.Getenv("XDG_RUNTIME_DIR")
-	if rtDir == "" {
-		rtDir = "/run/featherdeploy-runtime"
-	}
+	// Compute from the actual runtime UID — always correct regardless of what
+	// the parent process inherited as $XDG_RUNTIME_DIR.
+	rtDir := fmt.Sprintf("/run/user/%d", os.Getuid())
 	return append(env, "HOME="+home, "XDG_RUNTIME_DIR="+rtDir)
 }
 
