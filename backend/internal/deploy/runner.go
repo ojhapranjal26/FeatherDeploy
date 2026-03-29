@@ -1663,11 +1663,11 @@ func deleteDatabaseVolume(dbID int64) error {
 // "connect: permission denied".
 func podmanEnv() []string {
 	raw := os.Environ()
-	env := make([]string, 0, len(raw)+2)
+	env := make([]string, 0, len(raw)+6)
 	for _, e := range raw {
 		k := strings.SplitN(e, "=", 2)[0]
 		switch k {
-		case "HOME", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS":
+		case "HOME", "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "DBUS_SESSION_BUS_ADDRESS", "CONTAINER_HOST", "DOCKER_HOST":
 			continue
 		}
 		env = append(env, e)
@@ -1679,7 +1679,17 @@ func podmanEnv() []string {
 	// Compute from the actual runtime UID — always correct regardless of what
 	// the parent process inherited as $XDG_RUNTIME_DIR.
 	rtDir := fmt.Sprintf("/run/user/%d", os.Getuid())
-	return append(env, "HOME="+home, "XDG_RUNTIME_DIR="+rtDir)
+	
+	// Explicitly set all XDG paths based on home to prevent split-brain issues
+	// where systemd-provided XDG_CONFIG_HOME or XDG_DATA_HOME causes 'podman run'
+	// to look in different directories than 'podman network create'.
+	return append(env, 
+		"HOME="+home, 
+		"XDG_RUNTIME_DIR="+rtDir,
+		"XDG_CONFIG_HOME="+home+"/.config",
+		"XDG_DATA_HOME="+home+"/.local/share",
+		"XDG_CACHE_HOME="+home+"/.cache",
+	)
 }
 
 func podmanCmd(args ...string) *exec.Cmd {
