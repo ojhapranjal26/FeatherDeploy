@@ -622,7 +622,7 @@ func ensureNetworkingBackend(username, homedir string) {
 	// smoke test reads the same containers.conf the running service will use.
 	testNetName := fmt.Sprintf("fd-nettest-%d", time.Now().UnixNano())
 	testEnv := fmt.Sprintf(
-		"HOME=%s XDG_RUNTIME_DIR=%s XDG_CONFIG_HOME=%s XDG_DATA_HOME=%s XDG_CACHE_HOME=%s",
+		"HOME=%s XDG_RUNTIME_DIR=%s XDG_CONFIG_HOME=%s XDG_DATA_HOME=%s XDG_CACHE_HOME=%s DBUS_SESSION_BUS_ADDRESS=",
 		homedir, rtDir,
 		homedir+"/.config",
 		homedir+"/.local/share",
@@ -653,6 +653,11 @@ func ensureNetworkingBackend(username, homedir string) {
 			fmt.Printf("    sudo mkdir -p %s\n", dataDir)
 			fmt.Printf("    sudo chown -R %s:%s %s\n", username, username, dataDir)
 			fmt.Printf("    sudo systemctl restart featherdeploy\n")
+		case strings.Contains(outStr, "user.slice") || strings.Contains(outStr, "session bus") || strings.Contains(outStr, "dbus"):
+			fmt.Println("  Cause: Podman is still trying to use systemd session/cgroup integration.")
+			fmt.Println("  Fix: verify the service user is running with cgroupfs and retest using the exact env below:")
+			fmt.Printf("    sudo -u %s env HOME=%s XDG_RUNTIME_DIR=%s XDG_CONFIG_HOME=%s XDG_DATA_HOME=%s XDG_CACHE_HOME=%s DBUS_SESSION_BUS_ADDRESS= podman --cgroup-manager cgroupfs --network-config-dir %s network create test123\n",
+				username, homedir, rtDir, homedir+"/.config", homedir+"/.local/share", homedir+"/.cache", testNetCfgDir)
 		case strings.Contains(outStr, "127") || strings.Contains(outStr, "netavark") || strings.Contains(outStr, "command not found"):
 			fmt.Println("  Fix: sudo dnf install -y netavark aardvark-dns  (RHEL/AlmaLinux/Rocky)")
 			fmt.Println("       sudo apt-get install -y netavark           (Ubuntu/Debian)")
