@@ -126,6 +126,10 @@ func Run() {
 
 	// ── Step 4: Create service OS user + directories ─────────────────────────
 	fmt.Println("\n── Preparing service user and directories ──────────────────────")
+	// On a reinstall the previous featherdeploy/rqlite services may still be
+	// running.  usermod -d refuses to update /etc/passwd while the target user
+	// has ANY active processes, so we must kill everything first.
+	killUserProcesses(svcUser)
 	createServiceUser(svcUser, svcPassword)
 	setupPodmanRootless(svcUser)
 	mustMkdir(dataDir)
@@ -299,17 +303,7 @@ func die(format string, args ...any) {
 // `podman build` / `podman run` fails with "no subuid ranges found".
 func setupPodmanRootless(username string) {
 	fmt.Printf("\n── Configuring rootless Podman for %s ──────────────────\n", username)
-
-	// Stop any running services owned by this user before making user/storage
-	// changes (e.g. usermod -d).  During a fresh install nothing is running and
-	// these are no-ops; during a reinstall they prevent usermod from failing with
-	// "user is currently used by process".
-	exec.Command("systemctl", "stop", "featherdeploy").Run() //nolint
-	exec.Command("systemctl", "stop", "rqlite").Run()        //nolint
-	if pkillOut, err := exec.Command("pkill", "-u", username).CombinedOutput(); err == nil {
-		_ = pkillOut
-		time.Sleep(500 * time.Millisecond)
-	}
+	// Services were already stopped by killUserProcesses() before this call.
 
 	ensureSubIDEntry(username, "/etc/subuid", "100000", "65536")
 	ensureSubIDEntry(username, "/etc/subgid", "100000", "65536")
@@ -358,9 +352,15 @@ func setupPodmanRootless(username string) {
 	}
 
 	// Tell Podman to migrate its storage to use the new UID mapping.
-	// Prefix with 'cd /' so su doesn't inherit the caller's CWD (e.g. /root)
-	// which featherdeploy lacks read permission on.
-	cmd := exec.Command("su", "-s", "/bin/sh", username, "-c", "cd / && podman system migrate")
+	// Explicitly set HOME and XDG_RUNTIME_DIR so the child process uses the
+	// correct paths regardless of what the caller's environment contains.
+	rtDir := "/run/featherdeploy-runtime"
+	if err := os.MkdirAll(rtDir, 0700); err == nil {
+		exec.Command("chown", username+":"+username, rtDir).Run() //nolint
+	}
+	migrateEnv := "HOME=" + dataDir + " XDG_RUNTIME_DIR=" + rtDir
+	cmd := exec.Command("su", "-s", "/bin/sh", username, "-c",
+		"cd / && "+migrateEnv+" podman system migrate")
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
@@ -625,6 +625,29 @@ func mustRun(name string, args ...string) {
 
 func runSilent(name string, args ...string) error {
 	return exec.Command(name, args...).Run()
+}
+
+// killUserProcesses stops all featherdeploy/rqlite services and kills every
+// remaining process owned by username.  It sends SIGTERM first, then polls
+// with pgrep until the user has no processes (up to 5 s), and finally sends
+// SIGKILL to any survivors.  This guarantees usermod -d can run immediately
+// after this call without hitting "user is currently used by process N".
+func killUserProcesses(username string) {
+	exec.Command("systemctl", "stop", "featherdeploy").Run() //nolint
+	exec.Command("systemctl", "stop", "rqlite").Run()        //nolint
+	exec.Command("pkill", "-TERM", "-u", username).Run()     //nolint
+	// Poll until all processes owned by the user have exited.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		time.Sleep(300 * time.Millisecond)
+		out, _ := exec.Command("pgrep", "-u", username).Output()
+		if len(strings.TrimSpace(string(out))) == 0 {
+			return
+		}
+	}
+	// Still alive after 5 s — force kill.
+	exec.Command("pkill", "-KILL", "-u", username).Run() //nolint
+	time.Sleep(300 * time.Millisecond)
 }
 
 func mustMkdir(path string) {
@@ -1081,21 +1104,12 @@ func RunUpdate() {
 	writeSystemdService(svcUser)
 	fmt.Printf("  ✓ systemd unit updated (User=%s)\n", svcUser)
 
-	// ── Stop ALL services running as svcUser before any user/storage changes ──
-	// usermod -d refuses to run while the target user has any active processes.
-	// Both featherdeploy AND rqlite run as svcUser, so both must be stopped.
+	// Stop services and kill all user processes before any user/storage changes.
+	// killUserProcesses polls until pgrep confirms zero processes, then SIGKILLs
+	// any survivors — guaranteeing usermod -d can run safely immediately after.
 	fmt.Println("\n── Stopping services for maintenance ───────────────────────────")
-	exec.Command("systemctl", "stop", "featherdeploy").Run() //nolint
-	exec.Command("systemctl", "stop", "rqlite").Run()        //nolint
-	fmt.Println("  ✓ featherdeploy and rqlite stopped (or were not running)")
-	// Belt-and-suspenders: kill any stray processes still owned by svcUser
-	// (e.g. lingering `su` shells from previous smoke-tests).
-	if pkillOut, err := exec.Command("pkill", "-u", svcUser).CombinedOutput(); err == nil {
-		fmt.Printf("  ✓ killed remaining %s processes\n", svcUser)
-		time.Sleep(500 * time.Millisecond) // let processes exit
-	} else {
-		_ = pkillOut // exit 1 = no processes found — that's fine
-	}
+	killUserProcesses(svcUser)
+	fmt.Printf("  ✓ all %s processes stopped\n", svcUser)
 
 	// ── Ensure Podman networking backend is installed ─────────────────────────
 	// Existing installs may be missing netavark/aardvark-dns; this step installs
