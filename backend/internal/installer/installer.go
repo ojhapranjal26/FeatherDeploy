@@ -620,6 +620,7 @@ func ensureNetworkingBackend(username, homedir string) {
 	// create a test network, run a tiny container on it, then remove it.
 	// Inject the full XDG env (same as podmanEnv() in runner.go) so the
 	// smoke test reads the same containers.conf the running service will use.
+	testNetName := fmt.Sprintf("fd-nettest-%d", time.Now().UnixNano())
 	testEnv := fmt.Sprintf(
 		"HOME=%s XDG_RUNTIME_DIR=%s XDG_CONFIG_HOME=%s XDG_DATA_HOME=%s XDG_CACHE_HOME=%s",
 		homedir, rtDir,
@@ -629,12 +630,14 @@ func ensureNetworkingBackend(username, homedir string) {
 	)
 	testNetCfgDir := filepath.Join(homedir, ".local", "share", "containers", "storage", "networks")
 	smoke := fmt.Sprintf(
-		"%s podman --cgroup-manager cgroupfs --network-config-dir %s network create fd-nettest 2>&1 && "+
-			"%s podman --cgroup-manager cgroupfs --network-config-dir %s run --rm --network fd-nettest docker.io/library/alpine true 2>&1 && "+
-			"%s podman --cgroup-manager cgroupfs --network-config-dir %s network rm fd-nettest 2>/dev/null",
-		testEnv, testNetCfgDir,
-		testEnv, testNetCfgDir,
-		testEnv, testNetCfgDir)
+		"%s podman --cgroup-manager cgroupfs --network-config-dir %s network rm -f %s >/dev/null 2>&1 || true; "+
+			"%s podman --cgroup-manager cgroupfs --network-config-dir %s network create %s 2>&1 && "+
+			"%s podman --cgroup-manager cgroupfs --network-config-dir %s run --rm --network %s docker.io/library/alpine true 2>&1 && "+
+			"%s podman --cgroup-manager cgroupfs --network-config-dir %s network rm -f %s 2>/dev/null",
+		testEnv, testNetCfgDir, testNetName,
+		testEnv, testNetCfgDir, testNetName,
+		testEnv, testNetCfgDir, testNetName,
+		testEnv, testNetCfgDir, testNetName)
 	// Prefix with 'cd /' so su doesn't inherit CWD=/root (permission denied).
 	smokecmd := exec.Command("su", "-s", "/bin/sh", username, "-c", "cd / && "+smoke)
 	if out, err := smokecmd.CombinedOutput(); err != nil {

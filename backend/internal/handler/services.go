@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -228,7 +227,7 @@ func (h *ServiceHandler) Restart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cName := fmt.Sprintf("fd-svc-%d", svcID)
-	out, err := exec.Command("podman", "restart", cName).CombinedOutput()
+	out, err := deploy.PodmanCmd("restart", cName).CombinedOutput()
 	if err != nil {
 		slog.Error("restart container", "svc_id", svcID, "err", err, "output", string(out))
 		writeJSON(w, http.StatusInternalServerError, errMap("restart failed: "+strings.TrimSpace(string(out))))
