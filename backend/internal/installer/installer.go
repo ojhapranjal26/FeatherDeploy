@@ -364,13 +364,20 @@ func setupPodmanRootless(username string) {
 	}
 
 	// Tell Podman to migrate its storage to use the new UID mapping.
-	// Explicitly set HOME and XDG_RUNTIME_DIR so the child process uses the
-	// correct paths regardless of what the caller's environment contains.
-	rtDir := "/run/featherdeploy-runtime"
-	if err := os.MkdirAll(rtDir, 0700); err == nil {
-		exec.Command("chown", username+":"+username, rtDir).Run() //nolint
+	// Explicitly set HOME and XDG_RUNTIME_DIR using the same values the service
+	// will use at runtime (rtDir = /run/user/<uid>, not /run/featherdeploy-runtime).
+	// The per-user storage.conf written above makes this the canonical runroot.
+	uid2 := "1000"
+	if uidOut2, err2 := exec.Command("id", "-u", username).Output(); err2 == nil {
+		if us := strings.TrimSpace(string(uidOut2)); us != "" {
+			uid2 = us
+		}
 	}
-	migrateEnv := "HOME=" + dataDir + " XDG_RUNTIME_DIR=" + rtDir
+	mRtDir := "/run/user/" + uid2
+	if err2 := os.MkdirAll(mRtDir, 0700); err2 == nil {
+		exec.Command("chown", username+":"+username, mRtDir).Run() //nolint
+	}
+	migrateEnv := "HOME=" + dataDir + " XDG_RUNTIME_DIR=" + mRtDir
 	cmd := exec.Command("su", "-s", "/bin/sh", username, "-c",
 		"cd / && "+migrateEnv+" podman system migrate")
 	cmd.Stdout = os.Stdout
@@ -520,6 +527,24 @@ func ensureNetworkingBackend(username, homedir string) {
 		}
 	} else {
 		fmt.Printf("  ✓ home dir is already %s\n", dataDir)
+	}
+
+	// After computing rtDir and fixing home dir, write per-user storage.conf
+	// and containers.conf so both RunInstall and RunUpdate paths have correct
+	// configs.  These are also written in setupPodmanRootless (InstallRun path)
+	// but ensureNetworkingBackend is the only path called by RunUpdate, so
+	// we write them here too to keep both paths in sync.
+	userConfDir := filepath.Join(homedir, ".config", "containers")
+	if mkErr := os.MkdirAll(userConfDir, 0755); mkErr == nil {
+		contConf := "[engine]\ncgroup_manager = \"cgroupfs\"\n\n[network]\nnetwork_backend = \"netavark\"\n"
+		os.WriteFile(filepath.Join(userConfDir, "containers.conf"), []byte(contConf), 0644) //nolint
+		stConf := fmt.Sprintf("[storage]\ndriver = \"overlay\"\ngraphroot = \"%s/.local/share/containers/storage\"\nrunroot = \"%s/storage\"\n", homedir, rtDir)
+		os.WriteFile(filepath.Join(userConfDir, "storage.conf"), []byte(stConf), 0644) //nolint
+		// Pre-create the runroot directory.
+		os.MkdirAll(rtDir+"/storage", 0700)                                            //nolint
+		exec.Command("chown", "-R", username+":"+username, userConfDir).Run()          //nolint
+		exec.Command("chown", username+":"+username, rtDir+"/storage").Run()           //nolint
+		fmt.Printf("  ✓ per-user containers.conf + storage.conf updated (runroot=%s/storage)\n", rtDir)
 	}
 
 	// Ensure the data dir exists and is owned by the service user.
@@ -780,7 +805,27 @@ func configureCrun() {
 	writeFile(confFile, s, 0644)
 	fmt.Println("  ✓ crun + cgroupfs configured in", confFile)
 
-	// Write a system-wide policy.json so Podman can start at all.
+	// Set or ensure network_backend = "netavark" in the [network] section.
+	// Without this, RHEL 9/AlmaLinux may default to CNI for some podman
+	// subcommands (notably podman run) while using netavark for others
+	// (podman network create/inspect). The mismatch causes "network not found"
+	// because run looks in CNI config dirs while create wrote a netavark JSON.
+	var ns string
+	if data2, err := os.ReadFile(confFile); err == nil {
+		ns = string(data2)
+	} else {
+		ns = s
+	}
+	if !strings.Contains(ns, "[network]") {
+		ns += "\n[network]\n"
+	}
+	if strings.Contains(ns, "network_backend") {
+		ns = regexp.MustCompile(`(?m)^\s*network_backend\s*=.*$`).ReplaceAllString(ns, `network_backend = "netavark"`)
+	} else {
+		ns = strings.Replace(ns, "[network]", "[network]\nnetwork_backend = \"netavark\"", 1)
+	}
+	writeFile(confFile, ns, 0644)
+	fmt.Println("  ✓ network_backend=netavark set in", confFile)
 	// Without this file every `podman build` fails with:
 	//   "open /etc/containers/policy.json: no such file or directory"
 	// The 'insecureAcceptAnything' type skips signature verification, which is
@@ -1065,7 +1110,7 @@ Environment=XDG_RUNTIME_DIR=/run/user/{{.UID}}
 # Guarantee /run/user/<uid> exists before ExecStart in case systemd-logind
 # has not yet created it (e.g. first boot, or linger just enabled).
 # The '+' prefix runs this pre-start command as root.
-ExecStartPre=+/bin/bash -c 'mkdir -p /run/user/{{.UID}} && chown {{.User}}:{{.User}} /run/user/{{.UID}} && chmod 700 /run/user/{{.UID}}'
+ExecStartPre=+/bin/bash -c 'mkdir -p /run/user/{{.UID}} /run/user/{{.UID}}/storage && chown {{.User}}:{{.User}} /run/user/{{.UID}} /run/user/{{.UID}}/storage && chmod 700 /run/user/{{.UID}} /run/user/{{.UID}}/storage'
 ExecStart={{.Bin}} serve
 Restart=always
 RestartSec=5s
