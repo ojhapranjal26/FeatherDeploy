@@ -1022,13 +1022,9 @@ func CheckNetworkingBackend() error {
 	// Create
 	out, err := podmanCmd("network", "create", testNet).CombinedOutput()
 	if err != nil {
-		return fmt.Errorf(
-			"podman network create failed (exit %v): %s\n\n"+
-				"Named networks are required for project isolation.\n"+
-				"  RHEL 9 / AlmaLinux / Rocky: sudo dnf install -y netavark aardvark-dns\n"+
-				"  Ubuntu / Debian:             sudo apt-get install -y netavark\n"+
-				"  Then restart: sudo systemctl restart featherdeploy",
-			err, strings.TrimSpace(string(out)))
+		outStr := strings.TrimSpace(string(out))
+		return fmt.Errorf("podman network create failed (%v): %s\n\n%s",
+			err, outStr, classifyNetworkError(outStr))
 	}
 
 	// Inspect — verify it actually persisted
@@ -1036,15 +1032,48 @@ func CheckNetworkingBackend() error {
 		podmanCmd("network", "rm", testNet).Run() //nolint
 		return fmt.Errorf(
 			"podman network create appeared to succeed but inspect failed (%v)\n"+
-			"This usually means the networking backend (netavark) is missing.\n"+
-			"  RHEL 9 / AlmaLinux / Rocky: sudo dnf install -y netavark aardvark-dns\n"+
-			"  Ubuntu / Debian:             sudo apt-get install -y netavark",
+				"This usually means the networking backend (netavark) is missing.\n"+
+				"  RHEL 9 / AlmaLinux / Rocky: sudo dnf install -y netavark aardvark-dns\n"+
+				"  Ubuntu / Debian:             sudo apt-get install -y netavark",
 			verErr)
 	}
 
 	// Remove
 	podmanCmd("network", "rm", testNet).Run() //nolint
 	return nil
+}
+
+// classifyNetworkError inspects podman error output and returns a targeted
+// remediation message.  Callers should append it to their error string.
+func classifyNetworkError(out string) string {
+	switch {
+	case strings.Contains(out, "permission denied"):
+		// Podman uses getpwuid() to find the container-storage home dir,
+		// ignoring the $HOME env var.  If /etc/passwd has the wrong home
+		// (e.g. /home/featherdeploy instead of /var/lib/featherdeploy),
+		// Podman cannot create ~/.local/share/containers and fails here.
+		return "Container storage is inaccessible — the service user's home in\n" +
+			"/etc/passwd is likely wrong (podman ignores $HOME, it calls getpwuid()).\n" +
+			"  sudo usermod -d /var/lib/featherdeploy featherdeploy\n" +
+			"  sudo mkdir -p /var/lib/featherdeploy\n" +
+			"  sudo chown -R featherdeploy:featherdeploy /var/lib/featherdeploy\n" +
+			"  sudo systemctl restart featherdeploy"
+	case strings.Contains(out, "no such file or directory") &&
+		(strings.Contains(out, "runtime") || strings.Contains(out, "XDG")):
+		// XDG_RUNTIME_DIR doesn't exist — created by systemd RuntimeDirectory=
+		// on service start; if missing it means the service isn't running via
+		// the expected systemd unit.
+		return "XDG_RUNTIME_DIR (/run/featherdeploy-runtime) does not exist.\n" +
+			"It is created automatically when the service starts via its systemd unit.\n" +
+			"  sudo mkdir -p /run/featherdeploy-runtime\n" +
+			"  sudo chown featherdeploy:featherdeploy /run/featherdeploy-runtime\n" +
+			"  sudo systemctl restart featherdeploy"
+	default:
+		return "Named networks require the netavark networking back-end:\n" +
+			"  RHEL 9 / AlmaLinux / Rocky: sudo dnf install -y netavark aardvark-dns\n" +
+			"  Ubuntu / Debian:             sudo apt-get install -y netavark\n" +
+			"  Then restart: sudo systemctl restart featherdeploy"
+	}
 }
 
 // ensureProjectNetwork creates the per-project podman bridge network if it

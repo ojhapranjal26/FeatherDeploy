@@ -419,16 +419,40 @@ func ensureNetworkingBackend(username, homedir string) {
 	// Run a quick smoke-test as the service user:
 	// create a test network, then immediately remove it.
 	// If this fails, named networking is broken and we warn clearly.
-	testEnv := fmt.Sprintf("HOME=%s XDG_RUNTIME_DIR=/run/featherdeploy-runtime", homedir)
+	//
+	// /run/featherdeploy-runtime is normally created by systemd's
+	// RuntimeDirectory= directive when the service starts.  At install /
+	// update time the service hasn't started yet, so we create it here.
+	rtDir := "/run/featherdeploy-runtime"
+	if err := os.MkdirAll(rtDir, 0700); err == nil {
+		exec.Command("chown", username+":"+username, rtDir).Run() //nolint
+	}
+
+	testEnv := fmt.Sprintf("HOME=%s XDG_RUNTIME_DIR=%s", homedir, rtDir)
 	smoke := fmt.Sprintf(
 		"%s podman network create fd-nettest 2>&1 && %s podman network rm fd-nettest 2>/dev/null",
 		testEnv, testEnv)
 	smokecmd := exec.Command("su", "-s", "/bin/sh", username, "-c", smoke)
 	if out, err := smokecmd.CombinedOutput(); err != nil {
-		fmt.Printf("  WARNING: named network smoke-test failed: %v\n  output: %s\n", err, strings.TrimSpace(string(out)))
+		outStr := strings.TrimSpace(string(out))
+		fmt.Printf("  WARNING: named network smoke-test failed: %v\n  output: %s\n", err, outStr)
 		fmt.Println("  !! Service deployments will fail until this is resolved.")
-		fmt.Println("  Fix: sudo dnf install -y netavark aardvark-dns  (RHEL/AlmaLinux/Rocky)")
-		fmt.Println("       sudo apt-get install -y netavark           (Ubuntu/Debian)")
+		switch {
+		case strings.Contains(outStr, "permission denied"):
+			// Podman uses getpwuid() to resolve the home dir, ignoring $HOME.
+			// This usually means the user's home in /etc/passwd is wrong or
+			// the directory doesn't exist / isn't owned by the service user.
+			fmt.Printf("  Cause: Podman cannot create container storage — home dir mismatch.\n")
+			fmt.Printf("  Fix:   sudo usermod -d %s %s\n", dataDir, username)
+			fmt.Printf("         sudo mkdir -p %s && sudo chown -R %s:%s %s\n", dataDir, username, username, dataDir)
+			fmt.Printf("         sudo systemctl restart featherdeploy\n")
+		case strings.Contains(outStr, "127") || strings.Contains(outStr, "netavark") || strings.Contains(outStr, "command not found"):
+			fmt.Println("  Fix: sudo dnf install -y netavark aardvark-dns  (RHEL/AlmaLinux/Rocky)")
+			fmt.Println("       sudo apt-get install -y netavark           (Ubuntu/Debian)")
+		default:
+			fmt.Printf("  Diagnostics: sudo -u %s HOME=%s XDG_RUNTIME_DIR=%s podman network create test123 2>&1\n",
+				username, homedir, rtDir)
+		}
 	} else {
 		fmt.Println("  \u2713 named networking smoke-test passed")
 	}
@@ -457,17 +481,26 @@ func ensureSubIDEntry(username, file, start, count string) {
 // createServiceUser creates a real login user that owns and runs the service.
 // The user can SSH in or `su` to it, but does not have sudo/root access.
 func createServiceUser(username, password string) {
-	// Create the user if it doesn't already exist
+	// Create the user if it doesn't already exist.
+	// We explicitly set --home-dir to dataDir so that /etc/passwd records the
+	// correct home.  Podman calls getpwuid() internally and ignores the $HOME
+	// environment variable, so if the passwd entry points to /home/featherdeploy
+	// (the default) but that directory is absent, every `podman run` fails with
+	// "permission denied" trying to create ~/.local/share/containers.
 	if runSilent("id", "-u", username) != nil {
 		mustRun("useradd",
 			"--create-home",
+			"--home-dir", dataDir,
 			"--shell", "/bin/bash",
 			"--comment", "FeatherDeploy service account",
 			username,
 		)
-		fmt.Printf("  ✓ created OS user: %s\n", username)
+		fmt.Printf("  ✓ created OS user: %s (home: %s)\n", username, dataDir)
 	} else {
-		fmt.Printf("  OS user '%s' already exists — skipping creation\n", username)
+		// For pre-existing accounts, ensure /etc/passwd has the right home dir.
+		// usermod -d does not move files; the installer will (re-)create them.
+		mustRun("usermod", "-d", dataDir, username)
+		fmt.Printf("  OS user '%s' already exists — home dir set to %s\n", username, dataDir)
 	}
 	// Set the password via chpasswd
 	cmd := exec.Command("chpasswd")
