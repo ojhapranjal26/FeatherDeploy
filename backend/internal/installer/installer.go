@@ -542,7 +542,11 @@ func ensureNetworkingBackend(username, homedir string) {
 	// difference in XDG_CONFIG_HOME between the two calls causes a split-brain
 	// where the network is created in one path and looked up in another, which
 	// manifests as exit 127 / "network not found" in podman run.
-	netCfgDir := filepath.Join(homedir, ".config", "containers", "networks")
+	// Podman documents that rootless netavark stores network JSON under
+	// $graphroot/networks, with graphroot defaulting to
+	// $XDG_DATA_HOME/containers/storage.
+	netCfgDir := filepath.Join(homedir, ".local", "share", "containers", "storage", "networks")
+	legacyNetCfgDir := filepath.Join(homedir, ".config", "containers", "networks")
 	if mkErr := os.MkdirAll(userConfDir, 0755); mkErr == nil {
 		os.MkdirAll(netCfgDir, 0755) //nolint
 		// Note: graph_root is intentionally NOT hardcoded here.  Pinning it
@@ -550,12 +554,11 @@ func ensureNetworkingBackend(username, homedir string) {
 		// install used a different graph_root (e.g. after a home-dir change).
 		// Podman resolves graph_root correctly from $XDG_DATA_HOME which we
 		// always set to homedir/.local/share in podmanEnv().
-		// network_config_dir IS hardcoded so both 'podman network create' and
-		// 'podman run --network' always read/write the same JSON directory,
-		// eliminating the split-brain that caused "network not found".
+		// network_config_dir IS hardcoded to Podman's documented rootless
+		// netavark path so every podman subcommand uses the same network store.
 		contConf := fmt.Sprintf(
 			"[engine]\ncgroup_manager = \"cgroupfs\"\n\n"+
-				"[network]\nnetwork_backend = \"netavark\"\nnetwork_config_dir = \"%s\"\n",
+				"[network]\ndefault_rootless_network_cmd = \"slirp4netns\"\nnetwork_backend = \"netavark\"\nnetwork_config_dir = \"%s\"\n",
 			netCfgDir)
 		os.WriteFile(filepath.Join(userConfDir, "containers.conf"), []byte(contConf), 0644) //nolint
 		// Remove any storage.conf that overrides runroot — the default
@@ -564,6 +567,10 @@ func ensureNetworkingBackend(username, homedir string) {
 		if _, statErr := os.Stat(storagePath); statErr == nil {
 			os.Remove(storagePath)
 			fmt.Println("  ✓ removed bad storage.conf (was overriding runroot, causing network not found)")
+		}
+		if _, statErr := os.Stat(legacyNetCfgDir); statErr == nil && legacyNetCfgDir != netCfgDir {
+			os.RemoveAll(legacyNetCfgDir) //nolint
+			fmt.Printf("  ✓ removed legacy network_config_dir at %s\n", legacyNetCfgDir)
 		}
 		exec.Command("chown", "-R", username+":"+username, userConfDir).Run() //nolint
 		fmt.Printf("  ✓ per-user containers.conf: network_config_dir=%s\n", netCfgDir)
@@ -1155,6 +1162,8 @@ Description=FeatherDeploy Panel
 Documentation=https://github.com/ojhapranjal26/FeatherDeploy
 After=network.target rqlite.service
 Requires=rqlite.service
+StartLimitIntervalSec=120
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -1172,6 +1181,10 @@ Environment=HOME={{.DataDir}}
 # defaulting to 0 when the user lookup fails — causing '/run/user/0 is not
 # owned by the current user' errors on every podman call.
 Environment=XDG_RUNTIME_DIR=/run/user/{{.UID}}
+Environment=XDG_CONFIG_HOME={{.DataDir}}/.config
+Environment=XDG_DATA_HOME={{.DataDir}}/.local/share
+Environment=XDG_CACHE_HOME={{.DataDir}}/.cache
+Environment=DBUS_SESSION_BUS_ADDRESS=
 # Guarantee /run/user/<uid> exists before ExecStart in case systemd-logind
 # has not yet created it (e.g. first boot, or linger just enabled).
 # The '+' prefix runs this pre-start command as root.
@@ -1179,8 +1192,6 @@ ExecStartPre=+/bin/bash -c 'mkdir -p /run/user/{{.UID}} /run/user/{{.UID}}/conta
 ExecStart={{.Bin}} serve
 Restart=always
 RestartSec=5s
-StartLimitIntervalSec=120
-StartLimitBurst=5
 StandardOutput=journal
 StandardError=journal
 # PrivateTmp must NOT be set here. Rootless podman re-execs itself into a new

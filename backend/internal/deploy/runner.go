@@ -1687,8 +1687,10 @@ func podmanEnv() []string {
 	env := make([]string, 0, len(raw)+6)
 	for _, e := range raw {
 		k := strings.SplitN(e, "=", 2)[0]
-		switch k {
-		case "HOME", "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "DBUS_SESSION_BUS_ADDRESS", "CONTAINER_HOST", "DOCKER_HOST":
+		switch {
+		case k == "HOME", k == "XDG_RUNTIME_DIR", k == "XDG_CONFIG_HOME", k == "XDG_DATA_HOME", k == "XDG_CACHE_HOME", k == "CONTAINER_HOST", k == "DOCKER_HOST":
+			continue
+		case strings.HasPrefix(k, "DBUS_"):
 			continue
 		}
 		env = append(env, e)
@@ -1710,18 +1712,32 @@ func podmanEnv() []string {
 		"XDG_CONFIG_HOME="+home+"/.config",
 		"XDG_DATA_HOME="+home+"/.local/share",
 		"XDG_CACHE_HOME="+home+"/.cache",
+		"DBUS_SESSION_BUS_ADDRESS=",
 	)
 }
 
 func podmanCmd(args ...string) *exec.Cmd {
-	cmd := exec.Command("podman", args...)
+	home := os.Getenv("HOME")
+	if home == "" {
+		home = "/var/lib/featherdeploy"
+	}
+	// Podman documents that rootless netavark stores networks under
+	// $graphroot/networks, where graphroot defaults to
+	// $XDG_DATA_HOME/containers/storage.
+	networkCfgDir := filepath.Join(home, ".local", "share", "containers", "storage", "networks")
+	cmd := exec.Command("podman", append([]string{"--network-config-dir", networkCfgDir}, args...)...)
 	cmd.Env = podmanEnv()
 	return cmd
 }
 
 // podmanCmdCtx is like podmanCmd but accepts a context for timeout control.
 func podmanCmdCtx(ctx context.Context, args ...string) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, "podman", args...)
+	home := os.Getenv("HOME")
+	if home == "" {
+		home = "/var/lib/featherdeploy"
+	}
+	networkCfgDir := filepath.Join(home, ".local", "share", "containers", "storage", "networks")
+	cmd := exec.CommandContext(ctx, "podman", append([]string{"--network-config-dir", networkCfgDir}, args...)...)
 	cmd.Env = podmanEnv()
 	return cmd
 }
