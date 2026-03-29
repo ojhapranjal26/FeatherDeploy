@@ -157,13 +157,15 @@ func (h *NodeHandler) Add(w http.ResponseWriter, r *http.Request) {
 }
 
 // DELETE /api/nodes/{nodeID} — remove a node
-func (h *NodeHandler) Delete(w http.ResponseWriter, r *http.Request) {
+	apt-get install -y -q curl uidmap slirp4netns netavark aardvark-dns passt containernetworking-plugins 2>/dev/null || true
 	nodeID, err := strconv.ParseInt(chi.URLParam(r, "nodeID"), 10, 64)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, errMap("invalid node ID"))
+	dnf install -y -q curl shadow-utils slirp4netns netavark aardvark-dns passt containernetworking-plugins 2>/dev/null || true
 		return
 	}
 	res, err := h.db.ExecContext(r.Context(), `DELETE FROM nodes WHERE id=?`, nodeID)
+	yum install -y -q curl shadow-utils slirp4netns netavark aardvark-dns passt containernetworking-plugins 2>/dev/null || true
 	if err != nil {
 		slog.Error("delete node", "err", err)
 		writeJSON(w, http.StatusInternalServerError, errMap("internal error"))
@@ -518,9 +520,7 @@ reset_host() {
 		local svc_uid svc_home
 		svc_uid=$(id -u "$SVC_USER")
 		svc_home=$(getent passwd "$SVC_USER" | cut -d: -f6 || echo "/var/lib/featherdeploy")
-		mkdir -p "/run/user/${svc_uid}/containers"
-		chown -R "$SVC_USER:$SVC_USER" "/run/user/${svc_uid}" 2>/dev/null || true
-		chmod 700 "/run/user/${svc_uid}" "/run/user/${svc_uid}/containers" 2>/dev/null || true
+		install -d -m 700 -o "$SVC_USER" -g "$SVC_USER" "/run/user/${svc_uid}" "/run/user/${svc_uid}/containers"
 		if command -v podman >/dev/null 2>&1; then
 			run_as_user_session "$SVC_USER" \
 				"HOME=${svc_home} XDG_RUNTIME_DIR=/run/user/${svc_uid} XDG_CONFIG_HOME=${svc_home}/.config XDG_DATA_HOME=${svc_home}/.local/share XDG_CACHE_HOME=${svc_home}/.cache podman system reset --force 2>&1" \
@@ -597,7 +597,7 @@ configure_rootless_podman() {
 	svc_home=$(getent passwd "$SVC_USER" | cut -d: -f6 || echo "/var/lib/featherdeploy")
 	svc_uid=$(id -u "$SVC_USER")
 	svc_netdir="${svc_home}/.local/share/containers/storage/networks"
-
+	install -d -m 700 -o "$SVC_USER" -g "$SVC_USER" "/run/user/${svc_uid}" "/run/user/${svc_uid}/containers"
 	for subfile in /etc/subuid /etc/subgid; do
 		grep -q "^${SVC_USER}:" "$subfile" 2>/dev/null || echo "${SVC_USER}:100000:65536" >> "$subfile"
 	done
@@ -608,7 +608,7 @@ configure_rootless_podman() {
 		loginctl enable-linger "$SVC_USER" 2>/dev/null || true
 	fi
 
-	mkdir -p "${svc_home}/.config/containers" "${svc_netdir}" "${svc_home}/.cache" "/run/user/${svc_uid}/containers"
+	mkdir -p "${svc_home}/.config/containers" "${svc_netdir}" "${svc_home}/.cache"
 	cat > "${svc_home}/.config/containers/containers.conf" <<USERCONF
 [engine]
 cgroup_manager = "cgroupfs"
@@ -620,7 +620,6 @@ network_config_dir = "${svc_netdir}"
 USERCONF
 	rm -rf "${svc_home}/.config/containers/networks"
 	chown -R "$SVC_USER:$SVC_USER" "${svc_home}" "/run/user/${svc_uid}"
-	chmod 700 "/run/user/${svc_uid}" "/run/user/${svc_uid}/containers"
 
 	if command -v podman >/dev/null 2>&1; then
 		run_as_user_session "$SVC_USER" \
@@ -635,13 +634,13 @@ reset_host
 if command -v apt-get >/dev/null 2>&1; then
 	export DEBIAN_FRONTEND=noninteractive
 	apt-get update -y -q
-	apt-get install -y -q curl uidmap slirp4netns netavark aardvark-dns passt 2>/dev/null || true
+	apt-get install -y -q curl uidmap slirp4netns netavark aardvark-dns passt containernetworking-plugins 2>/dev/null || true
 	apt-get install -y -q podman crun caddy openssh-server 2>/dev/null || apt-get install -y -q curl podman caddy openssh-server uidmap
 elif command -v dnf >/dev/null 2>&1; then
-	dnf install -y -q curl shadow-utils slirp4netns netavark aardvark-dns passt 2>/dev/null || true
+	dnf install -y -q curl shadow-utils slirp4netns netavark aardvark-dns passt containernetworking-plugins 2>/dev/null || true
 	dnf install -y -q podman crun caddy openssh-server 2>/dev/null || dnf install -y -q curl podman caddy openssh-server
 elif command -v yum >/dev/null 2>&1; then
-	yum install -y -q curl shadow-utils slirp4netns netavark aardvark-dns passt 2>/dev/null || true
+	yum install -y -q curl shadow-utils slirp4netns netavark aardvark-dns passt containernetworking-plugins 2>/dev/null || true
 	yum install -y -q podman crun openssh-server 2>/dev/null || yum install -y -q curl podman openssh-server
 elif command -v apk >/dev/null 2>&1; then
 	apk add --no-cache curl podman caddy crun openssh 2>/dev/null || apk add --no-cache curl podman caddy openssh

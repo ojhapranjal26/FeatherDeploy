@@ -1052,7 +1052,7 @@ var pkgManagers = map[string]pkgCmd{
 		// passt is still useful to have available, but FeatherDeploy pins
 		// slirp4netns for rootless user-defined networks because inter-container
 		// connectivity is a first-class requirement.
-		install: []string{"apt-get", "install", "-y", "podman", "crun", "caddy", "netavark", "aardvark-dns", "slirp4netns", "passt"},
+		install: []string{"apt-get", "install", "-y", "podman", "crun", "caddy", "netavark", "aardvark-dns", "slirp4netns", "passt", "containernetworking-plugins"},
 	},
 	"dnf": {
 		update: []string{"dnf", "check-update"},
@@ -1062,7 +1062,7 @@ var pkgManagers = map[string]pkgCmd{
 		// exits with code 127 because the netavark binary is missing.
 		// passt is installed as an available helper, but FeatherDeploy keeps
 		// slirp4netns as the explicit rootless network command for named networks.
-		install: []string{"dnf", "install", "-y", "podman", "crun", "caddy", "netavark", "aardvark-dns", "slirp4netns", "passt"},
+		install: []string{"dnf", "install", "-y", "podman", "crun", "caddy", "netavark", "aardvark-dns", "slirp4netns", "passt", "containernetworking-plugins"},
 	},
 	"yum": {
 		update: nil,
@@ -1473,7 +1473,7 @@ Environment=XDG_CACHE_HOME={{.DataDir}}/.cache
 # Guarantee /run/user/<uid> exists before ExecStart in case systemd-logind
 # has not yet created it (e.g. first boot, or linger just enabled).
 # The '+' prefix runs this pre-start command as root.
-ExecStartPre=+/bin/bash -c 'mkdir -p /run/user/{{.UID}} /run/user/{{.UID}}/containers && chown {{.User}}:{{.User}} /run/user/{{.UID}} /run/user/{{.UID}}/containers && chmod 700 /run/user/{{.UID}} /run/user/{{.UID}}/containers'
+ExecStartPre=+/bin/bash -c 'install -d -m 700 -o {{.User}} -g {{.User}} /run/user/{{.UID}} /run/user/{{.UID}}/containers'
 ExecStart={{.Bin}} serve
 Restart=always
 RestartSec=5s

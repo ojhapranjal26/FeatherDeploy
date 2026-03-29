@@ -99,9 +99,7 @@ full_reset() {
     local svc_uid svc_home
     svc_uid=$(id -u "$SVC_USER")
     svc_home=$(getent passwd "$SVC_USER" | cut -d: -f6 || echo "/var/lib/featherdeploy")
-    mkdir -p "/run/user/${svc_uid}/containers"
-    chown -R "$SVC_USER:$SVC_USER" "/run/user/${svc_uid}" 2>/dev/null || true
-    chmod 700 "/run/user/${svc_uid}" "/run/user/${svc_uid}/containers" 2>/dev/null || true
+    install -d -m 700 -o "$SVC_USER" -g "$SVC_USER" "/run/user/${svc_uid}" "/run/user/${svc_uid}/containers"
     if command -v podman >/dev/null 2>&1; then
       run_as_user_session "$SVC_USER" \
         "HOME=${svc_home} XDG_RUNTIME_DIR=/run/user/${svc_uid} XDG_CONFIG_HOME=${svc_home}/.config XDG_DATA_HOME=${svc_home}/.local/share XDG_CACHE_HOME=${svc_home}/.cache podman system reset --force 2>&1" \
@@ -153,16 +151,16 @@ full_reset() {
   fi
 
   if command -v dnf >/dev/null 2>&1; then
-    dnf remove -y podman crun netavark aardvark-dns slirp4netns passt 2>/dev/null || true
+    dnf remove -y podman crun netavark aardvark-dns slirp4netns passt containernetworking-plugins 2>/dev/null || true
   elif command -v apt-get >/dev/null 2>&1; then
-    apt-get remove -y --purge podman podman-docker crun netavark aardvark-dns slirp4netns passt 2>/dev/null || true
+    apt-get remove -y --purge podman podman-docker crun netavark aardvark-dns slirp4netns passt containernetworking-plugins 2>/dev/null || true
     apt-get autoremove -y 2>/dev/null || true
   elif command -v yum >/dev/null 2>&1; then
-    yum remove -y podman crun netavark aardvark-dns slirp4netns passt 2>/dev/null || true
+    yum remove -y podman crun netavark aardvark-dns slirp4netns passt containernetworking-plugins 2>/dev/null || true
   elif command -v pacman >/dev/null 2>&1; then
-    pacman -Rns --noconfirm podman crun netavark aardvark-dns slirp4netns passt 2>/dev/null || true
+    pacman -Rns --noconfirm podman crun netavark aardvark-dns slirp4netns passt containernetworking-plugins 2>/dev/null || true
   elif command -v apk >/dev/null 2>&1; then
-    apk del podman crun netavark aardvark-dns slirp4netns passt 2>/dev/null || true
+    apk del podman crun netavark aardvark-dns slirp4netns passt containernetworking-plugins 2>/dev/null || true
   fi
 
   rm -rf "$INSTALL_DIR"
@@ -450,7 +448,7 @@ install_deps_apt() {
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -y
   apt-get install -y curl git gcc make ca-certificates build-essential sudo uidmap
-  apt-get install -y slirp4netns netavark aardvark-dns passt 2>/dev/null || true
+  apt-get install -y slirp4netns netavark aardvark-dns passt containernetworking-plugins 2>/dev/null || true
   if ! command -v podman >/dev/null 2>&1; then
     echo "==> Installing Podman..."
     apt-get install -y podman 2>/dev/null || apt-get install -y podman-docker 2>/dev/null || echo "  WARNING: podman not in apt"
@@ -485,7 +483,7 @@ install_deps_apt() {
 install_deps_dnf() {
   # shadow-utils provides newuidmap/newgidmap (required for rootless podman)
   dnf install -y curl git gcc make ca-certificates shadow-utils
-  dnf install -y slirp4netns netavark aardvark-dns passt 2>/dev/null || true
+  dnf install -y slirp4netns netavark aardvark-dns passt containernetworking-plugins 2>/dev/null || true
   command -v podman >/dev/null 2>&1 || dnf install -y podman
   command -v crun   >/dev/null 2>&1 || dnf install -y crun 2>/dev/null || echo '  WARNING: crun not available via dnf'
   command -v caddy  >/dev/null 2>&1 || dnf install -y caddy 2>/dev/null || \
@@ -497,7 +495,7 @@ install_deps_dnf() {
 install_deps_yum() {
   # shadow-utils provides newuidmap/newgidmap (required for rootless podman)
   yum install -y curl git gcc make ca-certificates shadow-utils
-  yum install -y --skip-broken slirp4netns netavark aardvark-dns passt 2>/dev/null || true
+  yum install -y --skip-broken slirp4netns netavark aardvark-dns passt containernetworking-plugins 2>/dev/null || true
   command -v podman >/dev/null 2>&1 || yum install -y podman
   command -v crun   >/dev/null 2>&1 || yum install -y crun 2>/dev/null || echo '  WARNING: crun not available via yum'
   command -v caddy  >/dev/null 2>&1 || (yum install -y yum-plugin-copr && yum copr enable -y @caddy/caddy && yum install -y caddy) || echo '  WARNING: caddy not via yum'
@@ -639,7 +637,8 @@ fi
 _svc_home=$(getent passwd "${SVC_USER}" | cut -d: -f6 || echo "/var/lib/featherdeploy")
 _svc_uid=$(id -u "${SVC_USER}")
 _svc_netdir="${_svc_home}/.local/share/containers/storage/networks"
-mkdir -p "${_svc_home}/.config/containers" "${_svc_netdir}" "${_svc_home}/.cache" "/run/user/${_svc_uid}/containers"
+install -d -m 700 -o "${SVC_USER}" -g "${SVC_USER}" "/run/user/${_svc_uid}" "/run/user/${_svc_uid}/containers"
+mkdir -p "${_svc_home}/.config/containers" "${_svc_netdir}" "${_svc_home}/.cache"
 cat > "${_svc_home}/.config/containers/containers.conf" <<USERCONF
 [engine]
 cgroup_manager = "cgroupfs"
@@ -651,7 +650,6 @@ network_config_dir = "${_svc_netdir}"
 USERCONF
 rm -rf "${_svc_home}/.config/containers/networks"
 chown -R "${SVC_USER}:${SVC_USER}" "${_svc_home}/.config" "${_svc_home}/.local" "${_svc_home}/.cache" "/run/user/${_svc_uid}"
-chmod 700 "/run/user/${_svc_uid}" "/run/user/${_svc_uid}/containers"
 echo "  per-user containers.conf (cgroupfs + netavark/slirp4netns) written for ${SVC_USER}"
 
 if command -v podman >/dev/null 2>&1; then

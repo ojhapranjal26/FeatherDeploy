@@ -61,9 +61,7 @@ echo "── Resetting rootless Podman state ───────────�
 if id -u "$SVC_USER" >/dev/null 2>&1; then
   svc_uid=$(id -u "$SVC_USER")
   svc_home=$(getent passwd "$SVC_USER" | cut -d: -f6 || echo "/var/lib/featherdeploy")
-  mkdir -p "/run/user/${svc_uid}/containers"
-  chown -R "$SVC_USER:$SVC_USER" "/run/user/${svc_uid}" 2>/dev/null || true
-  chmod 700 "/run/user/${svc_uid}" "/run/user/${svc_uid}/containers" 2>/dev/null || true
+  install -d -m 700 -o "$SVC_USER" -g "$SVC_USER" "/run/user/${svc_uid}" "/run/user/${svc_uid}/containers"
   if command -v podman >/dev/null 2>&1; then
     run_as_user_session "$SVC_USER" \
       "HOME=${svc_home} XDG_RUNTIME_DIR=/run/user/${svc_uid} XDG_CONFIG_HOME=${svc_home}/.config XDG_DATA_HOME=${svc_home}/.local/share XDG_CACHE_HOME=${svc_home}/.cache podman system reset --force 2>&1" \
@@ -135,16 +133,16 @@ echo "  ✓ service user removed"
 echo ""
 echo "── Removing podman helper packages ─────────────────────────────"
 if command -v dnf >/dev/null 2>&1; then
-  dnf remove -y podman crun netavark aardvark-dns slirp4netns passt 2>/dev/null || true
+  dnf remove -y podman crun netavark aardvark-dns slirp4netns passt containernetworking-plugins 2>/dev/null || true
 elif command -v apt-get >/dev/null 2>&1; then
-  apt-get remove -y --purge podman podman-docker crun netavark aardvark-dns slirp4netns passt 2>/dev/null || true
+  apt-get remove -y --purge podman podman-docker crun netavark aardvark-dns slirp4netns passt containernetworking-plugins 2>/dev/null || true
   apt-get autoremove -y 2>/dev/null || true
 elif command -v yum >/dev/null 2>&1; then
-  yum remove -y podman crun netavark aardvark-dns slirp4netns passt 2>/dev/null || true
+  yum remove -y podman crun netavark aardvark-dns slirp4netns passt containernetworking-plugins 2>/dev/null || true
 elif command -v pacman >/dev/null 2>&1; then
-  pacman -Rns --noconfirm podman crun netavark aardvark-dns slirp4netns passt 2>/dev/null || true
+  pacman -Rns --noconfirm podman crun netavark aardvark-dns slirp4netns passt containernetworking-plugins 2>/dev/null || true
 elif command -v apk >/dev/null 2>&1; then
-  apk del podman crun netavark aardvark-dns slirp4netns passt 2>/dev/null || true
+  apk del podman crun netavark aardvark-dns slirp4netns passt containernetworking-plugins 2>/dev/null || true
 else
   echo "  WARNING: no supported package manager found — remove podman/crun manually"
 fi
