@@ -416,9 +416,39 @@ func ensureNetworkingBackend(username, homedir string) {
 		}
 	}
 
+	// ── Ensure the service user's home dir in /etc/passwd is correct ─────────
+	// Podman calls getpwuid() internally and ignores the $HOME env var.
+	// If /etc/passwd lists /home/<username> (useradd default) but the actual
+	// data dir is /var/lib/featherdeploy, every `podman run` fails with
+	// "permission denied" trying to create ~/.local/share/containers.
+	actualHome, _ := exec.Command("getent", "passwd", username).Output()
+	passwdHome := ""
+	if fields := strings.Split(strings.TrimSpace(string(actualHome)), ":"); len(fields) >= 6 {
+		passwdHome = fields[5]
+	}
+	if passwdHome != dataDir {
+		fmt.Printf("  Fixing home dir in /etc/passwd: %q → %q\n", passwdHome, dataDir)
+		// usermod -d updates /etc/passwd without moving files.
+		// The featherdeploy service is stopped before this function is called
+		// (RunUpdate explicitly stops it), so usermod succeeds here.
+		if out, err := exec.Command("usermod", "-d", dataDir, username).CombinedOutput(); err != nil {
+			fmt.Printf("  WARNING: usermod -d failed: %v — %s\n", err, strings.TrimSpace(string(out)))
+		} else {
+			fmt.Printf("  ✓ home dir updated to %s\n", dataDir)
+			// Refresh homedir so the smoke test uses the correct path.
+			homedir = dataDir
+		}
+	} else {
+		fmt.Printf("  ✓ home dir is already %s\n", dataDir)
+	}
+
+	// Ensure the data dir exists and is owned by the service user.
+	if err := os.MkdirAll(dataDir, 0755); err == nil {
+		exec.Command("chown", "-R", username+":"+username, dataDir).Run() //nolint
+	}
+
 	// Run a quick smoke-test as the service user:
 	// create a test network, then immediately remove it.
-	// If this fails, named networking is broken and we warn clearly.
 	//
 	// /run/featherdeploy-runtime is normally created by systemd's
 	// RuntimeDirectory= directive when the service starts.  At install /
@@ -439,13 +469,13 @@ func ensureNetworkingBackend(username, homedir string) {
 		fmt.Println("  !! Service deployments will fail until this is resolved.")
 		switch {
 		case strings.Contains(outStr, "permission denied"):
-			// Podman uses getpwuid() to resolve the home dir, ignoring $HOME.
-			// This usually means the user's home in /etc/passwd is wrong or
-			// the directory doesn't exist / isn't owned by the service user.
-			fmt.Printf("  Cause: Podman cannot create container storage — home dir mismatch.\n")
-			fmt.Printf("  Fix:   sudo usermod -d %s %s\n", dataDir, username)
-			fmt.Printf("         sudo mkdir -p %s && sudo chown -R %s:%s %s\n", dataDir, username, username, dataDir)
-			fmt.Printf("         sudo systemctl restart featherdeploy\n")
+			// Home dir was corrected above. If it still fails, the storage
+			// directory doesn't exist or has wrong ownership.
+			fmt.Printf("  Cause: Podman cannot create container storage.\n")
+			fmt.Printf("  Fix:\n")
+			fmt.Printf("    sudo mkdir -p %s\n", dataDir)
+			fmt.Printf("    sudo chown -R %s:%s %s\n", username, username, dataDir)
+			fmt.Printf("    sudo systemctl restart featherdeploy\n")
 		case strings.Contains(outStr, "127") || strings.Contains(outStr, "netavark") || strings.Contains(outStr, "command not found"):
 			fmt.Println("  Fix: sudo dnf install -y netavark aardvark-dns  (RHEL/AlmaLinux/Rocky)")
 			fmt.Println("       sudo apt-get install -y netavark           (Ubuntu/Debian)")
@@ -966,6 +996,13 @@ func RunUpdate() {
 	}
 	writeSystemdService(svcUser)
 	fmt.Printf("  ✓ systemd unit updated (User=%s)\n", svcUser)
+
+	// ── Stop the service before making any user/storage changes ─────────────
+	// usermod -d refuses to run while the target user has running processes.
+	// We stop featherdeploy here, fix home-dir / networking, then restart below.
+	fmt.Println("\n── Stopping featherdeploy for maintenance ───────────────────────")
+	exec.Command("systemctl", "stop", "featherdeploy").Run() //nolint — may not be running
+	fmt.Println("  ✓ featherdeploy stopped (or was not running)")
 
 	// ── Ensure Podman networking backend is installed ─────────────────────────
 	// Existing installs may be missing netavark/aardvark-dns; this step installs
