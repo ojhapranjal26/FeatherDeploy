@@ -1010,6 +1010,43 @@ func projectNetworkName(projectID int64) string {
 	return fmt.Sprintf("fd-proj-%d", projectID)
 }
 
+// CheckNetworkingBackend verifies that Podman named-network support is
+// functional.  It creates a temporary test network, confirms it is visible,
+// then removes it.  If anything fails it returns a descriptive error that
+// includes remediation instructions for the most common distributions.
+//
+// Called once at server startup (non-fatal: only a warning is emitted).
+func CheckNetworkingBackend() error {
+	testNet := fmt.Sprintf("fd-netcheck-%d", time.Now().UnixNano())
+
+	// Create
+	out, err := podmanCmd("network", "create", testNet).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf(
+			"podman network create failed (exit %v): %s\n\n"+
+				"Named networks are required for project isolation.\n"+
+				"  RHEL 9 / AlmaLinux / Rocky: sudo dnf install -y netavark aardvark-dns\n"+
+				"  Ubuntu / Debian:             sudo apt-get install -y netavark\n"+
+				"  Then restart: sudo systemctl restart featherdeploy",
+			err, strings.TrimSpace(string(out)))
+	}
+
+	// Inspect — verify it actually persisted
+	if verErr := podmanCmd("network", "inspect", testNet).Run(); verErr != nil {
+		podmanCmd("network", "rm", testNet).Run() //nolint
+		return fmt.Errorf(
+			"podman network create appeared to succeed but inspect failed (%v)\n"+
+			"This usually means the networking backend (netavark) is missing.\n"+
+			"  RHEL 9 / AlmaLinux / Rocky: sudo dnf install -y netavark aardvark-dns\n"+
+			"  Ubuntu / Debian:             sudo apt-get install -y netavark",
+			verErr)
+	}
+
+	// Remove
+	podmanCmd("network", "rm", testNet).Run() //nolint
+	return nil
+}
+
 // ensureProjectNetwork creates the per-project podman bridge network if it
 // does not already exist. We use "network inspect" to check existence first
 // rather than relying on --ignore, which behaves inconsistently across Podman
@@ -1027,12 +1064,24 @@ func ensureProjectNetwork(projectID int64) error {
 		if strings.Contains(strings.ToLower(string(out)), "already exists") {
 			return nil
 		}
-		return fmt.Errorf("podman network create %s: %v — %s", name, err, strings.TrimSpace(string(out)))
+		hint := ""
+		if strings.Contains(err.Error(), "127") || strings.Contains(string(out), "127") {
+			hint = "\n  Fix (RHEL/AlmaLinux/Rocky): sudo dnf install -y netavark aardvark-dns" +
+				"\n  Fix (Ubuntu/Debian):         sudo apt-get install -y netavark"
+		}
+		return fmt.Errorf("podman network create %s: %v — %s%s", name, err, strings.TrimSpace(string(out)), hint)
 	}
 	// Verify the network actually exists after creation — catches silent failures
 	// where podman returns exit 0 but doesn’t write the network to storage.
 	if verErr := podmanCmd("network", "inspect", name).Run(); verErr != nil {
-		return fmt.Errorf("podman network create appeared to succeed but network %s not found afterwards: %v", name, verErr)
+		lsOut, _ := podmanCmd("network", "ls").CombinedOutput()
+		return fmt.Errorf(
+			"podman network create appeared to succeed but network %s not found afterwards: %v\n"+
+				"podman network ls:\n%s\n"+
+				"Likely cause: netavark not installed.\n"+
+				"  Fix (RHEL/AlmaLinux/Rocky): sudo dnf install -y netavark aardvark-dns\n"+
+				"  Fix (Ubuntu/Debian):         sudo apt-get install -y netavark",
+			name, verErr, strings.TrimSpace(string(lsOut)))
 	}
 	return nil
 }

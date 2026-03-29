@@ -149,6 +149,15 @@ func serve() {
 	}
 	deploy.InitQueue(workers)
 
+	// Verify Podman named-network backend (netavark) is installed.
+	// Named networks are required for project container isolation.
+	// This is a non-fatal startup check — it emits a warning so the operator
+	// can install the missing package before deployments start failing.
+	if err := deploy.CheckNetworkingBackend(); err != nil {
+		slog.Warn("Podman networking backend check FAILED — service deployments will fail",
+			"err", err)
+	}
+
 	// ─── Brain heartbeat + SSH key
 	if err := ensureSSHKey(db); err != nil {
 		slog.Warn("SSH key setup", "err", err)

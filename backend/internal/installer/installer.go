@@ -341,6 +341,13 @@ func setupPodmanRootless(username string) {
 	if err := cmd.Run(); err != nil {
 		slog.Warn("podman system migrate failed (non-fatal)", "err", err)
 	}
+
+	// Verify that named (bridge) networking actually works.
+	// `podman build` uses slirp4netns (works without netavark), but
+	// `podman run --network <name>` calls the netavark binary which must be
+	// installed separately on RHEL 9 / AlmaLinux / Rocky.  If the test fails,
+	// print a clear remediation message so the operator knows what to install.
+	ensureNetworkingBackend(username, homedir)
 	fmt.Printf("  ✓ rootless Podman configured for %s\n", username)
 }
 
@@ -355,6 +362,76 @@ func userHomeDir(username string) string {
 		}
 	}
 	return "/var/lib/featherdeploy"
+}
+
+// ensureNetworkingBackend verifies that podman named networks work for username.
+// On RHEL 9/AlmaLinux/Rocky, `podman` is shipped without `netavark` and
+// `aardvark-dns`. Without them `podman run --network <name>` exits 127
+// ("netavark: command not found") even though `podman network create` succeeds.
+// This function:
+//  1. Probes for well-known netavark/CNI binary locations.
+//  2. Falls back to installing netavark via dnf/apt if missing.
+//  3. Runs a smoke-test: network create → run hello-world → network rm.
+func ensureNetworkingBackend(username, homedir string) {
+	fmt.Println("  Checking Podman named networking backend (netavark/CNI)...")
+
+	// Well-known paths for the netavark binary.
+	netavarkPaths := []string{
+		"/usr/libexec/podman/netavark",
+		"/usr/lib/podman/netavark",
+		"/usr/local/lib/podman/netavark",
+		"/usr/bin/netavark",
+	}
+	found := false
+	for _, p := range netavarkPaths {
+		if _, err := os.Stat(p); err == nil {
+			fmt.Printf("  \u2713 netavark found at %s\n", p)
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		fmt.Println("  WARNING: netavark not found — attempting to install networking packages...")
+		for pm, args := range map[string][]string{
+			"dnf": {"dnf", "install", "-y", "netavark", "aardvark-dns"},
+			"apt-get": {"apt-get", "install", "-y", "-q", "netavark"},
+			"yum":     {"yum", "install", "-y", "--skip-broken", "netavark", "aardvark-dns"},
+			"pacman":  {"pacman", "-S", "--noconfirm", "netavark"},
+		} {
+			if _, err := exec.LookPath(pm); err == nil {
+				cmd2 := exec.Command(args[0], args[1:]...)
+				cmd2.Stdout = os.Stdout
+				cmd2.Stderr = os.Stderr
+				if err2 := cmd2.Run(); err2 == nil {
+					fmt.Println("  \u2713 networking packages installed")
+				} else {
+					fmt.Printf("  WARNING: could not install networking packages via %s: %v\n", pm, err2)
+					fmt.Println("  !! If deployments fail with 'network not found', run manually:")
+					fmt.Println("       sudo dnf install -y netavark aardvark-dns   # RHEL/AlmaLinux/Rocky")
+					fmt.Println("       sudo apt-get install -y netavark             # Ubuntu/Debian")
+				}
+				break
+			}
+		}
+	}
+
+	// Run a quick smoke-test as the service user:
+	// create a test network, then immediately remove it.
+	// If this fails, named networking is broken and we warn clearly.
+	testEnv := fmt.Sprintf("HOME=%s XDG_RUNTIME_DIR=/run/featherdeploy-runtime", homedir)
+	smoke := fmt.Sprintf(
+		"%s podman network create fd-nettest 2>&1 && %s podman network rm fd-nettest 2>/dev/null",
+		testEnv, testEnv)
+	smokecmd := exec.Command("su", "-s", "/bin/sh", username, "-c", smoke)
+	if out, err := smokecmd.CombinedOutput(); err != nil {
+		fmt.Printf("  WARNING: named network smoke-test failed: %v\n  output: %s\n", err, strings.TrimSpace(string(out)))
+		fmt.Println("  !! Service deployments will fail until this is resolved.")
+		fmt.Println("  Fix: sudo dnf install -y netavark aardvark-dns  (RHEL/AlmaLinux/Rocky)")
+		fmt.Println("       sudo apt-get install -y netavark           (Ubuntu/Debian)")
+	} else {
+		fmt.Println("  \u2713 named networking smoke-test passed")
+	}
 }
 
 // ensureSubIDEntry appends a subuid/subgid range entry for username to file
@@ -472,19 +549,27 @@ type pkgCmd struct {
 var pkgManagers = map[string]pkgCmd{
 	"apt-get": {
 		update:  []string{"apt-get", "update", "-y"},
-		install: []string{"apt-get", "install", "-y", "podman", "crun", "caddy"},
+		install: []string{"apt-get", "install", "-y", "podman", "crun", "caddy", "netavark"},
 	},
 	"dnf": {
 		update:  []string{"dnf", "check-update"},
-		install: []string{"dnf", "install", "-y", "podman", "crun", "caddy"},
+		// netavark and aardvark-dns are NOT pulled in as podman dependencies on
+		// RHEL 9 / AlmaLinux / Rocky Linux. Without them, `podman network create`
+		// appears to succeed (writes a JSON file) but `podman run --network <name>`
+		// exits with code 127 because the netavark binary is missing.
+		install: []string{"dnf", "install", "-y", "podman", "crun", "caddy", "netavark", "aardvark-dns"},
 	},
 	"yum": {
 		update:  nil,
-		install: []string{"yum", "install", "-y", "podman", "crun"},
+		// On RHEL 8, netavark may not exist in repos; containernetworking-plugins
+		// is the CNI fallback. Both are listed — yum ignores unavailable packages
+		// when using --skip-broken.
+		install: []string{"yum", "install", "-y", "--skip-broken", "podman", "crun",
+			"netavark", "aardvark-dns", "containernetworking-plugins"},
 	},
 	"pacman": {
 		update:  []string{"pacman", "-Sy"},
-		install: []string{"pacman", "-S", "--noconfirm", "podman", "crun", "caddy"},
+		install: []string{"pacman", "-S", "--noconfirm", "podman", "crun", "caddy", "netavark"},
 	},
 	"apk": {
 		update:  []string{"apk", "update"},
@@ -848,6 +933,13 @@ func RunUpdate() {
 	}
 	writeSystemdService(svcUser)
 	fmt.Printf("  ✓ systemd unit updated (User=%s)\n", svcUser)
+
+	// ── Ensure Podman networking backend is installed ─────────────────────────
+	// Existing installs may be missing netavark/aardvark-dns; this step installs
+	// them if absent so `podman run --network <name>` stops failing with exit 127.
+	fmt.Println("\n── Ensuring Podman named-network backend (netavark) ────────────")
+	homedir := userHomeDir(svcUser)
+	ensureNetworkingBackend(svcUser, homedir)
 
 	// ── Restart rqlite + featherdeploy ───────────────────────────────────────
 	fmt.Println("\n── Restarting services ─────────────────────────────────────────")
