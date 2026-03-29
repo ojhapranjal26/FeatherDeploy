@@ -531,7 +531,7 @@ func reconcileServiceStates(db *sql.DB) {
 
 	for _, svcID := range ids {
 		cName := fmt.Sprintf("fd-svc-%d", svcID)
-		out, inspErr := exec.Command("podman", "inspect",
+		out, inspErr := deploy.PodmanCmd("inspect",
 			"--format", "{{.State.Status}}", cName).Output()
 		if inspErr != nil {
 			// Container doesn't exist — mark service as error.
@@ -546,7 +546,7 @@ func reconcileServiceStates(db *sql.DB) {
 			wantedStatus = "running"
 		} else if state == "exited" || state == "stopped" || state == "created" {
 			// Container exists but is stopped — attempt a restart before giving up.
-			if startOut, startErr := exec.Command("podman", "start", cName).CombinedOutput(); startErr == nil {
+			if startOut, startErr := deploy.PodmanCmd("start", cName).CombinedOutput(); startErr == nil {
 				wantedStatus = "running"
 				slog.Info("startup reconcile: restarted stopped container", "svc_id", svcID)
 			} else {

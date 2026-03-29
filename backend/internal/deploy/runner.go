@@ -84,6 +84,18 @@ var (
 	jobCh     chan deployJob
 )
 
+// networkMu serializes all per-project network operations (create / rm / inspect)
+// across concurrent deployments and the startup reconcile goroutine.
+// Using a per-project striped lock avoids blocking unrelated projects.
+var (
+	networkMuMap sync.Map // key: int64 projectID → *sync.Mutex
+)
+
+func projectNetworkLock(projectID int64) *sync.Mutex {
+	v, _ := networkMuMap.LoadOrStore(projectID, &sync.Mutex{})
+	return v.(*sync.Mutex)
+}
+
 // buildTmpDir returns the base directory for deployment work dirs.
 // We deliberately avoid /tmp because the systemd unit previously used
 // PrivateTmp=yes, and rootless podman re-execs itself into a new user
@@ -1026,6 +1038,13 @@ func projectNetworkName(projectID int64) string {
 	return fmt.Sprintf("fd-proj-%d", projectID)
 }
 
+// PodmanCmd returns an exec.Cmd for podman with the correct rootless
+// environment. Exported for use by the startup reconcile goroutine in main.go
+// so it reads/writes the same podman store as the deployment pipeline.
+func PodmanCmd(args ...string) *exec.Cmd {
+	return podmanCmd(args...)
+}
+
 // CheckNetworkingBackend verifies that Podman named-network support is
 // functional.  It creates a temporary test network, confirms it is visible,
 // then removes it.  If anything fails it returns a descriptive error that
@@ -1111,6 +1130,12 @@ func classifyNetworkError(out string) string {
 //  3. After network create, we poll inspect for up to 5 s so we never hand
 //     back to the caller before the network is confirmed visible.
 func ensureProjectNetwork(projectID int64) error {
+	// Serialize all network operations for this project to prevent races
+	// between concurrent deployments and the startup reconcile goroutine.
+	mu := projectNetworkLock(projectID)
+	mu.Lock()
+	defer mu.Unlock()
+
 	name := projectNetworkName(projectID)
 
 	// Check whether any containers are actively running on this network.
