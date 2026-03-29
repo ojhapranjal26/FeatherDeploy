@@ -1728,18 +1728,17 @@ func deleteDatabaseVolume(dbID int64) error {
 // documented fallback is 0), the inherited value is /run/user/0, causing
 // every podman call to log "not owned by the current user" and fail build.
 //
-// DBUS_SESSION_BUS_ADDRESS is stripped so podman and its helpers (slirp4netns,
-// crun) don't try to contact a non-existent user dbus socket and fail with
-// "connect: permission denied".
+// With the service running in a real PAM/logind session (see installer's
+// PAMName=login), podman and slirp4netns are expected to use the user session
+// normally. Do not strip DBUS_* here: rootless+cgroupv2 networking may require
+// a valid session bus/user.slice context.
 func podmanEnv() []string {
 	raw := os.Environ()
-	env := make([]string, 0, len(raw)+6)
+	env := make([]string, 0, len(raw)+5)
 	for _, e := range raw {
 		k := strings.SplitN(e, "=", 2)[0]
 		switch {
 		case k == "HOME", k == "XDG_RUNTIME_DIR", k == "XDG_CONFIG_HOME", k == "XDG_DATA_HOME", k == "XDG_CACHE_HOME", k == "CONTAINER_HOST", k == "DOCKER_HOST":
-			continue
-		case strings.HasPrefix(k, "DBUS_"):
 			continue
 		}
 		env = append(env, e)
@@ -1753,7 +1752,7 @@ func podmanEnv() []string {
 	rtDir := fmt.Sprintf("/run/user/%d", os.Getuid())
 	
 	// Explicitly set all XDG paths based on home to prevent split-brain issues
-	// where systemd-provided XDG_CONFIG_HOME or XDG_DATA_HOME causes 'podman run'
+	// where inherited XDG_CONFIG_HOME or XDG_DATA_HOME causes 'podman run'
 	// to look in different directories than 'podman network create'.
 	return append(env, 
 		"HOME="+home, 
@@ -1761,13 +1760,6 @@ func podmanEnv() []string {
 		"XDG_CONFIG_HOME="+home+"/.config",
 		"XDG_DATA_HOME="+home+"/.local/share",
 		"XDG_CACHE_HOME="+home+"/.cache",
-		// Set to an invalid address rather than empty string.  An empty
-		// DBUS_SESSION_BUS_ADDRESS is treated identically to "unset" by sd-bus:
-		// it falls back to the default /run/user/<uid>/bus socket, causing
-		// slirp4netns to attempt a user.slice cgroup move that fails with
-		// "connect: permission denied".  An invalid address makes sd-bus abort
-		// the connection immediately, which is what we want.
-		"DBUS_SESSION_BUS_ADDRESS=disabled:",
 	)
 }
 

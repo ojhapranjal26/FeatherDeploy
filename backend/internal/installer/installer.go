@@ -400,6 +400,29 @@ func userHomeDir(username string) string {
 	return "/var/lib/featherdeploy"
 }
 
+// loginSessionCmd executes shellCmd in a real systemd user session for username.
+// Podman's rootless+cgroupv2 mode expects a valid login session. Running podman
+// via plain 'su -c' inside a system service does not provide one reliably, and
+// rootless networking can fail even when XDG paths look correct. systemd-run's
+// --machine=<user>@ --user form is the integration Podman's own docs recommend.
+func loginSessionCmd(username, shellCmd string) *exec.Cmd {
+	if _, err := exec.LookPath("systemd-run"); err == nil {
+		return exec.Command(
+			"systemd-run",
+			"--machine="+username+"@",
+			"--quiet",
+			"--user",
+			"--collect",
+			"--pipe",
+			"--wait",
+			"/bin/sh",
+			"-lc",
+			"cd / && "+shellCmd,
+		)
+	}
+	return exec.Command("su", "-s", "/bin/sh", username, "-c", "cd / && "+shellCmd)
+}
+
 // ensureNetworkingBackend verifies that podman named networks work for username.
 // On RHEL 9/AlmaLinux/Rocky, `podman` is shipped without `netavark` and
 // `aardvark-dns`. Without them `podman run --network <name>` exits 127
@@ -680,9 +703,9 @@ func ensureNetworkingBackend(username, homedir string) {
 				os.RemoveAll(newContainers) //nolint
 			}
 			// Re-initialize podman storage at the correct home.
-			migrateEnv := fmt.Sprintf("HOME=%s XDG_RUNTIME_DIR=%s", dataDir, rtDir)
-			migrateCmd := exec.Command("su", "-s", "/bin/sh", username, "-c",
-				"cd / && "+migrateEnv+" podman system migrate 2>&1")
+			migrateEnv := fmt.Sprintf("HOME=%s XDG_RUNTIME_DIR=%s XDG_CONFIG_HOME=%s XDG_DATA_HOME=%s XDG_CACHE_HOME=%s",
+				dataDir, rtDir, dataDir+"/.config", dataDir+"/.local/share", dataDir+"/.cache")
+			migrateCmd := loginSessionCmd(username, migrateEnv+" podman system migrate 2>&1")
 			if migrateOut, migrateErr := migrateCmd.CombinedOutput(); migrateErr == nil {
 				fmt.Println("  ✓ podman storage re-initialized at new home")
 			} else {
@@ -721,31 +744,10 @@ func ensureNetworkingBackend(username, homedir string) {
 		// network_config_dir IS hardcoded to Podman's documented rootless
 		// netavark path so every podman subcommand uses the same network store.
 		//
-		// default_rootless_network_cmd: prefer "pasta" (from the passt package)
-		// over "slirp4netns".  pasta is the modern Podman 5.x default and does
-		// NOT try to move its process into the systemd user.slice via dbus,
-		// which causes "connect: permission denied" on /run/user/<uid>/bus when
-		// no user-session dbus socket is present.  slirp4netns does attempt
-		// that move (even with --cgroup-manager cgroupfs), causing the
-		// misleading "network not found" error that actually means the rootless
-		// network namespace setup was aborted.  If pasta is absent, let Podman
-		// auto-detect (it will use slirp4netns if that's all that's installed).
-		rootlessNetCmd := ""
-		for _, p := range []string{"/usr/bin/pasta", "/usr/local/bin/pasta", "/usr/libexec/pasta"} {
-			if _, statErr := os.Stat(p); statErr == nil {
-				rootlessNetCmd = "\ndefault_rootless_network_cmd = \"pasta\""
-				fmt.Printf("  ✓ pasta found at %s — using it as rootless network command\n", p)
-				break
-			}
-		}
-		if rootlessNetCmd == "" {
-			fmt.Println("  NOTE: pasta not found — Podman will auto-select slirp4netns.")
-			fmt.Println("        Install 'passt' for better rootless networking (avoids dbus/user.slice errors).")
-		}
 		contConf := fmt.Sprintf(
 			"[engine]\ncgroup_manager = \"cgroupfs\"\n\n"+
-				"[network]\nnetwork_backend = \"netavark\"%s\nnetwork_config_dir = \"%s\"\n",
-			rootlessNetCmd, netCfgDir)
+				"[network]\nnetwork_backend = \"netavark\"\ndefault_rootless_network_cmd = \"slirp4netns\"\nnetwork_config_dir = \"%s\"\n",
+			netCfgDir)
 		os.WriteFile(filepath.Join(userConfDir, "containers.conf"), []byte(contConf), 0644) //nolint
 		// Remove any storage.conf that overrides runroot — the default
 		// $XDG_RUNTIME_DIR/containers is correct and must not be changed.
@@ -822,13 +824,7 @@ func ensureNetworkingBackend(username, homedir string) {
 	// smoke test reads the same containers.conf the running service will use.
 	testNetName := fmt.Sprintf("fd-nettest-%d", time.Now().UnixNano())
 	testEnv := fmt.Sprintf(
-		// DBUS_SESSION_BUS_ADDRESS is set to a deliberately invalid address so
-		// sd-bus fails the connection attempt immediately instead of trying the
-		// default /run/user/<uid>/bus socket.  An empty string has the same
-		// effect as unset — sd-bus falls back to the default path — which causes
-		// slirp4netns to attempt the user.slice cgroup move and fail with
-		// "connect: permission denied" when no user dbus session is running.
-		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=%s XDG_RUNTIME_DIR=%s XDG_CONFIG_HOME=%s XDG_DATA_HOME=%s XDG_CACHE_HOME=%s DBUS_SESSION_BUS_ADDRESS=disabled:",
+		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=%s XDG_RUNTIME_DIR=%s XDG_CONFIG_HOME=%s XDG_DATA_HOME=%s XDG_CACHE_HOME=%s",
 		homedir, rtDir,
 		homedir+"/.config",
 		homedir+"/.local/share",
@@ -850,8 +846,9 @@ func ensureNetworkingBackend(username, homedir string) {
 		testEnv, testGraphRoot, testRunRoot, testNetCfgDir, testNetName,
 		testEnv, testGraphRoot, testRunRoot, testNetCfgDir, testNetName,
 		testEnv, testGraphRoot, testRunRoot, testNetCfgDir, testNetName)
-	// Prefix with 'cd /' so su doesn't inherit CWD=/root (permission denied).
-	smokecmd := exec.Command("su", "-s", "/bin/sh", username, "-c", "cd / && "+smoke)
+	// Run in a real login session so rootless Podman gets the session/bus model
+	// it expects on cgroup v2 systems.
+	smokecmd := loginSessionCmd(username, smoke)
 	if out, err := smokecmd.CombinedOutput(); err != nil {
 		outStr := strings.TrimSpace(string(out))
 		fmt.Printf("  WARNING: named network smoke-test failed: %v\n  output: %s\n", err, outStr)
@@ -861,21 +858,14 @@ func ensureNetworkingBackend(username, homedir string) {
 		// denied" (from the dbus socket) which would otherwise match the
 		// "permission denied" storage case incorrectly.
 		case strings.Contains(outStr, "user.slice") || strings.Contains(outStr, "session bus") || strings.Contains(outStr, "dbus"):
-			// slirp4netns is trying to move its process into the systemd user.slice
-			// even with --cgroup-manager cgroupfs.  This happens because slirp4netns
-			// manages its own cgroup independently of Podman's cgroup manager setting.
-			// Installing pasta (from the passt package) eliminates this entirely —
-			// pasta is the modern Podman 5.x default and does not interact with dbus.
-			fmt.Println("  Cause: slirp4netns is trying to reach the systemd user session bus")
-			fmt.Println("         (even with cgroupfs cgroup manager) and fails because no")
-			fmt.Println("         user-session dbus socket is available for the service account.")
-			fmt.Println("  Fix (recommended): install pasta (passt package) and re-run the installer:")
-			fmt.Println("    sudo dnf install -y passt   # RHEL/AlmaLinux/Rocky")
-			fmt.Println("    sudo apt-get install -y passt  # Ubuntu/Debian")
-			fmt.Println("    sudo featherdeploy update")
-			fmt.Println("  Fix (alternative): enable the systemd user session for the service account:")
+			fmt.Println("  Cause: rootless Podman was executed without a valid login session.")
+			fmt.Println("         On cgroup v2, slirp4netns expects a real user session and")
+			fmt.Println("         its DBus/user.slice integration fails outside that context.")
+			fmt.Println("  Fix:")
 			fmt.Printf("    sudo loginctl enable-linger %s\n", username)
-			fmt.Printf("    sudo systemctl --machine=%s@ --user start dbus.socket\n", username)
+			fmt.Println("    deploy the updated FeatherDeploy build and run: sudo featherdeploy update")
+			fmt.Println("  Manual verification:")
+			fmt.Printf("    sudo systemd-run --machine=%s@ --quiet --user --collect --pipe --wait podman run --rm docker.io/library/alpine true\n", username)
 		case strings.Contains(outStr, "permission denied"):
 			// Home dir was corrected above. If it still fails, the storage
 			// directory doesn't exist or has wrong ownership.
@@ -1059,9 +1049,10 @@ var pkgManagers = map[string]pkgCmd{
 		// --network <name>' fails with the misleading error "network not found"
 		// (netavark tries to exec aardvark-dns, gets ENOENT, exits 127, and
 		// Podman maps the helper failure to "unable to find network").
-		// passt (pasta) is the modern rootless network namespace helper that
-		// does NOT interact with systemd dbus, replacing problematic slirp4netns.
-		install: []string{"apt-get", "install", "-y", "podman", "crun", "caddy", "netavark", "aardvark-dns", "passt"},
+		// passt is still useful to have available, but FeatherDeploy pins
+		// slirp4netns for rootless user-defined networks because inter-container
+		// connectivity is a first-class requirement.
+		install: []string{"apt-get", "install", "-y", "podman", "crun", "caddy", "netavark", "aardvark-dns", "slirp4netns", "passt"},
 	},
 	"dnf": {
 		update: []string{"dnf", "check-update"},
@@ -1069,8 +1060,9 @@ var pkgManagers = map[string]pkgCmd{
 		// RHEL 9 / AlmaLinux / Rocky Linux. Without them, `podman network create`
 		// appears to succeed (writes a JSON file) but `podman run --network <name>`
 		// exits with code 127 because the netavark binary is missing.
-		// passt (pasta) is the modern rootless network helper — avoids dbus issues.
-		install: []string{"dnf", "install", "-y", "podman", "crun", "caddy", "netavark", "aardvark-dns", "passt"},
+		// passt is installed as an available helper, but FeatherDeploy keeps
+		// slirp4netns as the explicit rootless network command for named networks.
+		install: []string{"dnf", "install", "-y", "podman", "crun", "caddy", "netavark", "aardvark-dns", "slirp4netns", "passt"},
 	},
 	"yum": {
 		update: nil,
@@ -1078,11 +1070,11 @@ var pkgManagers = map[string]pkgCmd{
 		// is the CNI fallback. All are listed — yum ignores unavailable packages
 		// when using --skip-broken.
 		install: []string{"yum", "install", "-y", "--skip-broken", "podman", "crun",
-			"netavark", "aardvark-dns", "containernetworking-plugins", "passt"},
+			"netavark", "aardvark-dns", "slirp4netns", "containernetworking-plugins", "passt"},
 	},
 	"pacman": {
 		update:  []string{"pacman", "-Sy"},
-		install: []string{"pacman", "-S", "--noconfirm", "podman", "crun", "caddy", "netavark", "passt"},
+		install: []string{"pacman", "-S", "--noconfirm", "podman", "crun", "caddy", "netavark", "aardvark-dns", "slirp4netns", "passt"},
 	},
 	"apk": {
 		update:  []string{"apk", "update"},
@@ -1096,11 +1088,10 @@ const rqliteSystemdUnit = "/etc/systemd/system/rqlite.service"
 // configureCrun sets up crun as the default Podman OCI runtime and forces
 // cgroupfs cgroup management.
 //
-// cgroup_manager=cgroupfs is critical: the service user runs under a systemd
-// *system* unit with no interactive user session, so there is no dbus socket.
-// If the cgroup manager is "systemd", crun calls sd-bus to create a cgroup
-// scope and fails with "Interactive authentication required."  cgroupfs
-// bypasses dbus entirely.
+// cgroup_manager=cgroupfs is critical: even with a PAM/logind session, this
+// service still runs under a system unit and should not depend on crun talking
+// to systemd over sd-bus just to manage container cgroups. cgroupfs keeps the
+// runtime behavior stable and avoids scope-creation failures.
 func configureCrun() {
 	if _, err := exec.LookPath("crun"); err != nil {
 		fmt.Println("  WARNING: crun not found — skipping Podman runtime config")
@@ -1155,53 +1146,36 @@ func configureCrun() {
 		ns = strings.Replace(ns, "[network]", "[network]\nnetwork_backend = \"netavark\"", 1)
 	}
 
-	// Set default_rootless_network_cmd = "pasta" if pasta is available.
-	// This is the SYSTEM-LEVEL override — Podman reads this before the
-	// per-user containers.conf. Without it, some Podman builds ignore the
-	// user-level setting and default to slirp4netns, causing the dbus error.
-	pastaSystemPaths := []string{"/usr/bin/pasta", "/usr/local/bin/pasta", "/usr/libexec/pasta"}
-	pastaSystemFound := false
-	for _, pp := range pastaSystemPaths {
-		if _, statErr := os.Stat(pp); statErr == nil {
-			pastaSystemFound = true
-			break
-		}
-	}
-	if pastaSystemFound {
-		if strings.Contains(ns, "default_rootless_network_cmd") {
-			ns = regexp.MustCompile(`(?m)^\s*default_rootless_network_cmd\s*=.*$`).
-				ReplaceAllString(ns, `default_rootless_network_cmd = "pasta"`)
-		} else {
-			ns = strings.Replace(ns, "[network]", "[network]\ndefault_rootless_network_cmd = \"pasta\"", 1)
-		}
+	// FeatherDeploy relies on user-defined networks for internal service
+	// communication. Podman's own rootless docs note that pasta defaults can make
+	// inter-container connectivity surprising, so pin slirp4netns explicitly.
+	if strings.Contains(ns, "default_rootless_network_cmd") {
+		ns = regexp.MustCompile(`(?m)^\s*default_rootless_network_cmd\s*=.*$`).
+			ReplaceAllString(ns, `default_rootless_network_cmd = "slirp4netns"`)
+	} else {
+		ns = strings.Replace(ns, "[network]", "[network]\ndefault_rootless_network_cmd = \"slirp4netns\"", 1)
 	}
 
 	// Add helper_binaries_dir so Podman searches /usr/bin and /usr/local/bin for
-	// helper binaries (pasta, slirp4netns, etc.).  On Debian/Ubuntu, pasta is
-	// installed to /usr/bin/pasta by the passt package, but Podman's compiled-in
-	// helper search path only includes /usr/libexec/podman and /usr/lib/podman.
-	// Without this, Podman can't find pasta, exits 127, and falls back to
-	// slirp4netns — which causes the user.slice/dbus permission error.
+	// helper binaries such as slirp4netns, netavark, aardvark-dns, and pasta.
+	// Several distro builds place these outside Podman's compiled-in helper path.
 	const helperBinDirs = `helper_binaries_dir = ["/usr/libexec/podman", "/usr/lib/podman", "/usr/local/lib/podman", "/usr/bin", "/usr/local/bin"]`
 	if !strings.Contains(ns, "helper_binaries_dir") {
 		ns = strings.Replace(ns, "[engine]", "[engine]\n"+helperBinDirs, 1)
 	} else {
-		// Ensure /usr/bin is included for distros that install pasta/slirp4netns there
+		// Ensure /usr/bin is included for distros that install helper binaries there.
 		if !strings.Contains(ns, "/usr/bin") {
 			ns = regexp.MustCompile(`(?m)^\s*helper_binaries_dir\s*=.*$`).
 				ReplaceAllString(ns, helperBinDirs)
 		}
 	}
 
-	// slirp4netns_args: pass --disable-sandbox to prevent slirp4netns from
-	// attempting to move to the systemd user.slice via dbus.  Without this,
-	// slirp4netns logs "failed to move rootless netns process to user.slice"
-	// on every container start when no user-session dbus socket is present.
-	// --disable-sandbox disables cgroup isolation (which requires the dbus move)
-	// but keeps the network namespace setup working correctly.
-	if !strings.Contains(ns, "slirp4netns_args") {
-		ns = strings.Replace(ns, "[network]", "[network]\nslirp4netns_args = [\"--disable-sandbox\"]", 1)
-	}
+	// Rootless FeatherDeploy relies on user-defined networks for internal service
+	// communication. Podman's own rootless docs note that pasta defaults can make
+	// inter-container connectivity surprising, so we pin slirp4netns here and let
+	// the service run inside a real PAM/logind session instead of trying to hack
+	// around the missing session via unsupported config keys.
+	ns = regexp.MustCompile(`(?m)^\s*slirp4netns_args\s*=.*$\n?`).ReplaceAllString(ns, "")
 
 	writeFile(confFile, ns, 0644)
 	fmt.Println("  ✓ network_backend=netavark set in", confFile)
@@ -1477,6 +1451,11 @@ Type=simple
 User={{.User}}
 Group={{.User}}
 EnvironmentFile={{.EnvFile}}
+# Create a real PAM/logind session for the service user.
+# Podman's rootless+cgroupv2 mode expects a valid login session; without one,
+# slirp4netns may fail to integrate with the user session and custom networks
+# break even when XDG paths look correct.
+PAMName=login
 # Rootless podman needs HOME to locate its image store (~/.local/share/containers)
 # and XDG_RUNTIME_DIR for its socket / networking namespace.
 # RuntimeDirectory creates /run/featherdeploy-runtime owned by the service user
@@ -1491,12 +1470,6 @@ Environment=XDG_RUNTIME_DIR=/run/user/{{.UID}}
 Environment=XDG_CONFIG_HOME={{.DataDir}}/.config
 Environment=XDG_DATA_HOME={{.DataDir}}/.local/share
 Environment=XDG_CACHE_HOME={{.DataDir}}/.cache
-# Disable dbus: an empty value is treated identically to "unset" by sd-bus,
-# which then falls back to the default /run/user/<uid>/bus socket and causes
-# slirp4netns to attempt a user.slice cgroup move that fails with
-# "connect: permission denied". "disabled:" is an invalid address that makes
-# sd-bus abort immediately without touching any real socket.
-Environment=DBUS_SESSION_BUS_ADDRESS=disabled:
 # Guarantee /run/user/<uid> exists before ExecStart in case systemd-logind
 # has not yet created it (e.g. first boot, or linger just enabled).
 # The '+' prefix runs this pre-start command as root.

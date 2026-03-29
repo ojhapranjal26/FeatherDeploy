@@ -485,65 +485,183 @@ JOIN_TOKEN="{{.Token}}"
 NODE_BINARY="/usr/local/bin/featherdeploy-node"
 SERVER_BINARY="/usr/local/bin/featherdeploy"
 RQLITE_VER="8.36.5"
+SVC_USER="featherdeploy"
 CA_CERT='{{.CACert}}'
 SSH_PUB_KEY='{{.SSHPubKey}}'
 
 if [ "$(id -u)" -ne 0 ]; then
-  echo "ERROR: run as root (sudo)." >&2; exit 1
+	echo "ERROR: run as root (sudo)." >&2; exit 1
 fi
 
 echo "==> FeatherDeploy Node Setup"
 echo "    Main server: $MAIN_URL"
 echo ""
 
-# -- Install dependencies (podman + crun + caddy + rqlite) --------------------
+run_as_user_session() {
+	local user="$1"
+	shift
+	local shell_cmd="$*"
+	if command -v systemd-run >/dev/null 2>&1; then
+		systemd-run --machine="${user}@" --quiet --user --collect --pipe --wait \
+			/bin/sh -lc "cd / && ${shell_cmd}" && return 0
+	fi
+	su -s /bin/sh "$user" -c "cd / && ${shell_cmd}"
+}
+
+reset_host() {
+	echo "==> Resetting previous FeatherDeploy/node state..."
+	for svc in featherdeploy featherdeploy-node featherdeploy-brain rqlite rqlite-node; do
+		systemctl stop "$svc" 2>/dev/null || true
+		systemctl disable "$svc" 2>/dev/null || true
+	done
+	if id -u "$SVC_USER" >/dev/null 2>&1; then
+		local svc_uid svc_home
+		svc_uid=$(id -u "$SVC_USER")
+		svc_home=$(getent passwd "$SVC_USER" | cut -d: -f6 || echo "/var/lib/featherdeploy")
+		mkdir -p "/run/user/${svc_uid}/containers"
+		chown -R "$SVC_USER:$SVC_USER" "/run/user/${svc_uid}" 2>/dev/null || true
+		chmod 700 "/run/user/${svc_uid}" "/run/user/${svc_uid}/containers" 2>/dev/null || true
+		if command -v podman >/dev/null 2>&1; then
+			run_as_user_session "$SVC_USER" \
+				"HOME=${svc_home} XDG_RUNTIME_DIR=/run/user/${svc_uid} XDG_CONFIG_HOME=${svc_home}/.config XDG_DATA_HOME=${svc_home}/.local/share XDG_CACHE_HOME=${svc_home}/.cache podman system reset --force 2>&1" \
+				|| true
+		fi
+		if command -v loginctl >/dev/null 2>&1; then
+			loginctl disable-linger "$SVC_USER" 2>/dev/null || true
+		fi
+		pkill -9 -u "$SVC_USER" 2>/dev/null || true
+	fi
+	rm -f /etc/systemd/system/featherdeploy.service
+	rm -f /etc/systemd/system/featherdeploy-node.service
+	rm -f /etc/systemd/system/featherdeploy-brain.service
+	rm -f /etc/systemd/system/rqlite.service
+	rm -f /etc/systemd/system/rqlite-node.service
+	systemctl daemon-reload
+	systemctl reset-failed featherdeploy featherdeploy-node featherdeploy-brain rqlite rqlite-node 2>/dev/null || true
+	rm -f /usr/local/bin/featherdeploy
+	rm -f /usr/local/bin/featherdeploy-node
+	rm -f /usr/local/bin/featherdeploy-update
+	rm -f /usr/local/bin/rqlite
+	rm -f /usr/local/bin/rqlited
+	rm -rf /etc/featherdeploy /var/lib/featherdeploy /home/featherdeploy /run/featherdeploy-runtime
+	rm -rf /etc/containers /var/lib/containers /var/cache/libpod
+	sed -i "/^${SVC_USER}:/d" /etc/subuid 2>/dev/null || true
+	sed -i "/^${SVC_USER}:/d" /etc/subgid 2>/dev/null || true
+	rm -f "/var/lib/systemd/linger/${SVC_USER}"
+	if id -u "$SVC_USER" >/dev/null 2>&1; then
+		userdel -r "$SVC_USER" 2>/dev/null || userdel "$SVC_USER" 2>/dev/null || true
+	fi
+	echo "  Previous state cleared"
+}
+
 install_rqlite() {
-  command -v rqlited >/dev/null 2>&1 && { echo "  rqlited already installed"; return; }
-  echo "==> Installing rqlite ${RQLITE_VER}..."
-  local TAR="rqlite-v${RQLITE_VER}-linux-amd64.tar.gz"
-  curl -fsSL "https://github.com/rqlite/rqlite/releases/download/v${RQLITE_VER}/${TAR}" -o "/tmp/${TAR}"
-  local DIR; DIR=$(tar -tzf "/tmp/${TAR}" | head -1 | cut -f1 -d"/")
-  tar -xzf "/tmp/${TAR}" -C /tmp/
-  install -m 755 "/tmp/${DIR}/rqlited" /usr/local/bin/rqlited
-  install -m 755 "/tmp/${DIR}/rqlite"  /usr/local/bin/rqlite
-  rm -rf "/tmp/${TAR}" "/tmp/${DIR}"
-  echo "  rqlited installed"
+	command -v rqlited >/dev/null 2>&1 && { echo "  rqlited already installed"; return; }
+	echo "==> Installing rqlite ${RQLITE_VER}..."
+	local TAR="rqlite-v${RQLITE_VER}-linux-amd64.tar.gz"
+	curl -fsSL "https://github.com/rqlite/rqlite/releases/download/v${RQLITE_VER}/${TAR}" -o "/tmp/${TAR}"
+	local DIR; DIR=$(tar -tzf "/tmp/${TAR}" | head -1 | cut -f1 -d"/")
+	tar -xzf "/tmp/${TAR}" -C /tmp/
+	install -m 755 "/tmp/${DIR}/rqlited" /usr/local/bin/rqlited
+	install -m 755 "/tmp/${DIR}/rqlite"  /usr/local/bin/rqlite
+	rm -rf "/tmp/${TAR}" "/tmp/${DIR}"
+	echo "  rqlited installed"
 }
 
 configure_crun() {
-  command -v crun >/dev/null 2>&1 || return
-  mkdir -p /etc/containers
-  local c=/etc/containers/containers.conf
-  [ -f "$c" ] || printf '[engine]\nruntime = "crun"\n' > "$c"
-  grep -q 'runtime' "$c" || printf '\n[engine]\nruntime = "crun"\n' >> "$c"
-  echo "  crun configured as Podman runtime"
+	command -v crun >/dev/null 2>&1 || return
+	mkdir -p /etc/containers
+	cat > /etc/containers/containers.conf <<'CONF'
+[engine]
+runtime = "crun"
+cgroup_manager = "cgroupfs"
+helper_binaries_dir = ["/usr/libexec/podman", "/usr/lib/podman", "/usr/local/lib/podman", "/usr/bin", "/usr/local/bin"]
+
+[network]
+network_backend = "netavark"
+default_rootless_network_cmd = "slirp4netns"
+CONF
+	echo "  crun configured as Podman runtime"
 }
 
+ensure_service_user() {
+	if ! id -u "$SVC_USER" >/dev/null 2>&1; then
+		useradd --system --home-dir /var/lib/featherdeploy --create-home --shell /usr/sbin/nologin "$SVC_USER"
+		echo "  Created service user: $SVC_USER"
+	fi
+	mkdir -p /var/lib/featherdeploy
+	chown -R "$SVC_USER:$SVC_USER" /var/lib/featherdeploy
+}
+
+configure_rootless_podman() {
+	local svc_home svc_uid svc_netdir
+	svc_home=$(getent passwd "$SVC_USER" | cut -d: -f6 || echo "/var/lib/featherdeploy")
+	svc_uid=$(id -u "$SVC_USER")
+	svc_netdir="${svc_home}/.local/share/containers/storage/networks"
+
+	for subfile in /etc/subuid /etc/subgid; do
+		grep -q "^${SVC_USER}:" "$subfile" 2>/dev/null || echo "${SVC_USER}:100000:65536" >> "$subfile"
+	done
+	for newmap in /usr/bin/newuidmap /usr/bin/newgidmap /usr/sbin/newuidmap /usr/sbin/newgidmap; do
+		[ -f "$newmap" ] && chmod u+s "$newmap" || true
+	done
+	if command -v loginctl >/dev/null 2>&1; then
+		loginctl enable-linger "$SVC_USER" 2>/dev/null || true
+	fi
+
+	mkdir -p "${svc_home}/.config/containers" "${svc_netdir}" "${svc_home}/.cache" "/run/user/${svc_uid}/containers"
+	cat > "${svc_home}/.config/containers/containers.conf" <<USERCONF
+[engine]
+cgroup_manager = "cgroupfs"
+
+[network]
+network_backend = "netavark"
+default_rootless_network_cmd = "slirp4netns"
+network_config_dir = "${svc_netdir}"
+USERCONF
+	rm -rf "${svc_home}/.config/containers/networks"
+	chown -R "$SVC_USER:$SVC_USER" "${svc_home}" "/run/user/${svc_uid}"
+	chmod 700 "/run/user/${svc_uid}" "/run/user/${svc_uid}/containers"
+
+	if command -v podman >/dev/null 2>&1; then
+		run_as_user_session "$SVC_USER" \
+			"HOME=${svc_home} XDG_RUNTIME_DIR=/run/user/${svc_uid} XDG_CONFIG_HOME=${svc_home}/.config XDG_DATA_HOME=${svc_home}/.local/share XDG_CACHE_HOME=${svc_home}/.cache podman system migrate" \
+			>/dev/null 2>&1 || true
+	fi
+	echo "  Rootless Podman prepared for $SVC_USER"
+}
+
+reset_host
+
 if command -v apt-get >/dev/null 2>&1; then
-  export DEBIAN_FRONTEND=noninteractive
-  apt-get update -y -q
-  apt-get install -y -q curl podman crun caddy openssh-server netavark aardvark-dns passt 2>/dev/null || apt-get install -y -q curl podman caddy openssh-server
+	export DEBIAN_FRONTEND=noninteractive
+	apt-get update -y -q
+	apt-get install -y -q curl uidmap slirp4netns netavark aardvark-dns passt 2>/dev/null || true
+	apt-get install -y -q podman crun caddy openssh-server 2>/dev/null || apt-get install -y -q curl podman caddy openssh-server uidmap
 elif command -v dnf >/dev/null 2>&1; then
-  dnf install -y -q curl podman crun caddy openssh-server netavark aardvark-dns passt 2>/dev/null || dnf install -y -q curl podman caddy openssh-server
+	dnf install -y -q curl shadow-utils slirp4netns netavark aardvark-dns passt 2>/dev/null || true
+	dnf install -y -q podman crun caddy openssh-server 2>/dev/null || dnf install -y -q curl podman caddy openssh-server
 elif command -v yum >/dev/null 2>&1; then
-  yum install -y -q curl podman openssh-server netavark aardvark-dns 2>/dev/null || yum install -y -q curl podman openssh-server
+	yum install -y -q curl shadow-utils slirp4netns netavark aardvark-dns passt 2>/dev/null || true
+	yum install -y -q podman crun openssh-server 2>/dev/null || yum install -y -q curl podman openssh-server
 elif command -v apk >/dev/null 2>&1; then
-  apk add --no-cache curl podman caddy crun openssh 2>/dev/null || apk add --no-cache curl podman caddy openssh
+	apk add --no-cache curl podman caddy crun openssh 2>/dev/null || apk add --no-cache curl podman caddy openssh
+	apk add --no-cache slirp4netns netavark aardvark-dns passt 2>/dev/null || true
 fi
 
 install_rqlite
 configure_crun
+ensure_service_user
+configure_rootless_podman
 
 # -- Passwordless SSH: install brain's public key -----------------------------
 if [ -n "$SSH_PUB_KEY" ]; then
-  mkdir -p /root/.ssh
-  chmod 700 /root/.ssh
-  # Add only if not already present
-  grep -qxF "$SSH_PUB_KEY" /root/.ssh/authorized_keys 2>/dev/null || \
-    echo "$SSH_PUB_KEY" >> /root/.ssh/authorized_keys
-  chmod 600 /root/.ssh/authorized_keys
-  systemctl enable --now ssh sshd 2>/dev/null || true
-  echo "  SSH public key installed (passwordless access configured)"
+	mkdir -p /root/.ssh
+	chmod 700 /root/.ssh
+	grep -qxF "$SSH_PUB_KEY" /root/.ssh/authorized_keys 2>/dev/null || \
+		echo "$SSH_PUB_KEY" >> /root/.ssh/authorized_keys
+	chmod 600 /root/.ssh/authorized_keys
+	systemctl enable --now ssh sshd 2>/dev/null || true
+	echo "  SSH public key installed (passwordless access configured)"
 fi
 
 # -- Download featherdeploy-node binary ---------------------------------------
@@ -555,7 +673,7 @@ echo "  Node binary installed: $NODE_BINARY"
 # -- Download featherdeploy server binary (needed for brain failover) ---------
 echo "==> Downloading featherdeploy server binary (for failover)..."
 curl -fsSL "${MAIN_URL}/api/nodes/server-binary?token=${JOIN_TOKEN}" -o "$SERVER_BINARY" || \
-  echo "  (server binary not available yet — will retry on next update)"
+	echo "  (server binary not available yet — will retry on next update)"
 chmod +x "$SERVER_BINARY" 2>/dev/null || true
 echo "  Server binary cached: $SERVER_BINARY"
 
