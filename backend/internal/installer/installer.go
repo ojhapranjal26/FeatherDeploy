@@ -161,12 +161,24 @@ func Run() {
 
 	// ── Step 5a: Write + start rqlite service ───────────────────────────────
 	fmt.Println("\n── Configuring rqlite ──────────────────────────────────────────")
+	// On a fresh install, always wipe any leftover Raft state so rqlite
+	// bootstraps cleanly. Old data (from a failed install, partial uninstall,
+	// or version mismatch) causes rqlite to exit status=1 immediately.
+	rqliteDataDir := filepath.Join(dataDir, "rqlite-data")
+	if err := os.RemoveAll(rqliteDataDir); err != nil {
+		slog.Warn("could not wipe stale rqlite-data (non-fatal)", "err", err)
+	} else {
+		fmt.Printf("  ✓ cleared rqlite-data at %s\n", rqliteDataDir)
+	}
+	if err := os.MkdirAll(rqliteDataDir, 0755); err == nil {
+		exec.Command("chown", "-R", svcUser+":"+svcUser, rqliteDataDir).Run() //nolint
+	}
 	writeRqliteService(svcUser)
 	mustRun("systemctl", "daemon-reload")
 	mustRun("systemctl", "enable", "rqlite")
 	mustRun("systemctl", "start", "rqlite")
 	fmt.Println("  Waiting for rqlite to be ready...")
-	if err := waitForRqlite(30 * time.Second); err != nil {
+	if err := waitForRqlite(60 * time.Second); err != nil {
 		die("rqlite did not start: %v", err)
 	}
 	fmt.Println("  ✓ rqlite is ready")
@@ -842,7 +854,8 @@ func downloadHTTP(url, destPath string) error {
 
 // waitForRqlite polls the rqlite /readyz endpoint until it responds or times out.
 // /readyz (unlike /status) only returns 200 once Raft leader election is complete
-// and the node is ready to accept write requests.
+// and the node is ready to accept write requests.  On timeout, the last 40 lines
+// of the rqlite journal are printed so the operator can see the actual error.
 func waitForRqlite(maxWait time.Duration) error {
 	deadline := time.Now().Add(maxWait)
 	for time.Now().Before(deadline) {
@@ -857,6 +870,13 @@ func waitForRqlite(maxWait time.Duration) error {
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
+	// Dump journal so the operator can see why rqlite crashed.
+	fmt.Println("\n  ── rqlite journal (last 40 lines) ──────────────────────────")
+	jctl := exec.Command("journalctl", "-u", "rqlite", "-n", "40", "--no-pager")
+	jctl.Stdout = os.Stdout
+	jctl.Stderr = os.Stderr
+	jctl.Run() //nolint
+	fmt.Println("  ──────────────────────────────────────────────────────────")
 	return fmt.Errorf("rqlite not ready after %s", maxWait)
 }
 
@@ -872,11 +892,11 @@ Group={{.User}}
 # Ensure the data directory is owned by the service user on every start
 # (handles reboots where ownership may be reset or the dir was created as root)
 ExecStartPre=/bin/bash -c 'mkdir -p {{.DataDir}}/rqlite-data && chown -R {{.User}}:{{.User}} {{.DataDir}}/rqlite-data'
-ExecStart=/usr/local/bin/rqlited \\
-  -node-id=main \\
-  -http-addr=127.0.0.1:4001 \\
-  -raft-addr=0.0.0.0:4002 \\
-  -bootstrap-expect=1 \\
+ExecStart=/usr/local/bin/rqlited \
+  -node-id=main \
+  -http-addr=127.0.0.1:4001 \
+  -raft-addr=0.0.0.0:4002 \
+  -bootstrap-expect=1 \
   {{.DataDir}}/rqlite-data
 Restart=always
 RestartSec=5s
