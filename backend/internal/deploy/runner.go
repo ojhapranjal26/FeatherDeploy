@@ -1197,9 +1197,11 @@ func ensureProjectNetwork(projectID int64) error {
 		return fmt.Errorf("podman network create %s: %v — %s%s", name, err, strings.TrimSpace(string(out)), hint)
 	}
 
-	// Poll up to 5 s for inspect to confirm both JSON and runtime state are ready.
-	// netavark bridges are wired asynchronously on some kernels.
-	for i := 0; i < 10; i++ {
+	// Poll up to 15 s for inspect to confirm both JSON and runtime state are ready.
+	// netavark bridges are wired asynchronously on some kernels, and rootless
+	// podman can take a few seconds to finish registering a freshly created
+	// named network before 'run --network' accepts it.
+	for i := 0; i < 30; i++ {
 		if podmanCmd("network", "inspect", name).Run() == nil {
 			// Extra settle before the caller passes it to 'podman run'.
 			time.Sleep(300 * time.Millisecond)
@@ -1222,14 +1224,13 @@ func ensureProjectNetwork(projectID int64) error {
 
 	lsOut, _ := podmanCmd("network", "ls").CombinedOutput()
 	return fmt.Errorf(
-		"network %s still not visible after 5s\npodman network ls:\n%s\n"+
-			"Most likely cause: aardvark-dns is not installed.\n"+
-			"  'podman run --network' requires aardvark-dns for DNS setup.\n"+
-			"  When aardvark-dns is missing, netavark exits 127 and Podman\n"+
-			"  reports 'network not found' (even though the network JSON exists).\n"+
-			"  Fix (Ubuntu/Debian):         sudo apt-get install -y aardvark-dns\n"+
-			"  Fix (RHEL/AlmaLinux/Rocky): sudo dnf install -y aardvark-dns netavark\n"+
-			"  Then run: sudo featherdeploy update",
+		"network %s still not ready after 15s\npodman network ls:\n%s\n"+
+			"Most likely cause: the rootless network backend is not fully settled yet,\n"+
+			"or netavark cannot find its helper binaries.\n"+
+			"  Required packages: netavark + aardvark-dns\n"+
+			"  Ubuntu / Debian:   sudo apt-get install -y netavark aardvark-dns slirp4netns\n"+
+			"  RHEL / Fedora:     sudo dnf install -y netavark aardvark-dns slirp4netns passt\n"+
+			"  Then run: sudo systemctl restart featherdeploy && sudo featherdeploy update",
 		name, strings.TrimSpace(string(lsOut)))
 }
 

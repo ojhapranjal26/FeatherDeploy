@@ -883,10 +883,11 @@ func ensureNetworkingBackend(username, homedir string) {
 			// non-zero when setting up the container's network namespace.
 			fmt.Println("  Cause: network was created but 'podman run' cannot attach to it.")
 			fmt.Println("         This is usually caused by netavark failing silently, or by")
-			fmt.Println("         slirp4netns aborting due to missing dbus (see user.slice error).")
-			fmt.Println("  Fix: install pasta and re-run the installer:")
-			fmt.Println("    sudo dnf install -y passt netavark aardvark-dns  # RHEL/AlmaLinux/Rocky")
-			fmt.Println("    sudo apt-get install -y passt netavark            # Ubuntu/Debian")
+			fmt.Println("         a missing netavark/aardvark-dns helper or stale rootless storage.")
+			fmt.Println("  Fix: ensure the named-network packages are installed, then re-run:")
+			fmt.Println("    sudo dnf install -y netavark aardvark-dns slirp4netns passt  # RHEL/AlmaLinux/Rocky")
+			fmt.Println("    sudo apt-get install -y netavark aardvark-dns slirp4netns    # Ubuntu/Debian")
+			fmt.Println("    sudo systemctl restart featherdeploy")
 			fmt.Println("    sudo featherdeploy update")
 		default:
 			fmt.Printf("  Diagnostics: sudo -u %s HOME=%s XDG_RUNTIME_DIR=%s podman network create test123 2>&1\n",
