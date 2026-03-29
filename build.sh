@@ -20,6 +20,7 @@ RQLITE_UNIT="/etc/systemd/system/rqlite.service"
 DATA_DB="/var/lib/featherdeploy/deploy.db"
 RQLITE_DATA_DIR="/var/lib/featherdeploy/rqlite-data"
 SVC_USER="featherdeploy"
+RQLITE_VER="8.36.5"
 
 # -- 0. Must run as root
 if [ "$(id -u)" -ne 0 ]; then
