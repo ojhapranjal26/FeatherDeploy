@@ -439,26 +439,6 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 	log.add("[podman] podman run -d --name %s -p %d:%d --network %s %s", cName, hostPort, appPort, networkName, imageName)
 	out, err := podmanCmd(runArgs...).CombinedOutput()
 	if err != nil {
-		outStr := strings.TrimSpace(string(out))
-		// "network not found" means the network config JSON exists but the
-		// runtime namespace state is gone (split-brain from XDG_RUNTIME_DIR
-		// change).  Force-remove the stale entry and recreate, then retry once.
-		if strings.Contains(outStr, "network not found") || strings.Contains(outStr, "unable to find network") {
-			log.add("[network] stale network state detected — force-recreating %s and retrying", networkName)
-			// Remove stale network config so ensureProjectNetwork starts clean.
-			podmanCmd("network", "rm", "-f", networkName).Run() //nolint
-			// Give netavark a moment to clean up the old state before recreating.
-			time.Sleep(1 * time.Second)
-			if recreateErr := ensureProjectNetwork(projectID); recreateErr == nil {
-				// Brief settle before the run to let netavark finish wiring.
-				time.Sleep(500 * time.Millisecond)
-				out, err = podmanCmd(runArgs...).CombinedOutput()
-			} else {
-				log.add("[network] recreate failed: %v", recreateErr)
-			}
-		}
-	}
-	if err != nil {
 		log.add("ERROR: podman run failed: %v\n%s", err, strings.TrimSpace(string(out)))
 		markFailed(db, depID, svcID, log.text())
 		return
@@ -1112,37 +1092,44 @@ func classifyNetworkError(out string) string {
 	}
 }
 
-// ensureProjectNetwork creates the per-project podman bridge network if it
-// does not already exist. We use "network inspect" to check existence first
-// rather than relying on --ignore, which behaves inconsistently across Podman
-// versions and can silently succeed without actually creating the network.
+// ensureProjectNetwork guarantees the per-project podman bridge network exists
+// AND is ready for 'podman run --network' to use it.
 //
-// If the network exists but has NO actively-running containers, it is treated
-// as stale state from a previous XDG_RUNTIME_DIR context (the network config
-// JSON exists in persistent storage but the runtime namespace state is gone)
-// and is force-removed before being recreated fresh.  This is the root cause
-// of "network not found" errors after a service restart that changes
-// XDG_RUNTIME_DIR: inspect reads the JSON and returns 0, but podman run tries
-// to wire up the network namespace via the runtime state which no longer exists.
+// Key design decisions:
+//
+//  1. 'podman network inspect' only reads the JSON config file from disk.
+//     It does NOT verify the network is wired into libpod's runtime state.
+//     A network can pass inspect but fail 'podman run --network' if the
+//     libpod DB was cleared (e.g. after 'podman system migrate' on update)
+//     while the config JSON survived.
+//
+//  2. Therefore: if NO containers are actively using the network, we always
+//     remove+recreate it so both the JSON and the libpod runtime state are
+//     freshly consistent.  This is safe — no containers means no disruption —
+//     and eliminates the entire class of "network not found" split-brain.
+//
+//  3. After network create, we poll inspect for up to 5 s so we never hand
+//     back to the caller before the network is confirmed visible.
 func ensureProjectNetwork(projectID int64) error {
 	name := projectNetworkName(projectID)
 
-	if err := podmanCmd("network", "inspect", name).Run(); err == nil {
-		// Network config exists.  Check whether any containers are actively
-		// running on it.  If none are, the network may be stale runtime state —
-		// remove it so it is recreated with the current XDG_RUNTIME_DIR context.
-		ctrOut, _ := podmanCmd("ps", "-q", "--filter", "network="+name).Output()
-		if strings.TrimSpace(string(ctrOut)) != "" {
-			// Live containers present — the network is in use, leave it alone.
-			return nil
-		}
-		// No running containers — safe to remove and recreate.
-		podmanCmd("network", "rm", name).Run() //nolint
+	// Check whether any containers are actively running on this network.
+	// 'podman ps --filter network' queries live runtime state, not just config JSON.
+	ctrOut, _ := podmanCmd("ps", "-q", "--filter", "network="+name).Output()
+	if strings.TrimSpace(string(ctrOut)) != "" {
+		// Live containers are on this network — it is definitely healthy.
+		return nil
 	}
-	// Network does not exist; create it.
+
+	// No running containers: remove whatever state exists (stale JSON, stale
+	// libpod entry) and recreate from scratch so the runtime is always fresh.
+	podmanCmd("network", "rm", "-f", name).Run() //nolint
+	// Give netavark/libpod time to finish tearing down old state.
+	time.Sleep(500 * time.Millisecond)
+
 	out, err := podmanCmd("network", "create", name).CombinedOutput()
 	if err != nil {
-		// A concurrent deployment may have created it between inspect and create.
+		// Race: another goroutine created it between our rm and create.
 		if strings.Contains(strings.ToLower(string(out)), "already exists") {
 			return nil
 		}
@@ -1153,19 +1140,23 @@ func ensureProjectNetwork(projectID int64) error {
 		}
 		return fmt.Errorf("podman network create %s: %v — %s%s", name, err, strings.TrimSpace(string(out)), hint)
 	}
-	// Verify the network actually exists after creation — catches silent failures
-	// where podman returns exit 0 but doesn’t write the network to storage.
-	if verErr := podmanCmd("network", "inspect", name).Run(); verErr != nil {
-		lsOut, _ := podmanCmd("network", "ls").CombinedOutput()
-		return fmt.Errorf(
-			"podman network create appeared to succeed but network %s not found afterwards: %v\n"+
-				"podman network ls:\n%s\n"+
-				"Likely cause: netavark not installed.\n"+
-				"  Fix (RHEL/AlmaLinux/Rocky): sudo dnf install -y netavark aardvark-dns\n"+
-				"  Fix (Ubuntu/Debian):         sudo apt-get install -y netavark",
-			name, verErr, strings.TrimSpace(string(lsOut)))
+
+	// Poll up to 5 s for inspect to confirm both JSON and runtime state are ready.
+	// netavark bridges are wired asynchronously on some kernels.
+	for i := 0; i < 10; i++ {
+		if podmanCmd("network", "inspect", name).Run() == nil {
+			// Extra 300 ms for libpod to finish registering internally
+			// before the caller passes it to 'podman run'.
+			time.Sleep(300 * time.Millisecond)
+			return nil
+		}
+		time.Sleep(500 * time.Millisecond)
 	}
-	return nil
+
+	lsOut, _ := podmanCmd("network", "ls").CombinedOutput()
+	return fmt.Errorf(
+		"network %s still not visible after 5s\npodman network ls:\n%s\nLikely cause: netavark not installed.\n  sudo dnf install -y netavark aardvark-dns",
+		name, strings.TrimSpace(string(lsOut)))
 }
 
 // DBNetworkAlias converts a database or service name (slug) into a valid
