@@ -1702,6 +1702,8 @@ func CreateDatabaseBackup(db *sql.DB, jwtSecret string, dbID int64) (string, str
 // GetDatabaseLogs returns the last 200 lines of stdout+stderr from the
 // database container. Returns an error when the container doesn't exist
 // (e.g. start failed before the container was created).
+// When the container exists but has no output (crash loop before any write),
+// it returns a diagnostic message with the container's restart count and state.
 func GetDatabaseLogs(dbID int64) (string, error) {
 	cName := fmt.Sprintf("fd-db-%d", dbID)
 	if !containerExists(cName) {
@@ -1711,7 +1713,20 @@ func GetDatabaseLogs(dbID int64) (string, error) {
 	if err != nil {
 		return string(out), fmt.Errorf("podman logs %s: %w", cName, err)
 	}
-	return string(out), nil
+	if logStr := strings.TrimSpace(string(out)); logStr != "" {
+		return logStr, nil
+	}
+	// Container exists but produced no output — likely crashing before first write.
+	// Inspect to surface the restart count and exit code as a diagnostic hint.
+	inspOut, inspErr := podmanCmd("inspect",
+		"--format", "status={{.State.Status}} restarts={{.RestartCount}} exitcode={{.State.ExitCode}}",
+		cName,
+	).Output()
+	if inspErr == nil {
+		info := strings.TrimSpace(string(inspOut))
+		return fmt.Sprintf("[No log output]\nContainer diagnostic: %s\n\nThe container is crashing before writing any logs.\nUse 'Restart database' from the Actions menu to recreate it with the latest settings.", info), nil
+	}
+	return "[No log output — container may be crashing immediately on startup. Try restarting from the Actions menu.]", nil
 }
 
 // UpdateDatabase persists configuration changes (db_version, network_public)
@@ -1936,11 +1951,12 @@ func removeContainerIfExists(name string) error {
 	if !containerExists(name) {
 		return nil
 	}
+	// Best-effort graceful stop first: if the container is already stopped or
+	// in a crash-restart loop (state = exited/restarting), podman stop will
+	// return an error.  We ignore that — podman rm -f handles all states.
 	stopCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	if out, err := podmanCmdCtx(stopCtx, "stop", "--time", "10", name).CombinedOutput(); err != nil {
-		return fmt.Errorf("stop container %s: %v — %s", name, err, strings.TrimSpace(string(out)))
-	}
+	podmanCmdCtx(stopCtx, "stop", "--time", "10", name).Run() //nolint
 	if out, err := podmanCmd("rm", "-f", name).CombinedOutput(); err != nil {
 		return fmt.Errorf("remove container %s: %v — %s", name, err, strings.TrimSpace(string(out)))
 	}

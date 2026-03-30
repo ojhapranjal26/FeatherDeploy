@@ -284,6 +284,23 @@ func (h *DatabaseHandler) Start(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "starting"})
 }
 
+// POST /api/projects/{projectID}/databases/{databaseID}/restart
+// Recreates the container from scratch using the stored configuration.
+// Safe to call on a running, stopped, or crash-looping database.
+func (h *DatabaseHandler) Restart(w http.ResponseWriter, r *http.Request) {
+	dbID, err := strconv.ParseInt(r.PathValue("databaseID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errMap("invalid databaseID"))
+		return
+	}
+	go func() {
+		if err := deploy.StartDatabase(h.db, h.jwtSecret, dbID); err != nil {
+			slog.Error("restart database", "db_id", dbID, "err", err)
+		}
+	}()
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "restarting"})
+}
+
 // POST /api/projects/{projectID}/databases/{databaseID}/stop
 func (h *DatabaseHandler) Stop(w http.ResponseWriter, r *http.Request) {
 	dbID, err := strconv.ParseInt(r.PathValue("databaseID"), 10, 64)

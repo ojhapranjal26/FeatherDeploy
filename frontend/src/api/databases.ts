@@ -66,6 +66,9 @@ export const databasesApi = {
   start: (projectId: string | number, databaseId: string | number): Promise<{ status: string }> =>
     client.post<{ status: string }>(`/projects/${projectId}/databases/${databaseId}/start`).then((r) => r.data),
 
+  restart: (projectId: string | number, databaseId: string | number): Promise<{ status: string }> =>
+    client.post<{ status: string }>(`/projects/${projectId}/databases/${databaseId}/restart`).then((r) => r.data),
+
   stop: (projectId: string | number, databaseId: string | number): Promise<{ status: string }> =>
     client.post<{ status: string }>(`/projects/${projectId}/databases/${databaseId}/stop`).then((r) => r.data),
 

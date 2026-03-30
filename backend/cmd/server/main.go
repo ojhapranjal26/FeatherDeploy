@@ -441,6 +441,7 @@ func serve() {
 				r.Get("/api/projects/{projectID}/databases/{databaseID}/backup", dbH.Backup)
 				r.Delete("/api/projects/{projectID}/databases/{databaseID}", dbH.Delete)
 				r.Post("/api/projects/{projectID}/databases/{databaseID}/start", dbH.Start)
+				r.Post("/api/projects/{projectID}/databases/{databaseID}/restart", dbH.Restart)
 				r.Post("/api/projects/{projectID}/databases/{databaseID}/stop", dbH.Stop)
 
 				// ── QR approve (authenticated) ────────────────────────────

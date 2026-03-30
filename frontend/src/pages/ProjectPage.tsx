@@ -5,7 +5,7 @@ import {
   Plus, ChevronLeft, Rocket, Settings2, Trash2,
   ExternalLink, GitBranch, Terminal, Database,
   Globe, AlertTriangle, Users, UserMinus, Loader2,
-  Play, Square, Download, Copy, BarChart2,
+  Play, Square, Download, Copy, BarChart2, RotateCcw,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { projectsApi, usersApi, type ProjectMember } from '@/api/projects'
@@ -304,6 +304,15 @@ function DatabaseCard({ database, projectId, canEdit }: { database: DatabaseReco
     onError: (err: unknown) => toast.error((err as any)?.response?.data?.error ?? 'Failed to stop database.'),
   })
 
+  const restartMutation = useMutation({
+    mutationFn: () => databasesApi.restart(projectId, database.id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['databases', projectId] })
+      toast.success('Database restart requested — container will be recreated.')
+    },
+    onError: (err: unknown) => toast.error((err as any)?.response?.data?.error ?? 'Failed to restart database.'),
+  })
+
   const deleteMutation = useMutation({
     mutationFn: () => databasesApi.delete(projectId, database.id),
     onSuccess: () => {
@@ -353,7 +362,7 @@ function DatabaseCard({ database, projectId, canEdit }: { database: DatabaseReco
   })
 
   const isSQLite = database.db_type === 'sqlite'
-  const isBusy = startMutation.isPending || stopMutation.isPending || deleteMutation.isPending || backupMutation.isPending || backupAndDeleteMutation.isPending
+  const isBusy = startMutation.isPending || stopMutation.isPending || restartMutation.isPending || deleteMutation.isPending || backupMutation.isPending || backupAndDeleteMutation.isPending
 
   return (
     <>
@@ -413,6 +422,11 @@ function DatabaseCard({ database, projectId, canEdit }: { database: DatabaseReco
                 {!isSQLite && database.status === 'running' && (
                   <DropdownMenuItem onClick={() => stopMutation.mutate()} disabled={isBusy}>
                     <Square className="mr-2 h-3.5 w-3.5" /> Stop database
+                  </DropdownMenuItem>
+                )}
+                {!isSQLite && (
+                  <DropdownMenuItem onClick={() => restartMutation.mutate()} disabled={isBusy}>
+                    <RotateCcw className="mr-2 h-3.5 w-3.5" /> Restart database
                   </DropdownMenuItem>
                 )}
                 {canEdit && (
