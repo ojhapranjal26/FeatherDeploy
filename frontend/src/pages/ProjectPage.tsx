@@ -10,7 +10,7 @@ import {
 import { toast } from 'sonner'
 import { projectsApi, usersApi, type ProjectMember } from '@/api/projects'
 import { servicesApi } from '@/api/services'
-import { databasesApi, type DatabaseRecord, type DatabaseType, type UpdateDatabasePayload } from '@/api/databases'
+import { databasesApi, type DatabaseRecord, type DatabaseStatus, type DatabaseType, type UpdateDatabasePayload } from '@/api/databases'
 import { deploymentsApi } from '@/api/deployments'
 import type { Service } from '@/api/services'
 import { ServiceStatusBadge } from '@/components/ServiceStatusBadge'
