@@ -35,6 +35,7 @@ import (
 	appCrypto "github.com/ojhapranjal26/featherdeploy/backend/internal/crypto"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/caddy"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/detect"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/netdaemon"
 	"github.com/golang-jwt/jwt/v5"
 )
 
@@ -90,6 +91,15 @@ var (
 var (
 	networkMuMap sync.Map // key: int64 projectID → *sync.Mutex
 )
+
+// NetDaemon is the in-process TCP proxy daemon.  Set once at startup via
+// SetNetDaemon so the deployment pipeline can register and deregister services
+// without importing the full netdaemon package in callers.
+var NetDaemon *netdaemon.Daemon
+
+// SetNetDaemon injects the daemon instance.  Call once from main after
+// netdaemon.New() and ReconcileRegistered() have returned.
+func SetNetDaemon(d *netdaemon.Daemon) { NetDaemon = d }
 
 func projectNetworkLock(projectID int64) *sync.Mutex {
 	v, _ := networkMuMap.LoadOrStore(projectID, &sync.Mutex{})
@@ -417,17 +427,14 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 	envArgs = append(envArgs, collectProjectDBEnvArgs(db, projectID, jwtSecret)...)
 	mountArgs := collectProjectDBMountArgs(db, projectID)
 
-	// ── 8b. Ensure the per-project network exists ─────────────────────────────
-	// Microservices in the same project communicate over a dedicated project
-	// network using their service/database aliases. This avoids shared-pod port
-	// conflicts when multiple containers inside one project listen on 3000/8080.
-	networkName := projectNetworkName(projectID)
-	if netErr := ensureProjectNetwork(projectID); netErr != nil {
-		log.add("ERROR: could not create project network %s: %v", networkName, netErr)
-		markFailed(db, depID, svcID, log.text())
-		return
+	// ── 8b. Inject env vars for project-peer services via fdnet ───────────────
+	// FDNet replaces Podman named-bridge networks: each container uses
+	// slirp4netns (universally available) and service-to-service discovery is
+	// provided by injecting <SVC>_HOST / <SVC>_PORT / <SVC>_URL env vars that
+	// route through the in-process TCP proxy daemon.
+	if NetDaemon != nil {
+		envArgs = append(envArgs, NetDaemon.EnvVarsForPeers(projectID, svcName)...)
 	}
-	log.add("[network] project network ready: %s", networkName)
 
 	// ── 9. Run new container ──────────────────────────────────────────────────
 	runArgs := []string{
@@ -439,16 +446,15 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 		"--log-opt", "max-size=10m",
 		"--log-opt", "max-file=3",
 	}
-	if networkName != "" {
-		// Join the project network; the service is reachable by its name alias
-		// from other containers in the same project.
-		runArgs = append(runArgs, "--network", networkName, "--network-alias", svcName)
-	}
+	// Use slirp4netns with host-loopback access so the container can reach the
+	// fdnet proxy (bound on the host) via 10.0.2.2:<clusterPort>.
+	// This works on every distribution without netavark or aardvark-dns.
+	runArgs = append(runArgs, netdaemon.NetworkArgs()...)
 	runArgs = append(runArgs, mountArgs...)
 	runArgs = append(runArgs, envArgs...)
 	runArgs = append(runArgs, imageName)
 
-	log.add("[podman] podman run -d --name %s -p %d:%d --network %s %s", cName, hostPort, appPort, networkName, imageName)
+	log.add("[podman] podman run -d --name %s -p %d:%d --network slirp4netns %s", cName, hostPort, appPort, imageName)
 	out, err := podmanCmd(runArgs...).CombinedOutput()
 	if err != nil {
 		log.add("ERROR: podman run failed: %v\n%s", err, strings.TrimSpace(string(out)))
@@ -456,6 +462,16 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 		return
 	}
 	newContainerID := strings.TrimSpace(string(out))
+
+	// Register with fdnet so sibling services can reach this container via
+	// their <SVC>_HOST / <SVC>_PORT env vars.
+	if NetDaemon != nil {
+		if _, regErr := NetDaemon.Register(projectID, svcName, "127.0.0.1", newContainerID, hostPort, appPort); regErr != nil {
+			log.add("[fdnet] warning: could not register service %q: %v", svcName, regErr)
+		} else {
+			log.add("[fdnet] service %q registered (hostPort=%d)", svcName, hostPort)
+		}
+	}
 
 	// ── 10. Mark success ──────────────────────────────────────────────────────
 	shortID := newContainerID
@@ -1279,6 +1295,21 @@ func DBConnectionURL(dbType, dbName, dbUser, clearPassword, alias string) string
 	return ""
 }
 
+// dbConnectionURLFDNet builds a DB connection URL using an explicit host
+// address and port, as used by the fdnet TCP proxy (no DNS alias needed).
+func dbConnectionURLFDNet(dbType, dbName, dbUser, clearPassword, host string, port int) string {
+	esc := urlEscapeCredential
+	switch dbType {
+	case "postgres":
+		return fmt.Sprintf("postgresql://%s:%s@%s:%d/%s",
+			esc(dbUser), esc(clearPassword), host, port, dbName)
+	case "mysql":
+		return fmt.Sprintf("mysql://%s:%s@%s:%d/%s",
+			esc(dbUser), esc(clearPassword), host, port, dbName)
+	}
+	return ""
+}
+
 // DBPublicConnectionURL builds the external connection URL using the host's
 // port binding (valid from outside the project network).
 func DBPublicConnectionURL(dbType, dbName, dbUser, clearPassword string, hostPort int) string {
@@ -1342,8 +1373,17 @@ func collectProjectDBEnvArgs(db *sql.DB, projectID int64, jwtSecret string) []st
 			}
 		}
 		alias := DBNetworkAlias(name)
-		_ = dbID
-		connURL := DBConnectionURL(dbType, dbName, dbUser, clearPass, alias)
+		// Prefer fdnet cluster-port URL (works without aardvark-dns / named networks).
+		var connURL string
+		if NetDaemon != nil {
+			if cp, ok := NetDaemon.Resolve(projectID, alias); ok {
+				connURL = dbConnectionURLFDNet(dbType, dbName, dbUser, clearPass, netdaemon.SlirpGateway, cp)
+			}
+		}
+		if connURL == "" {
+			// Fallback: DNS-alias URL (legacy / non-fdnet environments).
+			connURL = DBConnectionURL(dbType, dbName, dbUser, clearPass, alias)
+		}
 		if connURL == "" {
 			continue
 		}
@@ -1412,15 +1452,7 @@ func StartDatabase(db *sql.DB, jwtSecret string, dbID int64) error {
 		return nil
 	}
 
-	// Ensure the project network exists.
-	if netErr := ensureProjectNetwork(projectID); netErr != nil {
-		errMsg := fmt.Sprintf("project network unavailable: %v", netErr)
-		db.Exec(`UPDATE databases SET status='error', last_error=?, updated_at=datetime('now') WHERE id=?`, errMsg, dbID) //nolint
-		return fmt.Errorf("start database: ensure project network: %w", netErr)
-	}
-
 	cName := fmt.Sprintf("fd-db-%d", dbID)
-	networkName := projectNetworkName(projectID)
 	alias := DBNetworkAlias(name)
 	image := dbImageName(dbType, dbVersion)
 
@@ -1445,9 +1477,12 @@ func StartDatabase(db *sql.DB, jwtSecret string, dbID int64) error {
 		podmanCmd("rm", "-f", cName).Run() //nolint
 	}
 
-	// Auto-assign host port for public databases.
+	// Always assign a host port — fdnet needs to proxy connections to the
+	// container even for internal (non-public) databases.
+	// For public databases the port is bound on all interfaces; for internal
+	// ones it is bound to 127.0.0.1 so external clients cannot reach it.
 	hostPort := int(hostPortNull.Int64)
-	if networkPublic == 1 && hostPort <= 0 {
+	if hostPort <= 0 {
 		hostPort = 15000 + int(dbID)
 		db.Exec(`UPDATE databases SET host_port=? WHERE id=?`, hostPort, dbID) //nolint
 	}
@@ -1460,22 +1495,24 @@ func StartDatabase(db *sql.DB, jwtSecret string, dbID int64) error {
 	}
 	mountPath := dbDataMountPath(dbType)
 
+	internalPort := dbInternalPort(dbType)
 	runArgs := []string{
 		"run", "-d",
 		"--name", cName,
 		"--restart", "unless-stopped",
-		"--network-alias", alias,
 		"--log-opt", "max-size=10m",
 		"--log-opt", "max-file=3",
 		"-v", volumeName + ":" + mountPath,
 	}
-	if networkName != "" {
-		runArgs = append(runArgs, "--network", networkName)
-	}
-	// Public databases are additionally bound to a host port for external access.
-	if networkPublic == 1 && hostPort > 0 {
-		internalPort := dbInternalPort(dbType)
+	// Use slirp4netns instead of Podman named networks (no aardvark-dns needed).
+	runArgs = append(runArgs, netdaemon.NetworkArgs()...)
+	if networkPublic == 1 {
+		// Public: bind to all interfaces so external clients can connect.
 		runArgs = append(runArgs, "-p", fmt.Sprintf("%d:%d", hostPort, internalPort))
+	} else {
+		// Internal: bind only to 127.0.0.1 so the fdnet proxy can reach it
+		// but it is not exposed to outside the server.
+		runArgs = append(runArgs, "-p", fmt.Sprintf("127.0.0.1:%d:%d", hostPort, internalPort))
 	}
 	// Inject the DB engine's environment variables (credentials, database name).
 	runArgs = append(runArgs, dbContainerEnvArgs(dbType, dbName, dbUser, clearPass)...)
@@ -1488,6 +1525,16 @@ func StartDatabase(db *sql.DB, jwtSecret string, dbID int64) error {
 		return fmt.Errorf("podman run database %s: %v — %s", cName, err, strings.TrimSpace(string(out)))
 	}
 	containerID := strings.TrimSpace(string(out))
+
+	// Register with fdnet so sibling services can reach this database.
+	if NetDaemon != nil {
+		if _, regErr := NetDaemon.Register(projectID, alias, "127.0.0.1", containerID, hostPort, internalPort); regErr != nil {
+			slog.Warn("fdnet: could not register database", "db_id", dbID, "alias", alias, "err", regErr)
+		} else {
+			slog.Info("fdnet: database registered", "db_id", dbID, "alias", alias)
+		}
+	}
+
 	db.Exec( //nolint
 		`UPDATE databases SET status='running', container_id=?, last_error='', updated_at=datetime('now') WHERE id=?`,
 		containerID, dbID)
@@ -1499,8 +1546,8 @@ func StartDatabase(db *sql.DB, jwtSecret string, dbID int64) error {
 // data volume, so it can be restarted later with all data intact.
 func StopDatabase(db *sql.DB, dbID int64) error {
 	var projectID int64
-	var dbType string
-	if err := db.QueryRow(`SELECT project_id, db_type FROM databases WHERE id=?`, dbID).Scan(&projectID, &dbType); err != nil && err != sql.ErrNoRows {
+	var dbType, dbName string
+	if err := db.QueryRow(`SELECT project_id, db_type, name FROM databases WHERE id=?`, dbID).Scan(&projectID, &dbType, &dbName); err != nil && err != sql.ErrNoRows {
 		return fmt.Errorf("load database type: %w", err)
 	}
 	if dbType == "sqlite" {
@@ -1513,6 +1560,9 @@ func StopDatabase(db *sql.DB, dbID int64) error {
 	cName := fmt.Sprintf("fd-db-%d", dbID)
 	if err := removeContainerIfExists(cName); err != nil {
 		return err
+	}
+	if NetDaemon != nil {
+		NetDaemon.Deregister(projectID, DBNetworkAlias(dbName))
 	}
 	db.Exec( //nolint
 		`UPDATE databases SET status='stopped', container_id='', updated_at=datetime('now') WHERE id=?`, dbID)
@@ -1544,6 +1594,13 @@ func DeleteServiceRuntime(db *sql.DB, projectID, svcID int64) error {
 	cName := fmt.Sprintf("fd-svc-%d", svcID)
 	if err := removeContainerIfExists(cName); err != nil {
 		return err
+	}
+	if NetDaemon != nil {
+		var svcName string
+		db.QueryRow(`SELECT name FROM services WHERE id=?`, svcID).Scan(&svcName) //nolint
+		if svcName != "" {
+			NetDaemon.Deregister(projectID, svcName)
+		}
 	}
 	if err := deleteServiceImages(svcID); err != nil {
 		return err
@@ -1878,8 +1935,7 @@ func CleanupProjectRuntimeIfUnused(db *sql.DB, projectID int64) {
 	if serviceCount > 0 || databaseCount > 0 {
 		return
 	}
-	podmanCmd("pod", "rm", "-f", projectPodName(projectID)).Run()       //nolint
-	podmanCmd("network", "rm", "-f", projectNetworkName(projectID)).Run() //nolint
+	podmanCmd("pod", "rm", "-f", projectPodName(projectID)).Run() //nolint
 }
 
 // trimOldDeployLogs nullifies the deploy_log column for all but the most recent

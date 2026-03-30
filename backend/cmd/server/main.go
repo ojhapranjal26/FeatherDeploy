@@ -27,6 +27,7 @@ import (
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/mailer"
 	mw "github.com/ojhapranjal26/featherdeploy/backend/internal/middleware"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/model"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/netdaemon"
 	"github.com/ojhapranjal26/featherdeploy/backend/web"
 )
 
@@ -149,14 +150,14 @@ func serve() {
 	}
 	deploy.InitQueue(workers)
 
-	// Verify Podman named-network backend (netavark) is installed.
-	// Named networks are required for project container isolation.
-	// This is a non-fatal startup check — it emits a warning so the operator
-	// can install the missing package before deployments start failing.
-	if err := deploy.CheckNetworkingBackend(); err != nil {
-		slog.Warn("Podman networking backend check FAILED — service deployments will fail",
-			"err", err)
-	}
+	// ─── FDNet: lightweight internal network proxy ─────────────────────────────
+	// Replaces Podman named-bridge networks (netavark/aardvark-dns) with a
+	// pure-Go TCP proxy that works on every Linux distribution.
+	netDaemon := netdaemon.New("/var/lib/featherdeploy/fdnet-state.json")
+	netDaemon.ReconcileRegistered()
+	defer netDaemon.Stop()
+	deploy.SetNetDaemon(netDaemon)
+	slog.Info("fdnet: network daemon ready")
 
 	// ─── Brain heartbeat + SSH key
 	if err := ensureSSHKey(db); err != nil {

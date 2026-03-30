@@ -378,11 +378,9 @@ func setupPodmanRootless(username string) {
 	// ensureNetworkingBackend (called below) performs a full DB wipe and smoke
 	// test that achieves the same result without the migrate failure modes.
 
-	// Verify that named (bridge) networking actually works.
-	// `podman build` uses slirp4netns (works without netavark), but
-	// `podman run --network <name>` calls the netavark binary which must be
-	// installed separately on RHEL 9 / AlmaLinux / Rocky.  If the test fails,
-	// print a clear remediation message so the operator knows what to install.
+	// Verify that containers can actually be started with slirp4netns.
+	// FDNet (internal TCP proxy daemon) uses slirp4netns:allow_host_loopback=true
+	// for ALL containers, eliminating the need for netavark/aardvark-dns.
 	ensureNetworkingBackend(username, homedir)
 	fmt.Printf("  ✓ rootless Podman configured for %s\n", username)
 }
@@ -423,229 +421,61 @@ func loginSessionCmd(username, shellCmd string) *exec.Cmd {
 	return exec.Command("su", "-s", "/bin/sh", username, "-c", "cd / && "+shellCmd)
 }
 
-// ensureNetworkingBackend verifies that podman named networks work for username.
-// On RHEL 9/AlmaLinux/Rocky, `podman` is shipped without `netavark` and
-// `aardvark-dns`. Without them `podman run --network <name>` exits 127
-// ("netavark: command not found") even though `podman network create` succeeds.
-// This function:
-//  1. Probes for well-known netavark/CNI binary locations.
-//  2. Falls back to installing netavark via dnf/apt if missing.
-//  3. Runs a smoke-test: network create → run hello-world → network rm.
+// ensureNetworkingBackend verifies that podman can start containers with
+// slirp4netns (the universal rootless networking backend used by FDNet).
+// Named Podman networks (netavark/aardvark-dns) are NO LONGER required —
+// all container networking is handled by the in-process TCP proxy daemon.
 func ensureNetworkingBackend(username, homedir string) {
-	fmt.Println("  Checking Podman named networking backend (netavark/CNI)...")
+	fmt.Println("  Checking Podman slirp4netns backend (required for fdnet)...")
 
-	// Well-known paths for the netavark binary.
-	netavarkPaths := []string{
-		"/usr/libexec/podman/netavark",
-		"/usr/lib/podman/netavark",
-		"/usr/local/lib/podman/netavark",
-		"/usr/bin/netavark",
+	// Ensure slirp4netns is installed.
+	slirpPaths := []string{
+		"/usr/bin/slirp4netns",
+		"/usr/local/bin/slirp4netns",
+		"/usr/libexec/podman/slirp4netns",
 	}
-	found := false
-	for _, p := range netavarkPaths {
+	slirpFound := false
+	for _, p := range slirpPaths {
 		if _, err := os.Stat(p); err == nil {
-			fmt.Printf("  \u2713 netavark found at %s\n", p)
-			found = true
+			fmt.Printf("  ✓ slirp4netns found at %s\n", p)
+			slirpFound = true
 			break
 		}
 	}
-
-	// Check for aardvark-dns.  This binary is REQUIRED for named bridge
-	// networks: netavark always spawns aardvark-dns as a subprocess to run
-	// the per-network DNS forwarder.  When aardvark-dns is absent, netavark
-	// exits 127 ("command not found") and Podman maps this to the misleading
-	// error "unable to find network with name or ID X: network not found".
-	// This is the most common cause of the "network not found" bug on
-	// Debian/Ubuntu where apt-get install podman does NOT pull in aardvark-dns
-	// as a required dependency (it is only a Recommends).
-	aardvarkPaths := []string{
-		"/usr/lib/podman/aardvark-dns",
-		"/usr/libexec/podman/aardvark-dns",
-		"/usr/lib/aardvark-dns/aardvark-dns",
-		"/usr/bin/aardvark-dns",
-	}
-	aardvarkFound := false
-	for _, p := range aardvarkPaths {
-		if _, err := os.Stat(p); err == nil {
-			fmt.Printf("  \u2713 aardvark-dns found at %s\n", p)
-			aardvarkFound = true
-			break
-		}
-	}
-	if !aardvarkFound {
-		fmt.Println("  WARNING: aardvark-dns not found — attempting to install it...")
+	if !slirpFound {
+		fmt.Println("  slirp4netns not found — attempting to install...")
 		for pm, args := range map[string][]string{
-			"dnf":     {"dnf", "install", "-y", "aardvark-dns"},
-			"apt-get": {"apt-get", "install", "-y", "-q", "aardvark-dns"},
-			"yum":     {"yum", "install", "-y", "--skip-broken", "aardvark-dns"},
-			"pacman":  {"pacman", "-S", "--noconfirm", "aardvark-dns"},
+			"dnf":     {"dnf", "install", "-y", "slirp4netns"},
+			"apt-get": {"apt-get", "install", "-y", "-q", "slirp4netns"},
+			"yum":     {"yum", "install", "-y", "--skip-broken", "slirp4netns"},
+			"pacman":  {"pacman", "-S", "--noconfirm", "slirp4netns"},
 		} {
 			if _, lookErr := exec.LookPath(pm); lookErr == nil {
 				cmd2 := exec.Command(args[0], args[1:]...)
 				cmd2.Stdout = os.Stdout
 				cmd2.Stderr = os.Stderr
 				if err2 := cmd2.Run(); err2 == nil {
-					// Re-check after install
-					for _, p := range aardvarkPaths {
+					for _, p := range slirpPaths {
 						if _, statErr := os.Stat(p); statErr == nil {
-							fmt.Printf("  \u2713 aardvark-dns installed at %s\n", p)
-							aardvarkFound = true
+							fmt.Printf("  ✓ slirp4netns installed at %s\n", p)
+							slirpFound = true
 							break
 						}
 					}
-				} else {
-					fmt.Printf("  WARNING: could not install aardvark-dns via %s: %v\n", pm, err2)
 				}
 				break
 			}
 		}
-		if !aardvarkFound {
-			// aardvark-dns is missing and could not be installed.  This IS the
-			// primary cause of "podman run --network name: network not found".
-			fmt.Println("  !! CRITICAL: aardvark-dns could not be installed.")
-			fmt.Println("  !! Named bridge networks will NOT work without it.")
-			fmt.Println("  !! Install it manually:")
-			fmt.Println("       sudo apt-get install -y aardvark-dns   # Debian/Ubuntu")
-			fmt.Println("       sudo dnf install -y aardvark-dns       # RHEL/AlmaLinux/Rocky")
+		if !slirpFound {
+			fmt.Println("  WARNING: slirp4netns could not be installed.")
+			fmt.Println("  Run: sudo apt-get install -y slirp4netns   # Debian/Ubuntu")
+			fmt.Println("       sudo dnf install -y slirp4netns       # RHEL/Fedora")
 		}
 	}
 
-	// If aardvark-dns landed in /usr/bin/ or /usr/lib/aardvark-dns/ but NOT in
-	// Podman's compiled-in helper search path, create a symlink.  Netavark
-	// locates aardvark-dns relative to itself (both in /usr/lib/podman/ on
-	// RHEL, and in /usr/libexec/podman/ on Fedora) so adding a symlink there
-	// guarantees netavark finds it regardless of which directory the distro
-	// package chose for the actual binary.
-	aardvarkSrcPaths := []string{
-		"/usr/lib/aardvark-dns/aardvark-dns",
-		"/usr/bin/aardvark-dns",
-		"/usr/local/bin/aardvark-dns",
-	}
-	aardvarkDstDirs := []string{"/usr/lib/podman", "/usr/libexec/podman"}
-	for _, src := range aardvarkSrcPaths {
-		if _, statErr := os.Stat(src); statErr != nil {
-			continue
-		}
-		for _, dstDir := range aardvarkDstDirs {
-			dstPath := filepath.Join(dstDir, "aardvark-dns")
-			if _, statErr := os.Stat(dstPath); statErr == nil {
-				continue // already present — real binary or existing symlink
-			}
-			if mkErr := os.MkdirAll(dstDir, 0755); mkErr != nil {
-				continue
-			}
-			if lnErr := os.Symlink(src, dstPath); lnErr == nil {
-				fmt.Printf("  \u2713 symlinked %s → %s\n", dstPath, src)
-			}
-		}
-		break
-	}
-
-	// Check for pasta (rootless network helper from the passt package).
-	// pasta is preferred over slirp4netns because it does NOT interact with
-	// the systemd user session (no dbus user.slice move), which eliminates
-	// the "connect: permission denied on /run/user/<uid>/bus" error.
-	pastaPaths := []string{"/usr/bin/pasta", "/usr/local/bin/pasta", "/usr/libexec/pasta"}
-	pastaFound := false
-	pastaActualPath := "" // real path of the pasta binary, used for symlinking
-	for _, p := range pastaPaths {
-		if _, err := os.Stat(p); err == nil {
-			fmt.Printf("  \u2713 pasta found at %s\n", p)
-			pastaFound = true
-			pastaActualPath = p
-			break
-		}
-	}
-	if !pastaFound {
-		fmt.Println("  WARNING: pasta not found — attempting to install passt package...")
-		for pm, args := range map[string][]string{
-			"dnf":     {"dnf", "install", "-y", "passt"},
-			"apt-get": {"apt-get", "install", "-y", "-q", "passt"},
-			"yum":     {"yum", "install", "-y", "--skip-broken", "passt"},
-			"pacman":  {"pacman", "-S", "--noconfirm", "passt"},
-		} {
-			if _, lookErr := exec.LookPath(pm); lookErr == nil {
-				cmd2 := exec.Command(args[0], args[1:]...)
-				cmd2.Stdout = os.Stdout
-				cmd2.Stderr = os.Stderr
-				if err2 := cmd2.Run(); err2 == nil {
-					// Re-check after install
-					for _, p := range pastaPaths {
-						if _, statErr := os.Stat(p); statErr == nil {
-							fmt.Printf("  \u2713 pasta installed at %s\n", p)
-							pastaFound = true
-							pastaActualPath = p
-							break
-						}
-					}
-				} else {
-					fmt.Printf("  WARNING: could not install passt via %s: %v\n", pm, err2)
-				}
-				break
-			}
-		}
-		if !pastaFound {
-			fmt.Println("  NOTE: pasta is unavailable. slirp4netns will be used, which may")
-			fmt.Println("        cause 'user.slice dbus permission denied' warnings during")
-			fmt.Println("        deployments. These are usually harmless if networking works,")
-			fmt.Println("        but installing passt eliminates them entirely.")
-		}
-	}
-
-	// Podman searches for helper binaries (pasta, slirp4netns) in a compiled-in
-	// list of directories: /usr/libexec/podman, /usr/lib/podman, etc.  It does
-	// NOT search $PATH for them.  On Debian/Ubuntu, pasta is installed in
-	// /usr/bin/pasta (via the passt package), which is NOT in Podman's helper
-	// search path.  When containers.conf says default_rootless_network_cmd="pasta"
-	// and Podman can't find pasta in its helper dirs, it exits 127 ("command not
-	// found") and falls back to slirp4netns, causing the dbus user.slice errors.
-	//
-	// Fix: create symlinks in every Podman helper dir so the binary is found
-	// regardless of which Podman version is installed.
-	if pastaFound && pastaActualPath != "" {
-		podmanHelperDirs := []string{
-			"/usr/libexec/podman",
-			"/usr/lib/podman",
-			"/usr/local/lib/podman",
-		}
-		for _, helperDir := range podmanHelperDirs {
-			linkPath := filepath.Join(helperDir, "pasta")
-			if _, statErr := os.Stat(linkPath); statErr == nil {
-				continue // already exists — real binary or existing symlink
-			}
-			if mkErr := os.MkdirAll(helperDir, 0755); mkErr != nil {
-				continue
-			}
-			if lnErr := os.Symlink(pastaActualPath, linkPath); lnErr == nil {
-				fmt.Printf("  \u2713 symlinked %s → %s\n", linkPath, pastaActualPath)
-			}
-		}
-	}
-
-	if !found {
-		fmt.Println("  WARNING: netavark not found — attempting to install networking packages...")
-		for pm, args := range map[string][]string{
-			"dnf":     {"dnf", "install", "-y", "netavark", "aardvark-dns"},
-			"apt-get": {"apt-get", "install", "-y", "-q", "netavark", "aardvark-dns"},
-			"yum":     {"yum", "install", "-y", "--skip-broken", "netavark", "aardvark-dns"},
-			"pacman":  {"pacman", "-S", "--noconfirm", "netavark"},
-		} {
-			if _, err := exec.LookPath(pm); err == nil {
-				cmd2 := exec.Command(args[0], args[1:]...)
-				cmd2.Stdout = os.Stdout
-				cmd2.Stderr = os.Stderr
-				if err2 := cmd2.Run(); err2 == nil {
-					fmt.Println("  \u2713 networking packages installed")
-				} else {
-					fmt.Printf("  WARNING: could not install networking packages via %s: %v\n", pm, err2)
-					fmt.Println("  !! If deployments fail with 'network not found', run manually:")
-					fmt.Println("       sudo dnf install -y netavark aardvark-dns   # RHEL/AlmaLinux/Rocky")
-					fmt.Println("       sudo apt-get install -y netavark aardvark-dns  # Ubuntu/Debian")
-				}
-				break
-			}
-		}
-	}
+	// NOTE: aardvark-dns and netavark are NOT required by FeatherDeploy.
+	// The fdnet daemon handles all container-to-container networking via a
+	// lightweight TCP proxy — no named Podman networks are created at runtime.
 
 	// Compute the correct XDG_RUNTIME_DIR from the user's actual numeric UID.
 	// /run/user/<uid> is created and managed by systemd-logind when linger is
@@ -744,14 +574,14 @@ func ensureNetworkingBackend(username, homedir string) {
 		// network_config_dir IS hardcoded to Podman's documented rootless
 		// netavark path so every podman subcommand uses the same network store.
 		//
-		rootlessCmd := "slirp4netns"
-		if pastaFound {
-			rootlessCmd = "pasta"
-		}
+		// FDNet always uses slirp4netns:allow_host_loopback=true explicitly
+		// in every podman run call, so we do NOT set default_rootless_network_cmd
+		// here — it would only cause confusion.
+		// network_backend is still "netavark" for `podman build` internals.
 		contConf := fmt.Sprintf(
 			"[engine]\ncgroup_manager = \"cgroupfs\"\n\n"+
-				"[network]\nnetwork_backend = \"netavark\"\ndefault_rootless_network_cmd = \"%s\"\nnetwork_config_dir = \"%s\"\n",
-			rootlessCmd, netCfgDir)
+				"[network]\nnetwork_backend = \"netavark\"\nnetwork_config_dir = \"%s\"\n",
+			netCfgDir)
 		os.WriteFile(filepath.Join(userConfDir, "containers.conf"), []byte(contConf), 0644) //nolint
 		// Remove any storage.conf that overrides runroot — the default
 		// $XDG_RUNTIME_DIR/containers is correct and must not be changed.
@@ -822,11 +652,10 @@ func ensureNetworkingBackend(username, homedir string) {
 		exec.Command("chown", "-R", username+":"+username, dataDir).Run() //nolint
 	}
 
-	// Run a quick smoke-test as the service user:
-	// create a test network, run a tiny container on it, then remove it.
-	// Inject the full XDG env (same as podmanEnv() in runner.go) so the
-	// smoke test reads the same containers.conf the running service will use.
-	testNetName := fmt.Sprintf("fd-nettest-%d", time.Now().UnixNano())
+	// ── Smoke-test: run a minimal container with slirp4netns ─────────────────
+	// This is the exact network mode FDNet uses for every deployment container.
+	// Verifies cgroup setup, container storage, and slirp4netns integration.
+	// Named networks are NOT tested here — they are no longer used.
 	testEnv := fmt.Sprintf(
 		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/libexec/podman:/usr/lib/podman:/usr/local/lib/podman HOME=%s XDG_RUNTIME_DIR=%s XDG_CONFIG_HOME=%s XDG_DATA_HOME=%s XDG_CACHE_HOME=%s",
 		homedir, rtDir,
@@ -834,71 +663,41 @@ func ensureNetworkingBackend(username, homedir string) {
 		homedir+"/.local/share",
 		homedir+"/.cache",
 	)
-	testNetCfgDir := filepath.Join(homedir, ".local", "share", "containers", "storage", "networks")
 	testGraphRoot := filepath.Join(homedir, ".local", "share", "containers", "storage")
 	testRunRoot := rtDir + "/containers"
-	// Ensure the runroot directory exists before the smoke test (the systemd
-	// ExecStartPre normally creates it, but we're running outside the service).
+	testNetCfgDir := filepath.Join(homedir, ".local", "share", "containers", "storage", "networks")
 	os.MkdirAll(testRunRoot, 0700)                                        //nolint
 	exec.Command("chown", username+":"+username, testRunRoot).Run()        //nolint
 	smoke := fmt.Sprintf(
-		"%s podman --cgroup-manager cgroupfs --root %s --runroot %s --network-config-dir %s network rm -f %s >/dev/null 2>&1 || true; "+
-			"%s podman --cgroup-manager cgroupfs --root %s --runroot %s --network-config-dir %s network create %s 2>&1 && "+
-			"%s podman --cgroup-manager cgroupfs --root %s --runroot %s --network-config-dir %s run --rm --network %s docker.io/library/alpine true 2>&1 && "+
-			"%s podman --cgroup-manager cgroupfs --root %s --runroot %s --network-config-dir %s network rm -f %s 2>/dev/null",
-		testEnv, testGraphRoot, testRunRoot, testNetCfgDir, testNetName,
-		testEnv, testGraphRoot, testRunRoot, testNetCfgDir, testNetName,
-		testEnv, testGraphRoot, testRunRoot, testNetCfgDir, testNetName,
-		testEnv, testGraphRoot, testRunRoot, testNetCfgDir, testNetName)
-	// Run in a real login session so rootless Podman gets the session/bus model
-	// it expects on cgroup v2 systems.
+		"%s podman --cgroup-manager cgroupfs --root %s --runroot %s --network-config-dir %s"+
+			" run --rm --network slirp4netns:allow_host_loopback=true docker.io/library/alpine true 2>&1",
+		testEnv, testGraphRoot, testRunRoot, testNetCfgDir)
 	smokecmd := loginSessionCmd(username, smoke)
 	if out, err := smokecmd.CombinedOutput(); err != nil {
 		outStr := strings.TrimSpace(string(out))
-		fmt.Printf("  WARNING: named network smoke-test failed: %v\n  output: %s\n", err, outStr)
-		fmt.Println("  !! Service deployments will fail until this is resolved.")
+		fmt.Printf("  WARNING: slirp4netns smoke-test failed: %v\n  output: %s\n", err, outStr)
+		fmt.Println("  !! Service deployments may fail until this is resolved.")
 		switch {
-		// Check dbus/user.slice FIRST — the output contains "connect: permission
-		// denied" (from the dbus socket) which would otherwise match the
-		// "permission denied" storage case incorrectly.
 		case strings.Contains(outStr, "user.slice") || strings.Contains(outStr, "session bus") || strings.Contains(outStr, "dbus"):
 			fmt.Println("  Cause: rootless Podman was executed without a valid login session.")
-			fmt.Println("         On cgroup v2, slirp4netns expects a real user session and")
-			fmt.Println("         its DBus/user.slice integration fails outside that context.")
 			fmt.Println("  Fix:")
 			fmt.Printf("    sudo loginctl enable-linger %s\n", username)
-			fmt.Println("    deploy the updated FeatherDeploy build and run: sudo featherdeploy update")
-			fmt.Println("  Manual verification:")
-			fmt.Printf("    sudo systemd-run --machine=%s@ --quiet --user --collect --pipe --wait podman run --rm docker.io/library/alpine true\n", username)
+			fmt.Println("    sudo featherdeploy update")
 		case strings.Contains(outStr, "permission denied"):
-			// Home dir was corrected above. If it still fails, the storage
-			// directory doesn't exist or has wrong ownership.
 			fmt.Printf("  Cause: Podman cannot create container storage.\n")
 			fmt.Printf("  Fix:\n")
 			fmt.Printf("    sudo mkdir -p %s\n", dataDir)
 			fmt.Printf("    sudo chown -R %s:%s %s\n", username, username, dataDir)
 			fmt.Printf("    sudo systemctl restart featherdeploy\n")
-		case strings.Contains(outStr, "netavark") || strings.Contains(outStr, "command not found"):
-			fmt.Println("  Fix: sudo dnf install -y netavark aardvark-dns passt  (RHEL/AlmaLinux/Rocky)")
-			fmt.Println("       sudo apt-get install -y netavark passt            (Ubuntu/Debian)")
-		case strings.Contains(outStr, "network not found"):
-			// Network was created but run could not find it — classic split-brain.
-			// This usually means the networking backend helper (netavark) exited
-			// non-zero when setting up the container's network namespace.
-			fmt.Println("  Cause: network was created but 'podman run' cannot attach to it.")
-			fmt.Println("         This is usually caused by netavark failing silently, or by")
-			fmt.Println("         a missing netavark/aardvark-dns helper or stale rootless storage.")
-			fmt.Println("  Fix: ensure the named-network packages are installed, then re-run:")
-			fmt.Println("    sudo dnf install -y netavark aardvark-dns slirp4netns passt  # RHEL/AlmaLinux/Rocky")
-			fmt.Println("    sudo apt-get install -y netavark aardvark-dns slirp4netns    # Ubuntu/Debian")
-			fmt.Println("    sudo systemctl restart featherdeploy")
-			fmt.Println("    sudo featherdeploy update")
+		case strings.Contains(outStr, "slirp4netns") || strings.Contains(outStr, "command not found"):
+			fmt.Println("  Fix: sudo apt-get install -y slirp4netns   # Debian/Ubuntu")
+			fmt.Println("       sudo dnf install -y slirp4netns       # RHEL/AlmaLinux/Rocky")
 		default:
-			fmt.Printf("  Diagnostics: sudo -u %s HOME=%s XDG_RUNTIME_DIR=%s podman network create test123 2>&1\n",
+			fmt.Printf("  Diagnostics: sudo -u %s HOME=%s XDG_RUNTIME_DIR=%s podman run --rm --network slirp4netns alpine true 2>&1\n",
 				username, homedir, rtDir)
 		}
 	} else {
-		fmt.Println("  \u2713 named networking smoke-test passed")
+		fmt.Println("  ✓ slirp4netns smoke-test passed")
 	}
 }
 
