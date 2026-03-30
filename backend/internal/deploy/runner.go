@@ -439,6 +439,12 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 	// ── 9. Run new container ──────────────────────────────────────────────────
 	runArgs := []string{
 		"run", "-d",
+		// --replace atomically stops and removes any existing container with the
+		// same name before creating the new one.  This is the safety net for the
+		// rare case where the explicit stop/rm in step 7 above fails silently
+		// (e.g. the container is in a transitional state), which would otherwise
+		// cause podman run to fail with exit 125 "name already in use".
+		"--replace",
 		"--name", cName,
 		"--restart", "unless-stopped",
 		"-p", fmt.Sprintf("%d:%d", hostPort, appPort),
@@ -1498,8 +1504,16 @@ func StartDatabase(db *sql.DB, jwtSecret string, dbID int64) error {
 	internalPort := dbInternalPort(dbType)
 	runArgs := []string{
 		"run", "-d",
+		// --replace stops+removes any container that already has this name
+		// (e.g. a previous crash-looping instance) so podman run never fails
+		// with exit 125 "name already in use".
+		"--replace",
 		"--name", cName,
-		"--restart", "unless-stopped",
+		// on-failure:10 caps crash loops at 10 restarts. Unlike unless-stopped,
+		// this prevents a bad container from pegging CPU forever while still
+		// surviving transient failures (OOM, init races). The counter resets on
+		// a successful start or an explicit Stop→Start / Restart from the UI.
+		"--restart", "on-failure:10",
 		"--log-opt", "max-size=10m",
 		"--log-opt", "max-file=3",
 		// Resource limits: prevent runaway database containers from consuming
@@ -1546,6 +1560,44 @@ func StartDatabase(db *sql.DB, jwtSecret string, dbID int64) error {
 		`UPDATE databases SET status='running', container_id=?, last_error='', updated_at=datetime('now') WHERE id=?`,
 		containerID, dbID)
 	slog.Info("database container started", "db_id", dbID, "container", cName)
+
+	// Background health check: exit code 127 from inside a database container
+	// (bash/entrypoint not found) almost always means the overlay image layers
+	// are stale or incomplete on this host. If detected within the first few
+	// seconds, force-repull the image to refresh layers and retry once.
+	if image != "" {
+		go func(cID string) {
+			time.Sleep(6 * time.Second)
+			inspOut, inspErr := podmanCmd("inspect", "--format",
+				"{{.State.Running}}|{{.State.ExitCode}}", cID).Output()
+			if inspErr != nil {
+				return // container not found (already removed) — nothing to do
+			}
+			parts := strings.SplitN(strings.TrimSpace(string(inspOut)), "|", 2)
+			if len(parts) != 2 || parts[0] != "false" || parts[1] != "127" {
+				return // still running, or failed for a different reason
+			}
+			slog.Warn("database container exited 127 — image layers likely incomplete; repulling",
+				"db_id", dbID, "image", image)
+			podmanCmd("rm", "-f", cID).Run() //nolint
+			if pullOut, pullErr := podmanCmd("pull", image).CombinedOutput(); pullErr != nil {
+				slog.Error("image repull failed after exit 127",
+					"db_id", dbID, "image", image, "err", pullErr,
+					"output", strings.TrimSpace(string(pullOut)))
+			}
+			// Retry the full start sequence via StartDatabase so all
+			// fdnet registration, status updates, etc. are correct.
+			if retryErr := StartDatabase(db, jwtSecret, dbID); retryErr != nil {
+				slog.Error("database start failed after image repull", "db_id", dbID, "err", retryErr)
+				db.Exec( //nolint
+					`UPDATE databases SET status='error', last_error=?, updated_at=datetime('now') WHERE id=?`,
+					"Container exited with code 127 even after image repull. "+
+						"Container storage may need resetting — run 'sudo featherdeploy update' on the server. "+
+						"As the featherdeploy user, check: podman info | grep -i graphDriver",
+					dbID)
+			}
+		}(containerID)
+	}
 	return nil
 }
 
