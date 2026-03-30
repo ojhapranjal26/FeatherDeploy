@@ -828,7 +828,7 @@ func ensureNetworkingBackend(username, homedir string) {
 	// smoke test reads the same containers.conf the running service will use.
 	testNetName := fmt.Sprintf("fd-nettest-%d", time.Now().UnixNano())
 	testEnv := fmt.Sprintf(
-		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=%s XDG_RUNTIME_DIR=%s XDG_CONFIG_HOME=%s XDG_DATA_HOME=%s XDG_CACHE_HOME=%s",
+		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/libexec/podman:/usr/lib/podman:/usr/local/lib/podman HOME=%s XDG_RUNTIME_DIR=%s XDG_CONFIG_HOME=%s XDG_DATA_HOME=%s XDG_CACHE_HOME=%s",
 		homedir, rtDir,
 		homedir+"/.config",
 		homedir+"/.local/share",

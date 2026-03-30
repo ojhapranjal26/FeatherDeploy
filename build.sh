@@ -202,6 +202,11 @@ configure_crun() {
   else
     sed -i '/\[engine\]/a helper_binaries_dir = ["/usr/libexec/podman", "/usr/lib/podman", "/usr/local/lib/podman", "/usr/bin", "/usr/local/bin"]' "$conf"
   fi
+  local rootless_cmd="slirp4netns"
+  if command -v pasta >/dev/null 2>&1 || [ -f /usr/libexec/podman/pasta ] || [ -f /usr/lib/podman/pasta ]; then
+    rootless_cmd="pasta"
+  fi
+
   if grep -q '\[network\]' "$conf" 2>/dev/null; then
     if grep -qE '^\s*network_backend\s*=' "$conf"; then
       sed -i 's|^\s*network_backend\s*=.*|network_backend = "netavark"|' "$conf"
@@ -209,12 +214,12 @@ configure_crun() {
       sed -i '/\[network\]/a network_backend = "netavark"' "$conf"
     fi
     if grep -qE '^\s*default_rootless_network_cmd\s*=' "$conf"; then
-      sed -i 's|^\s*default_rootless_network_cmd\s*=.*|default_rootless_network_cmd = "slirp4netns"|' "$conf"
+      sed -i 's|^\s*default_rootless_network_cmd\s*=.*|default_rootless_network_cmd = "'"$rootless_cmd"'"|' "$conf"
     else
-      sed -i '/\[network\]/a default_rootless_network_cmd = "slirp4netns"' "$conf"
+      sed -i '/\[network\]/a default_rootless_network_cmd = "'"$rootless_cmd"'"' "$conf"
     fi
   else
-    printf '\n[network]\nnetwork_backend = "netavark"\ndefault_rootless_network_cmd = "slirp4netns"\n' >> "$conf"
+    printf '\n[network]\nnetwork_backend = "netavark"\ndefault_rootless_network_cmd = "%s"\n' "$rootless_cmd" >> "$conf"
   fi
   echo "  crun + cgroupfs configured in $conf"
 }
@@ -638,6 +643,12 @@ fi
 _svc_home=$(getent passwd "${SVC_USER}" | cut -d: -f6 || echo "/var/lib/featherdeploy")
 _svc_uid=$(id -u "${SVC_USER}")
 _svc_netdir="${_svc_home}/.local/share/containers/storage/networks"
+
+_rootless_cmd="slirp4netns"
+if command -v pasta >/dev/null 2>&1 || [ -f /usr/libexec/podman/pasta ] || [ -f /usr/lib/podman/pasta ]; then
+  _rootless_cmd="pasta"
+fi
+
 install -d -m 700 -o "${SVC_USER}" -g "${SVC_USER}" "/run/user/${_svc_uid}" "/run/user/${_svc_uid}/containers"
 mkdir -p "${_svc_home}/.config/containers" "${_svc_netdir}" "${_svc_home}/.cache"
 cat > "${_svc_home}/.config/containers/containers.conf" <<USERCONF
@@ -646,12 +657,12 @@ cgroup_manager = "cgroupfs"
 
 [network]
 network_backend = "netavark"
-default_rootless_network_cmd = "slirp4netns"
+default_rootless_network_cmd = "${_rootless_cmd}"
 network_config_dir = "${_svc_netdir}"
 USERCONF
 rm -rf "${_svc_home}/.config/containers/networks"
 chown -R "${SVC_USER}:${SVC_USER}" "${_svc_home}/.config" "${_svc_home}/.local" "${_svc_home}/.cache" "/run/user/${_svc_uid}"
-echo "  per-user containers.conf (cgroupfs + netavark/slirp4netns) written for ${SVC_USER}"
+echo "  per-user containers.conf (cgroupfs + netavark/${_rootless_cmd}) written for ${SVC_USER}"
 
 if command -v podman >/dev/null 2>&1; then
   run_as_user_session "${SVC_USER}" \

@@ -1739,7 +1739,7 @@ func podmanEnv() []string {
 	for _, e := range raw {
 		k := strings.SplitN(e, "=", 2)[0]
 		switch {
-		case k == "HOME", k == "XDG_RUNTIME_DIR", k == "XDG_CONFIG_HOME", k == "XDG_DATA_HOME", k == "XDG_CACHE_HOME", k == "CONTAINER_HOST", k == "DOCKER_HOST":
+		case k == "HOME", k == "XDG_RUNTIME_DIR", k == "XDG_CONFIG_HOME", k == "XDG_DATA_HOME", k == "XDG_CACHE_HOME", k == "CONTAINER_HOST", k == "DOCKER_HOST", k == "PATH":
 			continue
 		}
 		env = append(env, e)
@@ -1752,10 +1752,21 @@ func podmanEnv() []string {
 	// the parent process inherited as $XDG_RUNTIME_DIR.
 	rtDir := fmt.Sprintf("/run/user/%d", os.Getuid())
 	
+	// Ensure Podman helper directories are in PATH so that netavark can find
+	// and execute aardvark-dns. Systemd's default PATH does not include them.
+	path := os.Getenv("PATH")
+	if path == "" {
+		path = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+	}
+	if !strings.Contains(path, "/usr/libexec/podman") {
+		path = path + ":/usr/libexec/podman:/usr/lib/podman:/usr/local/lib/podman"
+	}
+
 	// Explicitly set all XDG paths based on home to prevent split-brain issues
 	// where inherited XDG_CONFIG_HOME or XDG_DATA_HOME causes 'podman run'
 	// to look in different directories than 'podman network create'.
 	return append(env, 
+		"PATH="+path,
 		"HOME="+home, 
 		"XDG_RUNTIME_DIR="+rtDir,
 		"XDG_CONFIG_HOME="+home+"/.config",
