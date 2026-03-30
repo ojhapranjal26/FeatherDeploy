@@ -744,10 +744,14 @@ func ensureNetworkingBackend(username, homedir string) {
 		// network_config_dir IS hardcoded to Podman's documented rootless
 		// netavark path so every podman subcommand uses the same network store.
 		//
+		rootlessCmd := "slirp4netns"
+		if pastaFound {
+			rootlessCmd = "pasta"
+		}
 		contConf := fmt.Sprintf(
 			"[engine]\ncgroup_manager = \"cgroupfs\"\n\n"+
-				"[network]\nnetwork_backend = \"netavark\"\ndefault_rootless_network_cmd = \"slirp4netns\"\nnetwork_config_dir = \"%s\"\n",
-			netCfgDir)
+				"[network]\nnetwork_backend = \"netavark\"\ndefault_rootless_network_cmd = \"%s\"\nnetwork_config_dir = \"%s\"\n",
+			rootlessCmd, netCfgDir)
 		os.WriteFile(filepath.Join(userConfDir, "containers.conf"), []byte(contConf), 0644) //nolint
 		// Remove any storage.conf that overrides runroot — the default
 		// $XDG_RUNTIME_DIR/containers is correct and must not be changed.
@@ -1148,13 +1152,19 @@ func configureCrun() {
 	}
 
 	// FeatherDeploy relies on user-defined networks for internal service
-	// communication. Podman's own rootless docs note that pasta defaults can make
-	// inter-container connectivity surprising, so pin slirp4netns explicitly.
+	// communication. Podman 5+ defaults to pasta for rootless networking,
+	// which avoids DBus user.slice errors. We dynamically configure the default
+	// based on what's available.
+	rootlessNetCmd := "slirp4netns"
+	if _, err := exec.LookPath("pasta"); err == nil {
+		rootlessNetCmd = "pasta"
+	}
+
 	if strings.Contains(ns, "default_rootless_network_cmd") {
 		ns = regexp.MustCompile(`(?m)^\s*default_rootless_network_cmd\s*=.*$`).
-			ReplaceAllString(ns, `default_rootless_network_cmd = "slirp4netns"`)
+			ReplaceAllString(ns, `default_rootless_network_cmd = "`+rootlessNetCmd+`"`)
 	} else {
-		ns = strings.Replace(ns, "[network]", "[network]\ndefault_rootless_network_cmd = \"slirp4netns\"", 1)
+		ns = strings.Replace(ns, "[network]", "[network]\ndefault_rootless_network_cmd = \""+rootlessNetCmd+"\"", 1)
 	}
 
 	// Add helper_binaries_dir so Podman searches /usr/bin and /usr/local/bin for
@@ -1172,10 +1182,8 @@ func configureCrun() {
 	}
 
 	// Rootless FeatherDeploy relies on user-defined networks for internal service
-	// communication. Podman's own rootless docs note that pasta defaults can make
-	// inter-container connectivity surprising, so we pin slirp4netns here and let
-	// the service run inside a real PAM/logind session instead of trying to hack
-	// around the missing session via unsupported config keys.
+	// communication. We let the service run inside a real PAM/logind session
+	// instead of trying to hack around a missing session via unsupported config keys.
 	ns = regexp.MustCompile(`(?m)^\s*slirp4netns_args\s*=.*$\n?`).ReplaceAllString(ns, "")
 
 	writeFile(confFile, ns, 0644)
