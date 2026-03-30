@@ -476,6 +476,9 @@ func serve() {
 		// Database container stats stream (no timeout — long-lived SSE)
 		r.With(mw.RequireProjectAccess(db, "editor")).
 			Get("/api/projects/{projectID}/databases/{databaseID}/stats/stream", dbH.StatsStream)
+		// Database startup log stream (no timeout — long-lived SSE)
+		r.With(mw.RequireProjectAccess(db, "editor")).
+			Get("/api/projects/{projectID}/databases/{databaseID}/start-log/stream", dbH.StartLogStream)
 	})
 
 	// ─── Health check (no auth) ───────────────────────────────────────────────

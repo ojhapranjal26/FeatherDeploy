@@ -41,6 +41,7 @@ export interface UpdateDatabasePayload {
 export interface DatabaseLogsResponse {
   container: string
   logs: string
+  start_log: string
 }
 
 export interface DatabaseBackupDownload {

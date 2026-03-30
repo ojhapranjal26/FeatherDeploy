@@ -518,16 +518,27 @@ function DatabaseCard({ database, projectId, canEdit }: { database: DatabaseReco
               {logsQuery.isFetching && <span className="ml-2 text-muted-foreground">(refreshing…)</span>}
             </DialogDescription>
           </DialogHeader>
-          <div className="rounded-md border bg-black/90 p-3 max-h-96 overflow-y-auto">
-            {logsQuery.isLoading ? (
-              <p className="text-xs text-muted-foreground">Loading…</p>
-            ) : logsQuery.data?.logs ? (
-              <pre className="whitespace-pre-wrap font-mono text-[11px] text-green-300">
-                {logsQuery.data.logs}
-              </pre>
-            ) : (
-              <p className="text-xs text-muted-foreground">No logs available.</p>
-            )}
+          <div className="space-y-4 overflow-y-auto max-h-[70vh]">
+            <DatabaseStartLogPanel
+              projectId={projectId}
+              databaseId={String(database.id)}
+              status={database.status}
+              enabled={logsOpen}
+            />
+            <div>
+              <p className="text-[10px] uppercase tracking-wide text-muted-foreground font-medium mb-1">Container Output</p>
+              <div className="rounded-md border bg-black/90 p-3 max-h-52 overflow-y-auto">
+                {logsQuery.isLoading ? (
+                  <p className="text-xs text-muted-foreground">Loading…</p>
+                ) : logsQuery.data?.logs ? (
+                  <pre className="whitespace-pre-wrap font-mono text-[11px] text-green-300">
+                    {logsQuery.data.logs}
+                  </pre>
+                ) : (
+                  <p className="text-xs text-muted-foreground">No container output yet.</p>
+                )}
+              </div>
+            </div>
           </div>
           <DialogFooter>
             <Button variant="outline" size="sm" onClick={() => setLogsOpen(false)}>Close</Button>
@@ -645,6 +656,79 @@ function DatabaseCard({ database, projectId, canEdit }: { database: DatabaseReco
         </DialogContent>
       </Dialog>
     </>
+  )
+}
+
+// ─── Database startup log panel (SSE stream) ────────────────────────────────
+
+function DatabaseStartLogPanel({
+  projectId,
+  databaseId,
+  status,
+  enabled,
+}: {
+  projectId: string
+  databaseId: string
+  status: DatabaseStatus
+  enabled: boolean
+}) {
+  const [lines, setLines] = useState<string[]>([])
+  const [done, setDone] = useState(false)
+  const scrollRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!enabled || !projectId || !databaseId) return
+    const token = localStorage.getItem('token')
+    if (!token) return
+
+    setLines([])
+    setDone(false)
+
+    const url = `/api/projects/${projectId}/databases/${databaseId}/start-log/stream?token=${encodeURIComponent(token)}`
+    const es = new EventSource(url)
+
+    es.onmessage = (e: MessageEvent) => {
+      if (e.data && e.data.trim()) {
+        setLines(prev => [...prev, e.data])
+      }
+    }
+    es.addEventListener('done', () => {
+      setDone(true)
+      es.close()
+    })
+    es.onerror = () => es.close()
+
+    return () => es.close()
+  }, [enabled, projectId, databaseId])
+
+  // Auto-scroll to the newest line
+  useEffect(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight
+    }
+  }, [lines])
+
+  if (!enabled) return null
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-1">
+        <p className="text-[10px] uppercase tracking-wide text-muted-foreground font-medium">Startup Log</p>
+        {!done && status === 'starting' && (
+          <span className="text-[10px] text-amber-400 animate-pulse">● starting…</span>
+        )}
+        {done && <span className="text-[10px] text-green-400">● done</span>}
+      </div>
+      <div ref={scrollRef} className="rounded-md border bg-black/90 p-3 h-52 overflow-y-auto">
+        {lines.length === 0 ? (
+          <p className="text-xs text-muted-foreground animate-pulse">Connecting…</p>
+        ) : (
+          <pre className="whitespace-pre-wrap font-mono text-[11px] text-green-300">
+            {lines.join('\n')}
+          </pre>
+        )}
+      </div>
+    </div>
   )
 }
 

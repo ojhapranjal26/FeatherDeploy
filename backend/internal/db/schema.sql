@@ -315,3 +315,7 @@ CREATE INDEX IF NOT EXISTS idx_databases_project ON databases(project_id);
 
 -- 019: add last_error to databases so the UI can surface why a container failed
 ALTER TABLE databases ADD COLUMN last_error TEXT NOT NULL DEFAULT '';
+
+-- 020: add start_log to databases so startup steps are visible in the UI
+-- (image pull, container run command, exit-code diagnostics)
+ALTER TABLE databases ADD COLUMN start_log TEXT NOT NULL DEFAULT '';

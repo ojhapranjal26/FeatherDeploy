@@ -1424,6 +1424,36 @@ func collectProjectDBMountArgs(db *sql.DB, projectID int64) []string {
 
 // ─── Database container management ───────────────────────────────────────────
 
+// dbLog is a tiny log buffer for the database startup sequence.  Each call to
+// add() appends a timestamped line and immediately flushes it to the DB so the
+// SSE stream in the handler can deliver live progress to the browser.
+type dbLog struct {
+	mu    sync.Mutex
+	lines []string
+	db    *sql.DB
+	id    int64
+}
+
+func newDBLog(db *sql.DB, id int64) *dbLog { return &dbLog{db: db, id: id} }
+
+func (l *dbLog) add(format string, args ...any) {
+	line := fmt.Sprintf(format, args...)
+	l.mu.Lock()
+	l.lines = append(l.lines, line)
+	text := strings.Join(l.lines, "\n")
+	l.mu.Unlock()
+	slog.Info("[db-start] " + line)
+	// Write to start_log immediately so the SSE stream can tail it.
+	l.db.Exec( //nolint
+		`UPDATE databases SET start_log=?, updated_at=datetime('now') WHERE id=?`, text, l.id)
+}
+
+func (l *dbLog) text() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return strings.Join(l.lines, "\n")
+}
+
 // StartDatabase pulls the database image and starts the container in the
 // project's network. Safe to call for both new and stopped databases.
 func StartDatabase(db *sql.DB, jwtSecret string, dbID int64) error {
@@ -1441,6 +1471,9 @@ func StartDatabase(db *sql.DB, jwtSecret string, dbID int64) error {
 		return fmt.Errorf("load database config: %w", err)
 	}
 
+	log := newDBLog(db, dbID)
+	log.add("[db-start] starting database id=%d name=%q type=%s version=%s", dbID, name, dbType, dbVersion)
+
 	clearPass := encPass
 	if strings.HasPrefix(encPass, "fdenc:") {
 		if p, decErr := appCrypto.Decrypt(encPass[len("fdenc:"):], jwtSecret); decErr == nil {
@@ -1448,45 +1481,63 @@ func StartDatabase(db *sql.DB, jwtSecret string, dbID int64) error {
 		}
 	}
 	if dbType == "sqlite" {
+		log.add("[db-start] SQLite — no container needed, ensuring volume")
 		if err := ensureDatabaseVolume(dbID); err != nil {
+			log.add("ERROR: volume create failed: %v", err)
 			db.Exec(`UPDATE databases SET status='error', last_error=?, updated_at=datetime('now') WHERE id=?`, err.Error(), dbID) //nolint
 			return err
 		}
 		db.Exec( //nolint
 			`UPDATE databases SET status='running', container_id='', host_port=NULL, last_error='', updated_at=datetime('now') WHERE id=?`,
 			dbID)
+		log.add("[db-start] SQLite volume ready — database is running")
 		return nil
 	}
 
 	cName := fmt.Sprintf("fd-db-%d", dbID)
 	alias := DBNetworkAlias(name)
 	image := dbImageName(dbType, dbVersion)
+	log.add("[db-start] container name: %s  image: %s  alias: %s", cName, image, alias)
 
 	db.Exec(`UPDATE databases SET status='starting', updated_at=datetime('now') WHERE id=?`, dbID) //nolint
 
 	// Pull the image only when it is missing locally to avoid re-downloading a
 	// cached database image on every start.
 	if image != "" && !podmanImageExists(image) {
-		slog.Info("pulling database image", "db_id", dbID, "image", image)
-		if out, pullErr := podmanCmd("pull", image).CombinedOutput(); pullErr != nil {
-			errMsg := fmt.Sprintf("pull image %s: %v — %s", image, pullErr, strings.TrimSpace(string(out)))
-			db.Exec(`UPDATE databases SET status='error', last_error=?, updated_at=datetime('now') WHERE id=?`, errMsg, dbID) //nolint
-			return fmt.Errorf("pull database image %s: %v — %s", image, pullErr, strings.TrimSpace(string(out)))
+		log.add("[pull] image %s not found locally — pulling from registry...", image)
+		pullCmd := podmanCmd("pull", image)
+		pullOut, pullErr := pullCmd.CombinedOutput()
+		pullOutStr := strings.TrimSpace(string(pullOut))
+		if pullOutStr != "" {
+			for _, line := range strings.Split(pullOutStr, "\n") {
+				if t := strings.TrimSpace(line); t != "" {
+					log.add("  %s", t)
+				}
+			}
 		}
+		if pullErr != nil {
+			errMsg := fmt.Sprintf("pull image %s: %v — %s", image, pullErr, pullOutStr)
+			log.add("ERROR: %s", errMsg)
+			db.Exec(`UPDATE databases SET status='error', last_error=?, updated_at=datetime('now') WHERE id=?`, errMsg, dbID) //nolint
+			return fmt.Errorf("pull database image %s: %v — %s", image, pullErr, pullOutStr)
+		}
+		log.add("[pull] image pulled successfully")
+	} else if image != "" {
+		log.add("[pull] image %s already present locally — skipping pull", image)
 	}
 
 	// Stop/remove any existing container from a previous start.
 	if containerExists(cName) {
+		log.add("[podman] existing container found — stopping and removing %s", cName)
 		stopCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		podmanCmdCtx(stopCtx, "stop", "--time", "10", cName).Run() //nolint
 		cancel()
 		podmanCmd("rm", "-f", cName).Run() //nolint
+		log.add("[podman] old container removed")
 	}
 
 	// Always assign a host port — fdnet needs to proxy connections to the
 	// container even for internal (non-public) databases.
-	// For public databases the port is bound on all interfaces; for internal
-	// ones it is bound to 127.0.0.1 so external clients cannot reach it.
 	hostPort := int(hostPortNull.Int64)
 	if hostPort <= 0 {
 		hostPort = 15000 + int(dbID)
@@ -1495,13 +1546,24 @@ func StartDatabase(db *sql.DB, jwtSecret string, dbID int64) error {
 
 	// Persist data in a named volume so it survives container re-creation.
 	volumeName := dbVolumeName(dbID)
+	log.add("[volume] ensuring data volume %s → %s", volumeName, dbDataMountPath(dbType))
 	if err := ensureDatabaseVolume(dbID); err != nil {
+		log.add("ERROR: volume ensure failed: %v", err)
 		db.Exec(`UPDATE databases SET status='error', last_error=?, updated_at=datetime('now') WHERE id=?`, err.Error(), dbID) //nolint
 		return err
 	}
 	mountPath := dbDataMountPath(dbType)
 
 	internalPort := dbInternalPort(dbType)
+
+	// Build the host bind address description for logging.
+	portBind := fmt.Sprintf("127.0.0.1:%d→%d", hostPort, internalPort)
+	if networkPublic == 1 {
+		portBind = fmt.Sprintf("0.0.0.0:%d→%d (public)", hostPort, internalPort)
+	}
+	log.add("[podman] run  --name %s  --restart on-failure:10  --cpus 2.0  --memory 1g  port %s  image %s",
+		cName, portBind, image)
+
 	runArgs := []string{
 		"run", "-d",
 		// --replace stops+removes any container that already has this name
@@ -1540,18 +1602,29 @@ func StartDatabase(db *sql.DB, jwtSecret string, dbID int64) error {
 	runArgs = append(runArgs, image)
 
 	out, err := podmanCmd(runArgs...).CombinedOutput()
+	outStr := strings.TrimSpace(string(out))
 	if err != nil {
-		errMsg := fmt.Sprintf("container start failed: %v — %s", err, strings.TrimSpace(string(out)))
+		errMsg := fmt.Sprintf("container start failed: %v — %s", err, outStr)
+		log.add("ERROR: podman run failed (exit %v): %s", err, outStr)
+		log.add("ERROR: check 'podman info' and 'podman system info' for storage/cgroup issues")
 		db.Exec(`UPDATE databases SET status='error', last_error=?, updated_at=datetime('now') WHERE id=?`, errMsg, dbID) //nolint
-		return fmt.Errorf("podman run database %s: %v — %s", cName, err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("podman run database %s: %v — %s", cName, err, outStr)
 	}
 	containerID := strings.TrimSpace(string(out))
+	log.add("[podman] container started  id=%s", func() string {
+		if len(containerID) > 12 {
+			return containerID[:12]
+		}
+		return containerID
+	}())
 
 	// Register with fdnet so sibling services can reach this database.
 	if NetDaemon != nil {
 		if _, regErr := NetDaemon.Register(projectID, alias, "127.0.0.1", containerID, hostPort, internalPort); regErr != nil {
+			log.add("[fdnet] WARNING: could not register alias %q: %v", alias, regErr)
 			slog.Warn("fdnet: could not register database", "db_id", dbID, "alias", alias, "err", regErr)
 		} else {
+			log.add("[fdnet] registered alias %q → 127.0.0.1:%d", alias, hostPort)
 			slog.Info("fdnet: database registered", "db_id", dbID, "alias", alias)
 		}
 	}
@@ -1559,6 +1632,7 @@ func StartDatabase(db *sql.DB, jwtSecret string, dbID int64) error {
 	db.Exec( //nolint
 		`UPDATE databases SET status='running', container_id=?, last_error='', updated_at=datetime('now') WHERE id=?`,
 		containerID, dbID)
+	log.add("[db-start] ✓ database is running — waiting for engine to initialize (this can take 10–30s for first-run)")
 	slog.Info("database container started", "db_id", dbID, "container", cName)
 
 	// Background health check: exit code 127 from inside a database container
@@ -1569,32 +1643,49 @@ func StartDatabase(db *sql.DB, jwtSecret string, dbID int64) error {
 		go func(cID string) {
 			time.Sleep(6 * time.Second)
 			inspOut, inspErr := podmanCmd("inspect", "--format",
-				"{{.State.Running}}|{{.State.ExitCode}}", cID).Output()
+				"{{.State.Running}}|{{.State.ExitCode}}|{{.RestartCount}}", cID).Output()
 			if inspErr != nil {
 				return // container not found (already removed) — nothing to do
 			}
-			parts := strings.SplitN(strings.TrimSpace(string(inspOut)), "|", 2)
-			if len(parts) != 2 || parts[0] != "false" || parts[1] != "127" {
-				return // still running, or failed for a different reason
+			parts := strings.SplitN(strings.TrimSpace(string(inspOut)), "|", 3)
+			if len(parts) < 2 || parts[0] != "false" {
+				return // still running, nothing to do
 			}
-			slog.Warn("database container exited 127 — image layers likely incomplete; repulling",
-				"db_id", dbID, "image", image)
-			podmanCmd("rm", "-f", cID).Run() //nolint
-			if pullOut, pullErr := podmanCmd("pull", image).CombinedOutput(); pullErr != nil {
-				slog.Error("image repull failed after exit 127",
-					"db_id", dbID, "image", image, "err", pullErr,
-					"output", strings.TrimSpace(string(pullOut)))
+			exitCode := parts[1]
+			restarts := ""
+			if len(parts) == 3 {
+				restarts = parts[2]
 			}
-			// Retry the full start sequence via StartDatabase so all
-			// fdnet registration, status updates, etc. are correct.
-			if retryErr := StartDatabase(db, jwtSecret, dbID); retryErr != nil {
-				slog.Error("database start failed after image repull", "db_id", dbID, "err", retryErr)
-				db.Exec( //nolint
-					`UPDATE databases SET status='error', last_error=?, updated_at=datetime('now') WHERE id=?`,
-					"Container exited with code 127 even after image repull. "+
-						"Container storage may need resetting — run 'sudo featherdeploy update' on the server. "+
-						"As the featherdeploy user, check: podman info | grep -i graphDriver",
-					dbID)
+			log.add("[health] container stopped after start  exitCode=%s  restarts=%s", exitCode, restarts)
+
+			if exitCode == "127" {
+				log.add("[health] exit 127 = entrypoint not found — image layers likely incomplete; repulling %s", image)
+				slog.Warn("database container exited 127 — image layers likely incomplete; repulling",
+					"db_id", dbID, "image", image)
+				podmanCmd("rm", "-f", cID).Run() //nolint
+				log.add("[pull] force-pulling %s to refresh layers...", image)
+				if pullOut, pullErr := podmanCmd("pull", image).CombinedOutput(); pullErr != nil {
+					msg := strings.TrimSpace(string(pullOut))
+					log.add("ERROR: repull failed: %v — %s", pullErr, msg)
+					slog.Error("image repull failed after exit 127",
+						"db_id", dbID, "image", image, "err", pullErr, "output", msg)
+				} else {
+					log.add("[pull] repull complete — retrying StartDatabase")
+				}
+				// Retry the full start sequence via StartDatabase so all
+				// fdnet registration, status updates, etc. are correct.
+				if retryErr := StartDatabase(db, jwtSecret, dbID); retryErr != nil {
+					log.add("ERROR: retry after repull failed: %v", retryErr)
+					slog.Error("database start failed after image repull", "db_id", dbID, "err", retryErr)
+					db.Exec( //nolint
+						`UPDATE databases SET status='error', last_error=?, updated_at=datetime('now') WHERE id=?`,
+						"Container exited with code 127 even after image repull. "+
+							"Container storage may need resetting — run 'sudo featherdeploy update' on the server. "+
+							"As the featherdeploy user, check: podman info | grep -i graphDriver",
+						dbID)
+				}
+			} else {
+				log.add("[health] NOTE: container exited — this is normal for a crash loop (exit %s); check logs below for engine output", exitCode)
 			}
 		}(containerID)
 	}

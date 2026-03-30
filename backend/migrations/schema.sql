@@ -206,3 +206,4 @@ ALTER TABLE deployments ADD COLUMN deploy_log   TEXT    NOT NULL DEFAULT '';
 ALTER TABLE services    ADD COLUMN last_image   TEXT    NOT NULL DEFAULT '';
 ALTER TABLE services    ADD COLUMN auto_deploy  INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE deployments ADD COLUMN branch       TEXT    NOT NULL DEFAULT '';
+ALTER TABLE databases   ADD COLUMN start_log    TEXT    NOT NULL DEFAULT '';

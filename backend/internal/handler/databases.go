@@ -375,23 +375,110 @@ func (h *DatabaseHandler) GetLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var lastError string
-	h.db.QueryRowContext(r.Context(), `SELECT last_error FROM databases WHERE id=?`, dbID).Scan(&lastError) //nolint
+	var lastError, startLog string
+	h.db.QueryRowContext(r.Context(), `SELECT last_error, COALESCE(start_log,'') FROM databases WHERE id=?`, dbID).Scan(&lastError, &startLog) //nolint
 
 	containerName := fmt.Sprintf("fd-db-%d", dbID)
 	logs, logsErr := deploy.GetDatabaseLogs(dbID)
 	if logsErr != nil {
 		// Container not found — return the stored startup error instead
-		writeJSON(w, http.StatusOK, map[string]string{
+		writeJSON(w, http.StatusOK, map[string]any{
 			"container": containerName,
 			"logs":      lastError,
+			"start_log": startLog,
 		})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"container": containerName,
 		"logs":      logs,
+		"start_log": startLog,
 	})
+}
+
+// GET /api/projects/{projectID}/databases/{databaseID}/start-log/stream
+// SSE stream that tails the start_log column while the database container is starting.
+func (h *DatabaseHandler) StartLogStream(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeJSON(w, http.StatusInternalServerError, errMap("streaming not supported"))
+		return
+	}
+	projectID, err := strconv.ParseInt(r.PathValue("projectID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errMap("invalid projectID"))
+		return
+	}
+	dbID, err := strconv.ParseInt(r.PathValue("databaseID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errMap("invalid databaseID"))
+		return
+	}
+	if !h.databaseExists(r, projectID, dbID) {
+		writeJSON(w, http.StatusNotFound, errMap("database not found"))
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	initialSkip := 0
+	if s := r.URL.Query().Get("skip"); s != "" {
+		if n, convErr := strconv.Atoi(s); convErr == nil && n > 0 {
+			initialSkip = n
+		}
+	}
+	sentLines := initialSkip
+	sendLine := func(line string) {
+		safe := strings.ReplaceAll(line, "\r", "")
+		fmt.Fprintf(w, "data: %s\n\n", safe)
+		flusher.Flush()
+	}
+	sendPing := func() {
+		fmt.Fprint(w, ": ping\n\n")
+		flusher.Flush()
+	}
+
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-ticker.C:
+		}
+
+		var startLog, status string
+		if qErr := h.db.QueryRowContext(r.Context(),
+			`SELECT COALESCE(start_log,''), status FROM databases WHERE id=?`, dbID,
+		).Scan(&startLog, &status); qErr != nil {
+			return
+		}
+
+		allLines := strings.Split(startLog, "\n")
+		var nonEmpty []string
+		for _, l := range allLines {
+			if strings.TrimSpace(l) != "" {
+				nonEmpty = append(nonEmpty, l)
+			}
+		}
+		if len(nonEmpty) > sentLines {
+			for _, line := range nonEmpty[sentLines:] {
+				sendLine(line)
+			}
+			sentLines = len(nonEmpty)
+		} else {
+			sendPing()
+		}
+
+		// Terminal states — the start attempt is complete (success or fail)
+		if status == "running" || status == "error" || status == "stopped" {
+			fmt.Fprint(w, "event: done\ndata: \n\n")
+			flusher.Flush()
+			return
+		}
+	}
 }
 
 // GET /api/projects/{projectID}/databases/{databaseID}/stats/stream
