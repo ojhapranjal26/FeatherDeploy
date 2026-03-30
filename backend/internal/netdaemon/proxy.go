@@ -7,7 +7,18 @@ import (
 	"net"
 	"sync"
 	"sync/atomic"
+	"time"
 )
+
+// copyBufPool recycles 4 KB byte slices for io.CopyBuffer.
+// Using a pool instead of per-call allocations significantly reduces GC
+// pressure when many short-lived proxy connections are created.
+var copyBufPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 4*1024)
+		return &b
+	},
+}
 
 // tcpProxy listens on a cluster port and transparently forwards each TCP
 // connection to a single backend address (nodeAddr:hostPort).
@@ -89,7 +100,7 @@ func (p *tcpProxy) forward(src net.Conn) {
 	defer p.wg.Done()
 	defer src.Close()
 
-	dst, err := net.Dial("tcp", p.targetAddr)
+	dst, err := net.DialTimeout("tcp", p.targetAddr, 10*time.Second)
 	if err != nil {
 		// Backend is unreachable — close the client cleanly.
 		slog.Debug("fdnet proxy: dial backend failed",
@@ -107,7 +118,7 @@ func (p *tcpProxy) forward(src net.Conn) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		io.Copy(dst, src) //nolint:errcheck — EOF on copy is normal
+		copyConn(dst, src)
 		// Signal the other direction to stop.
 		if tc, ok := dst.(*net.TCPConn); ok {
 			tc.CloseWrite() //nolint:errcheck
@@ -115,12 +126,20 @@ func (p *tcpProxy) forward(src net.Conn) {
 	}()
 	go func() {
 		defer wg.Done()
-		io.Copy(src, dst) //nolint:errcheck
+		copyConn(src, dst)
 		if tc, ok := src.(*net.TCPConn); ok {
 			tc.CloseWrite() //nolint:errcheck
 		}
 	}()
 	wg.Wait()
+}
+
+// copyConn copies from src to dst using a pooled 4 KB buffer to minimise
+// per-connection heap allocations and GC overhead.
+func copyConn(dst io.Writer, src io.Reader) {
+	bufp := copyBufPool.Get().(*[]byte)
+	defer copyBufPool.Put(bufp)
+	io.CopyBuffer(dst, src, *bufp) //nolint:errcheck — EOF is normal
 }
 
 // setKeepalive enables TCP keepalive on a connection if it supports it.

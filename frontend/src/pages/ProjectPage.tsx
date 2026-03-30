@@ -1,11 +1,11 @@
-import { useState, useRef } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   Plus, ChevronLeft, Rocket, Settings2, Trash2,
   ExternalLink, GitBranch, Terminal, Database,
   Globe, AlertTriangle, Users, UserMinus, Loader2,
-  Play, Square, Download,
+  Play, Square, Download, Copy, BarChart2,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { projectsApi, usersApi, type ProjectMember } from '@/api/projects'
@@ -274,9 +274,17 @@ function DatabaseCard({ database, projectId, canEdit }: { database: DatabaseReco
   const qc = useQueryClient()
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [logsOpen, setLogsOpen] = useState(false)
+  const [statsOpen, setStatsOpen] = useState(false)
   const [editOpen, setEditOpen] = useState(false)
   const [editVersion, setEditVersion] = useState(database.db_version)
   const [editPublic, setEditPublic] = useState(database.network_public)
+
+  const copyToClipboard = (text: string, label: string) => {
+    navigator.clipboard.writeText(text).then(
+      () => toast.success(`${label} copied to clipboard.`),
+      () => toast.error('Failed to copy to clipboard.'),
+    )
+  }
 
   const startMutation = useMutation({
     mutationFn: () => databasesApi.start(projectId, database.id),
@@ -388,6 +396,11 @@ function DatabaseCard({ database, projectId, canEdit }: { database: DatabaseReco
                 <DropdownMenuItem onClick={() => setLogsOpen(true)}>
                   <Terminal className="mr-2 h-3.5 w-3.5" /> View logs
                 </DropdownMenuItem>
+                {!isSQLite && database.status === 'running' && (
+                  <DropdownMenuItem onClick={() => setStatsOpen(true)}>
+                    <BarChart2 className="mr-2 h-3.5 w-3.5" /> View stats
+                  </DropdownMenuItem>
+                )}
                 <DropdownMenuSeparator />
                 <DropdownMenuItem onClick={() => backupMutation.mutate()} disabled={backupMutation.isPending || backupAndDeleteMutation.isPending}>
                   <Download className="mr-2 h-3.5 w-3.5" /> Download backup
@@ -440,14 +453,32 @@ function DatabaseCard({ database, projectId, canEdit }: { database: DatabaseReco
 
           {database.connection_url && (
             <div className="rounded-md border bg-muted/50 px-2 py-1.5">
-              <p className="text-[10px] uppercase tracking-wide text-muted-foreground">Connection</p>
+              <div className="flex items-center justify-between gap-1">
+                <p className="text-[10px] uppercase tracking-wide text-muted-foreground">Connection (private)</p>
+                <button
+                  className="shrink-0 text-muted-foreground hover:text-foreground transition-colors"
+                  title="Copy connection URL"
+                  onClick={() => copyToClipboard(database.connection_url!, 'Private URL')}
+                >
+                  <Copy className="h-3 w-3" />
+                </button>
+              </div>
               <p className="mt-1 break-all font-mono text-[11px] text-foreground">{database.connection_url}</p>
             </div>
           )}
 
           {database.public_connection_url && (
             <div className="rounded-md border border-amber-200 bg-amber-50/80 px-2 py-1.5 text-amber-950">
-              <p className="text-[10px] uppercase tracking-wide text-amber-800">Public access</p>
+              <div className="flex items-center justify-between gap-1">
+                <p className="text-[10px] uppercase tracking-wide text-amber-800">Public access</p>
+                <button
+                  className="shrink-0 text-amber-700 hover:text-amber-900 transition-colors"
+                  title="Copy public connection URL"
+                  onClick={() => copyToClipboard(database.public_connection_url!, 'Public URL')}
+                >
+                  <Copy className="h-3 w-3" />
+                </button>
+              </div>
               <p className="mt-1 break-all font-mono text-[11px]">{database.public_connection_url}</p>
             </div>
           )}
@@ -576,9 +607,131 @@ function DatabaseCard({ database, projectId, canEdit }: { database: DatabaseReco
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Stats dialog */}
+      <Dialog open={statsOpen} onOpenChange={setStatsOpen}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <BarChart2 className="h-4 w-4" />
+              Stats — {database.name}
+            </DialogTitle>
+            <DialogDescription>
+              Container: <span className="font-mono">fd-db-{database.id}</span>
+            </DialogDescription>
+          </DialogHeader>
+          <DatabaseStatsPanel
+            projectId={projectId}
+            databaseId={String(database.id)}
+            enabled={statsOpen}
+          />
+          <DialogFooter>
+            <Button variant="outline" size="sm" onClick={() => setStatsOpen(false)}>Close</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </>
   )
 }
+
+// ─── Database stats panel ─────────────────────────────────────────────────────
+
+function fmtBytes(b: number): string {
+  if (b >= 1073741824) return `${(b / 1073741824).toFixed(2)} GB`
+  if (b >= 1048576) return `${(b / 1048576).toFixed(1)} MB`
+  if (b >= 1024) return `${(b / 1024).toFixed(0)} KB`
+  return `${b} B`
+}
+
+function DatabaseStatsPanel({
+  projectId,
+  databaseId,
+  enabled,
+}: {
+  projectId: string
+  databaseId: string
+  enabled: boolean
+}) {
+  const [state, setState] = useState<{
+    latest: { cpuPct: number; memUsed: number; memTotal: number; memPct: number; netIn: number; netOut: number; blkIn: number; blkOut: number; pids: number } | null
+    status: 'connecting' | 'running' | 'not_found' | 'error'
+  }>({ latest: null, status: 'connecting' })
+  const esRef = useRef<EventSource | null>(null)
+
+  useEffect(() => {
+    if (!enabled || !projectId || !databaseId) return
+    const token = localStorage.getItem('token')
+    if (!token) return
+
+    const url = `/api/projects/${projectId}/databases/${databaseId}/stats/stream?token=${encodeURIComponent(token)}`
+    const es = new EventSource(url)
+    esRef.current = es
+
+    es.addEventListener('stats', (e: MessageEvent) => {
+      try {
+        const raw = JSON.parse(e.data)
+        setState({
+          status: raw.status === 'not_found' ? 'not_found' : 'running',
+          latest: {
+            cpuPct: raw.cpu_pct,
+            memUsed: raw.mem_used,
+            memTotal: raw.mem_total,
+            memPct: raw.mem_pct,
+            netIn: raw.net_in,
+            netOut: raw.net_out,
+            blkIn: raw.blk_in,
+            blkOut: raw.blk_out,
+            pids: raw.pids,
+          },
+        })
+      } catch { /* ignore */ }
+    })
+    es.onerror = () => setState(prev => ({ ...prev, status: 'error' }))
+
+    return () => {
+      es.close()
+      esRef.current = null
+      setState({ latest: null, status: 'connecting' })
+    }
+  }, [enabled, projectId, databaseId])
+
+  const { latest, status } = state
+
+  if (status === 'not_found') {
+    return <p className="text-sm text-muted-foreground py-4 text-center">Container is not running.</p>
+  }
+  if (!latest) {
+    return <p className="text-sm text-muted-foreground py-4 text-center animate-pulse">Connecting…</p>
+  }
+
+  return (
+    <div className="grid grid-cols-2 gap-3 py-2">
+      <div className="rounded-lg border p-3 space-y-0.5">
+        <p className="text-[10px] uppercase tracking-wide text-muted-foreground">CPU</p>
+        <p className="font-mono text-lg font-semibold">{latest.cpuPct.toFixed(1)}%</p>
+      </div>
+      <div className="rounded-lg border p-3 space-y-0.5">
+        <p className="text-[10px] uppercase tracking-wide text-muted-foreground">Memory</p>
+        <p className="font-mono text-lg font-semibold">{latest.memPct.toFixed(1)}%</p>
+        <p className="text-[11px] text-muted-foreground font-mono">{fmtBytes(latest.memUsed)} / {fmtBytes(latest.memTotal)}</p>
+      </div>
+      <div className="rounded-lg border p-3 space-y-0.5">
+        <p className="text-[10px] uppercase tracking-wide text-muted-foreground">Network I/O</p>
+        <p className="text-xs font-mono">↓ {fmtBytes(latest.netIn)} &nbsp; ↑ {fmtBytes(latest.netOut)}</p>
+      </div>
+      <div className="rounded-lg border p-3 space-y-0.5">
+        <p className="text-[10px] uppercase tracking-wide text-muted-foreground">Disk I/O</p>
+        <p className="text-xs font-mono">R {fmtBytes(latest.blkIn)} &nbsp; W {fmtBytes(latest.blkOut)}</p>
+      </div>
+      <div className="rounded-lg border p-3 space-y-0.5">
+        <p className="text-[10px] uppercase tracking-wide text-muted-foreground">PIDs</p>
+        <p className="font-mono text-lg font-semibold">{latest.pids}</p>
+      </div>
+    </div>
+  )
+}
+
+// ─── Main page ────────────────────────────────────────────────────────────────
 
 export function ProjectPage() {
   const { projectId } = useParams<{ projectId: string }>()

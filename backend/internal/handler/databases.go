@@ -3,6 +3,7 @@ package handler
 import (
 	cryptoRand "crypto/rand"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	appCrypto "github.com/ojhapranjal26/featherdeploy/backend/internal/crypto"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/deploy"
@@ -358,6 +360,58 @@ func (h *DatabaseHandler) GetLogs(w http.ResponseWriter, r *http.Request) {
 		"container": containerName,
 		"logs":      logs,
 	})
+}
+
+// GET /api/projects/{projectID}/databases/{databaseID}/stats/stream
+// SSE stream of live resource stats for the database container.
+func (h *DatabaseHandler) StatsStream(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeJSON(w, http.StatusInternalServerError, errMap("streaming not supported"))
+		return
+	}
+	projectID, err := strconv.ParseInt(r.PathValue("projectID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errMap("invalid projectID"))
+		return
+	}
+	dbID, err := strconv.ParseInt(r.PathValue("databaseID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errMap("invalid databaseID"))
+		return
+	}
+	if !h.databaseExists(r, projectID, dbID) {
+		writeJSON(w, http.StatusNotFound, errMap("database not found"))
+		return
+	}
+
+	cName := fmt.Sprintf("fd-db-%d", dbID)
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	send := func() {
+		ev := CollectContainerStats(cName)
+		ev.Timestamp = time.Now().UnixMilli()
+		data, _ := json.Marshal(ev)
+		fmt.Fprintf(w, "event: stats\ndata: %s\n\n", data)
+		flusher.Flush()
+	}
+
+	send() // immediate first event
+
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-ticker.C:
+			send()
+		}
+	}
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────

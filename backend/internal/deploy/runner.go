@@ -1502,6 +1502,11 @@ func StartDatabase(db *sql.DB, jwtSecret string, dbID int64) error {
 		"--restart", "unless-stopped",
 		"--log-opt", "max-size=10m",
 		"--log-opt", "max-file=3",
+		// Resource limits: prevent runaway database containers from consuming
+		// all host CPU/memory. Defaults are generous but capped.
+		"--cpus", "2.0",
+		"--memory", "1g",
+		"--memory-swap", "1g",
 		"-v", volumeName + ":" + mountPath,
 	}
 	// Use slirp4netns instead of Podman named networks (no aardvark-dns needed).
@@ -1572,8 +1577,11 @@ func StopDatabase(db *sql.DB, dbID int64) error {
 }
 
 func DeleteDatabase(db *sql.DB, dbID int64, purgeData bool) error {
+	// Capture db_type and db_version before stopping (StopDatabase removes the row reference)
 	var projectID int64
-	if err := db.QueryRow(`SELECT project_id FROM databases WHERE id=?`, dbID).Scan(&projectID); err != nil && err != sql.ErrNoRows {
+	var dbType, dbVersion string
+	if err := db.QueryRow(`SELECT project_id, db_type, db_version FROM databases WHERE id=?`, dbID).
+		Scan(&projectID, &dbType, &dbVersion); err != nil && err != sql.ErrNoRows {
 		return fmt.Errorf("load database project: %w", err)
 	}
 	if err := StopDatabase(db, dbID); err != nil {
@@ -1586,8 +1594,39 @@ func DeleteDatabase(db *sql.DB, dbID int64, purgeData bool) error {
 	if err := deleteDatabaseVolume(dbID); err != nil {
 		return err
 	}
+	// After purging the volume, remove the pulled image if no other database of
+	// the same type+version is present (stopped or running). This reclaims disk
+	// space without breaking databases that share the same image.
+	go deleteDatabaseImageIfUnused(db, dbID, dbType, dbVersion)
 	CleanupProjectRuntimeIfUnused(db, projectID) //nolint
 	return nil
+}
+
+// deleteDatabaseImageIfUnused removes the pulled database image if no other
+// database record in the system references the same db_type+db_version.
+// It runs in a goroutine after volume deletion so it never blocks the caller.
+func deleteDatabaseImageIfUnused(db *sql.DB, excludeID int64, dbType, dbVersion string) {
+	if dbType == "sqlite" || dbType == "" {
+		return
+	}
+	image := dbImageName(dbType, dbVersion)
+	if image == "" {
+		return
+	}
+	var count int
+	db.QueryRow( //nolint
+		`SELECT COUNT(*) FROM databases WHERE db_type=? AND db_version=? AND id!=?`,
+		dbType, dbVersion, excludeID,
+	).Scan(&count)
+	if count > 0 {
+		// Other databases still use this image — keep it.
+		return
+	}
+	if out, err := podmanCmd("rmi", "-f", image).CombinedOutput(); err != nil {
+		slog.Warn("could not remove database image", "image", image, "err", err, "output", strings.TrimSpace(string(out)))
+	} else {
+		slog.Info("removed unused database image", "image", image)
+	}
 }
 
 func DeleteServiceRuntime(db *sql.DB, projectID, svcID int64) error {
