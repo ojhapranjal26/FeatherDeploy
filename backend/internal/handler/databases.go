@@ -42,7 +42,7 @@ func (h *DatabaseHandler) List(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows, err := h.db.QueryContext(r.Context(),
-		`SELECT id, project_id, name, db_type, db_version, db_name, db_user,
+		`SELECT id, project_id, name, db_type, db_version, db_name, db_user, db_password,
 		        COALESCE(host_port, 0), status, container_id, network_public, last_error, created_at, updated_at
 		 FROM databases WHERE project_id=? ORDER BY created_at DESC`, projectID)
 	if err != nil {
@@ -55,13 +55,28 @@ func (h *DatabaseHandler) List(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var d model.Database
 		var npInt int
+		var encPass string
 		if err := rows.Scan(
 			&d.ID, &d.ProjectID, &d.Name, &d.DBType, &d.DBVersion,
-			&d.DBName, &d.DBUser, &d.HostPort, &d.Status, &d.ContainerID,
+			&d.DBName, &d.DBUser, &encPass, &d.HostPort, &d.Status, &d.ContainerID,
 			&npInt, &d.LastError, &d.CreatedAt, &d.UpdatedAt,
 		); err == nil {
 			d.NetworkPublic = npInt == 1
 			d.EnvVarName = deploy.DBEnvKey(d.Name) + "_URL"
+			// Decrypt password and build connection URLs so the frontend can
+			// display copy buttons on the project page without an extra GET.
+			clearPass := encPass
+			if strings.HasPrefix(encPass, "fdenc:") {
+				if p, decErr := appCrypto.Decrypt(encPass[len("fdenc:"):], h.jwtSecret); decErr == nil {
+					clearPass = p
+				}
+			}
+			alias := deploy.DBNetworkAlias(d.Name)
+			d.ConnectionURL = deploy.DBConnectionURL(d.DBType, d.DBName, d.DBUser, clearPass, alias)
+			if d.NetworkPublic && d.HostPort > 0 {
+				d.PublicConnectionURL = deploy.DBPublicConnectionURL(
+					d.DBType, d.DBName, d.DBUser, clearPass, d.HostPort)
+			}
 			dbs = append(dbs, d)
 		}
 	}

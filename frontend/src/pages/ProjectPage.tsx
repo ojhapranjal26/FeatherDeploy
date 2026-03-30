@@ -700,6 +700,9 @@ function DatabaseStatsPanel({
   if (status === 'not_found') {
     return <p className="text-sm text-muted-foreground py-4 text-center">Container is not running.</p>
   }
+  if (status === 'error') {
+    return <p className="text-sm text-destructive py-4 text-center">Failed to connect to stats stream. Is the container running?</p>
+  }
   if (!latest) {
     return <p className="text-sm text-muted-foreground py-4 text-center animate-pulse">Connecting…</p>
   }

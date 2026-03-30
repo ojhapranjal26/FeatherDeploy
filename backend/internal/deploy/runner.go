@@ -1504,9 +1504,11 @@ func StartDatabase(db *sql.DB, jwtSecret string, dbID int64) error {
 		"--log-opt", "max-file=3",
 		// Resource limits: prevent runaway database containers from consuming
 		// all host CPU/memory. Defaults are generous but capped.
+		// --memory-swap is intentionally omitted so the kernel default applies
+		// (2× memory = 1 GB of swap allowed), preventing OOM kills during
+		// postgres/mysql initdb which is CPU+mem intensive on first startup.
 		"--cpus", "2.0",
 		"--memory", "1g",
-		"--memory-swap", "1g",
 		"-v", volumeName + ":" + mountPath,
 	}
 	// Use slirp4netns instead of Podman named networks (no aardvark-dns needed).

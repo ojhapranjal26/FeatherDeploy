@@ -437,7 +437,7 @@ func serve() {
 				r.Get("/api/projects/{projectID}/databases/{databaseID}", dbH.Get)
 				r.Put("/api/projects/{projectID}/databases/{databaseID}", dbH.Update)
 				r.Get("/api/projects/{projectID}/databases/{databaseID}/logs", dbH.GetLogs)
-				r.Get("/api/projects/{projectID}/databases/{databaseID}/stats/stream", dbH.StatsStream)
+
 				r.Get("/api/projects/{projectID}/databases/{databaseID}/backup", dbH.Backup)
 				r.Delete("/api/projects/{projectID}/databases/{databaseID}", dbH.Delete)
 				r.Post("/api/projects/{projectID}/databases/{databaseID}/start", dbH.Start)
@@ -472,6 +472,9 @@ func serve() {
 			Get("/api/projects/{projectID}/services/{serviceID}/container-logs", depH.ContainerLogs)
 		r.With(mw.RequireProjectAccess(db, "editor")).
 			Get("/api/projects/{projectID}/services/{serviceID}/stats/stream", containerStatsH.Stream)
+		// Database container stats stream (no timeout — long-lived SSE)
+		r.With(mw.RequireProjectAccess(db, "editor")).
+			Get("/api/projects/{projectID}/databases/{databaseID}/stats/stream", dbH.StatsStream)
 	})
 
 	// ─── Health check (no auth) ───────────────────────────────────────────────
