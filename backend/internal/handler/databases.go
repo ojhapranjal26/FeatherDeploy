@@ -125,19 +125,10 @@ func (h *DatabaseHandler) Create(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, errMap("invalid database user identifier"))
 		return
 	}
-	if req.DBType == model.DatabaseTypeSQLite && req.NetworkPublic {
-		writeJSON(w, http.StatusBadRequest, errMap("sqlite databases cannot be exposed publicly"))
-		return
-	}
 	// MySQL does not allow "root" as the MYSQL_USER — the docker-entrypoint
 	// rejects it and the container fails to initialize.
 	if req.DBType == model.DatabaseTypeMySQL && strings.EqualFold(req.DBUser, "root") {
 		writeJSON(w, http.StatusBadRequest, errMap("mysql user cannot be 'root'; choose a different username"))
-		return
-	}
-	// Public databases are reachable from the internet — require a strong password.
-	if req.NetworkPublic && req.DBType != model.DatabaseTypeSQLite && req.DBPassword != "" && len(req.DBPassword) < 12 {
-		writeJSON(w, http.StatusBadRequest, errMap("password must be at least 12 characters for publicly accessible databases"))
 		return
 	}
 	// Auto-generate a cryptographically random password when none is provided.
@@ -156,17 +147,12 @@ func (h *DatabaseHandler) Create(w http.ResponseWriter, r *http.Request) {
 		encPass = "fdenc:" + encPass
 	}
 
-	npInt := 0
-	if req.NetworkPublic {
-		npInt = 1
-	}
-
 	res, err := h.db.ExecContext(r.Context(),
 		`INSERT INTO databases
 		  (project_id, name, db_type, db_version, db_name, db_user, db_password, network_public)
-		 VALUES (?,?,?,?,?,?,?,?)`,
+		 VALUES (?,?,?,?,?,?,?,0)`,
 		projectID, req.Name, req.DBType, req.DBVersion,
-		req.DBName, req.DBUser, encPass, npInt)
+		req.DBName, req.DBUser, encPass)
 	if err != nil {
 		if isUnique(err) {
 			writeJSON(w, http.StatusConflict, errMap("database name already exists in project"))
@@ -352,21 +338,52 @@ func (h *DatabaseHandler) Update(w http.ResponseWriter, r *http.Request) {
 	var dbType, currentVersion string
 	h.db.QueryRowContext(r.Context(), `SELECT db_type, db_version FROM databases WHERE id=?`, dbID). //nolint
 		Scan(&dbType, &currentVersion)
-	if dbType == model.DatabaseTypeSQLite && req.NetworkPublic {
-		writeJSON(w, http.StatusBadRequest, errMap("sqlite databases cannot be exposed publicly"))
-		return
-	}
 	version := req.DBVersion
 	if version == "" {
 		version = currentVersion
 	}
 
-	if err := deploy.UpdateDatabase(h.db, dbID, version, req.NetworkPublic); err != nil {
+	if err := deploy.UpdateDatabase(h.db, dbID, version); err != nil {
 		slog.Error("update database", "err", err)
 		writeJSON(w, http.StatusInternalServerError, errMap("internal error"))
 		return
 	}
 	h.getByID(w, r, projectID, dbID)
+}
+
+// POST /api/projects/{projectID}/databases/{databaseID}/password
+// Changes the database password live inside the running container, then
+// updates the stored connection URL. Dependent services must be restarted
+// to pick up the new credentials.
+func (h *DatabaseHandler) ChangePassword(w http.ResponseWriter, r *http.Request) {
+	projectID, err := strconv.ParseInt(r.PathValue("projectID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errMap("invalid projectID"))
+		return
+	}
+	dbID, err := strconv.ParseInt(r.PathValue("databaseID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errMap("invalid databaseID"))
+		return
+	}
+	if !h.databaseExists(r, projectID, dbID) {
+		writeJSON(w, http.StatusNotFound, errMap("database not found"))
+		return
+	}
+	var req model.ChangePasswordRequest
+	if !v.DecodeAndValidate(w, r, &req) {
+		return
+	}
+	if err := deploy.ChangeDBPassword(h.db, h.jwtSecret, dbID, req.NewPassword); err != nil {
+		slog.Error("change database password", "db_id", dbID, "err", err)
+		writeJSON(w, http.StatusBadRequest, errMap(err.Error()))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":                      true,
+		"services_restart_needed": true,
+		"message":                 "Password changed. Restart dependent services to apply the new connection URL.",
+	})
 }
 
 // GET /api/projects/{projectID}/databases/{databaseID}/logs

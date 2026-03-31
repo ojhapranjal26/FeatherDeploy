@@ -19,10 +19,10 @@ type Database struct {
 	DBVersion   string    `json:"db_version"`   // image tag e.g. "16", "8.4", "latest"
 	DBName      string    `json:"db_name"`      // database/schema name inside the engine
 	DBUser      string    `json:"db_user"`      // database user
-	HostPort    int       `json:"host_port,omitempty"`  // >0 only for public network databases
+	HostPort    int       `json:"host_port,omitempty"`  // internal fdnet proxy port (always 127.0.0.1)
 	Status      string    `json:"status"`               // stopped|starting|running|error
 	ContainerID string    `json:"container_id,omitempty"`
-	NetworkPublic bool    `json:"network_public"` // true = also bound to a host port
+	NetworkPublic bool    `json:"network_public"` // always false — databases are internal-only
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 
@@ -42,18 +42,21 @@ type Database struct {
 
 // CreateDatabaseRequest is the body for POST /api/projects/{id}/databases.
 type CreateDatabaseRequest struct {
-	Name          string `json:"name"          validate:"required,min=2,max=63,slug"`
-	DBType        string `json:"db_type"       validate:"required,oneof=postgres mysql sqlite"`
-	DBVersion     string `json:"db_version"    validate:"omitempty,max=32"`
-	DBName        string `json:"db_name"       validate:"omitempty,max=64"`
-	DBUser        string `json:"db_user"       validate:"omitempty,max=64"`
-	DBPassword    string `json:"db_password"   validate:"omitempty,max=256"`
-	NetworkPublic bool   `json:"network_public"`
+	Name       string `json:"name"       validate:"required,min=2,max=63,slug"`
+	DBType     string `json:"db_type"    validate:"required,oneof=postgres mysql sqlite"`
+	DBVersion  string `json:"db_version" validate:"omitempty,max=32"`
+	DBName     string `json:"db_name"    validate:"omitempty,max=64"`
+	DBUser     string `json:"db_user"    validate:"omitempty,max=64"`
+	DBPassword string `json:"db_password" validate:"omitempty,max=256"`
 }
 
 // UpdateDatabaseRequest is the body for PUT /api/projects/{id}/databases/{id}.
-// Only safe, restartable configuration can be changed after creation.
+// Only the version can be changed; a restart is required for the new image to be used.
 type UpdateDatabaseRequest struct {
-	DBVersion     string `json:"db_version"    validate:"omitempty,max=32"`
-	NetworkPublic bool   `json:"network_public"`
+	DBVersion string `json:"db_version" validate:"omitempty,max=32"`
+}
+
+// ChangePasswordRequest is the body for POST /api/projects/{id}/databases/{id}/password.
+type ChangePasswordRequest struct {
+	NewPassword string `json:"new_password" validate:"required,min=8,max=256"`
 }

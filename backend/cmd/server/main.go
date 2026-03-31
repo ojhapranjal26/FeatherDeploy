@@ -443,6 +443,7 @@ func serve() {
 				r.Post("/api/projects/{projectID}/databases/{databaseID}/start", dbH.Start)
 				r.Post("/api/projects/{projectID}/databases/{databaseID}/restart", dbH.Restart)
 				r.Post("/api/projects/{projectID}/databases/{databaseID}/stop", dbH.Stop)
+				r.Post("/api/projects/{projectID}/databases/{databaseID}/password", dbH.ChangePassword)
 
 				// ── QR approve (authenticated) ────────────────────────────
 				r.Post("/api/auth/qr/{token}/approve", qrH.Approve)

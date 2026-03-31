@@ -1532,13 +1532,12 @@ func startDatabaseRetrying(db *sql.DB, jwtSecret string, dbID int64, attempt int
 	var projectID int64
 	var name, dbType, dbVersion, dbName, dbUser, encPass string
 	var hostPortNull sql.NullInt64
-	var networkPublic int
 	err := db.QueryRow(
 		`SELECT project_id, name, db_type, db_version, db_name, db_user, db_password,
-		        host_port, network_public
+		        host_port
 		 FROM databases WHERE id=?`, dbID,
 	).Scan(&projectID, &name, &dbType, &dbVersion, &dbName, &dbUser, &encPass,
-		&hostPortNull, &networkPublic)
+		&hostPortNull)
 	if err != nil {
 		return fmt.Errorf("load database config: %w", err)
 	}
@@ -1637,11 +1636,10 @@ func startDatabaseRetrying(db *sql.DB, jwtSecret string, dbID int64, attempt int
 
 	internalPort := dbInternalPort(dbType)
 
-	// Build the host bind address description for logging.
-	portBind := fmt.Sprintf("127.0.0.1:%d→%d", hostPort, internalPort)
-	if networkPublic == 1 {
-		portBind = fmt.Sprintf("0.0.0.0:%d→%d (public)", hostPort, internalPort)
-	}
+	// All databases are bound to 127.0.0.1 only — they are internal resources
+	// accessible only to featherdeploy services via the fdnet proxy.
+	// Direct external / internet access is intentionally not supported.
+	portBind := fmt.Sprintf("127.0.0.1:%d→%d (internal)", hostPort, internalPort)
 	// Resource limits require cgroup v2 with cpu+memory controllers available.
 	// On cgroup v1 (or cgroup v2 without user delegation), --cpus/--memory cause
 	// crun to exit immediately with code 127 before the container process starts,
@@ -1697,14 +1695,9 @@ func startDatabaseRetrying(db *sql.DB, jwtSecret string, dbID int64, attempt int
 	}
 	// Use slirp4netns instead of Podman named networks (no aardvark-dns needed).
 	runArgs = append(runArgs, netdaemon.NetworkArgs()...)
-	if networkPublic == 1 {
-		// Public: bind to all interfaces so external clients can connect.
-		runArgs = append(runArgs, "-p", fmt.Sprintf("%d:%d", hostPort, internalPort))
-	} else {
-		// Internal: bind only to 127.0.0.1 so the fdnet proxy can reach it
-		// but it is not exposed to outside the server.
-		runArgs = append(runArgs, "-p", fmt.Sprintf("127.0.0.1:%d:%d", hostPort, internalPort))
-	}
+	// Always bind to 127.0.0.1 — databases are internal-only resources.
+	// featherdeploy services connect via the fdnet TCP proxy using the alias.
+	runArgs = append(runArgs, "-p", fmt.Sprintf("127.0.0.1:%d:%d", hostPort, internalPort))
 	// Inject the DB engine's environment variables (credentials, database name).
 	runArgs = append(runArgs, dbContainerEnvArgs(activeDBEngine, dbVersion, dbName, dbUser, clearPass)...)
 	runArgs = append(runArgs, activeImage)
@@ -2086,18 +2079,111 @@ func GetDatabaseLogs(dbID int64) (string, error) {
 	return diag, nil
 }
 
-// UpdateDatabase persists configuration changes (db_version, network_public)
-// for a database record. A restart is required for the new settings to take
-// effect on the running container.
-func UpdateDatabase(db *sql.DB, dbID int64, dbVersion string, networkPublic bool) error {
-	npInt := 0
-	if networkPublic {
-		npInt = 1
+// UpdateDatabase persists configuration changes (db_version) for a database
+// record. A restart is required for the new version to take effect.
+func UpdateDatabase(db *sql.DB, dbID int64, dbVersion string) error {
+	_, err := db.Exec(
+		`UPDATE databases SET db_version=?, updated_at=datetime('now') WHERE id=?`,
+		dbVersion, dbID)
+	return err
+}
+
+// ChangeDBPassword changes the database user password live in the running
+// container using the engine's CLI client (mysql/mariadb/psql), then updates
+// the encrypted password in the panel's data store.
+// Dependent services must be restarted after this call so they pick up the
+// new connection URL that embeds the new password.
+func ChangeDBPassword(db *sql.DB, jwtSecret string, dbID int64, newPassword string) error {
+	var dbType, dbName, dbUser, encPass, containerID, status string
+	if err := db.QueryRow(
+		`SELECT db_type, db_name, db_user, db_password, COALESCE(container_id,''), status FROM databases WHERE id=?`, dbID,
+	).Scan(&dbType, &dbName, &dbUser, &encPass, &containerID, &status); err != nil {
+		return fmt.Errorf("load database: %w", err)
+	}
+
+	if dbType != "sqlite" {
+		if status != "running" {
+			return fmt.Errorf("database is not running (status: %s); start it before changing the password", status)
+		}
+		// Decrypt the current (old) password to authenticate against the engine.
+		oldPass := encPass
+		if strings.HasPrefix(encPass, "fdenc:") {
+			if p, decErr := appCrypto.Decrypt(encPass[len("fdenc:"):], jwtSecret); decErr == nil {
+				oldPass = p
+			}
+		}
+		cName := fmt.Sprintf("fd-db-%d", dbID)
+		if execErr := dbExecPasswordChange(cName, dbType, dbUser, oldPass, newPassword); execErr != nil {
+			return fmt.Errorf("change password in container: %w", execErr)
+		}
+	}
+
+	// Encrypt and persist the new password.
+	encNew, encErr := appCrypto.Encrypt(newPassword, jwtSecret)
+	if encErr != nil {
+		return fmt.Errorf("encrypt new password: %w", encErr)
 	}
 	_, err := db.Exec(
-		`UPDATE databases SET db_version=?, network_public=?, updated_at=datetime('now') WHERE id=?`,
-		dbVersion, npInt, dbID)
+		`UPDATE databases SET db_password=?, updated_at=datetime('now') WHERE id=?`,
+		"fdenc:"+encNew, dbID)
 	return err
+}
+
+// dbExecPasswordChange connects to the running database container and issues
+// ALTER USER / ALTER ROLE SQL to change both the app user and superuser passwords.
+// It never includes plaintext passwords in process arguments — MYSQL_PWD and
+// PGPASSWORD env vars are used instead.
+func dbExecPasswordChange(cName, dbType, dbUser, oldPass, newPass string) error {
+	// Escape single quotes for safe embedding in SQL string literals.
+	newPassSQL := strings.ReplaceAll(newPass, "'", "''")
+	switch dbType {
+	case "mysql", "mariadb":
+		// ALTER USER changes passwords for the app user and both root accounts
+		// (root@localhost and root@% are both created by docker-entrypoint.sh).
+		sqlStmt := fmt.Sprintf(
+			"ALTER USER '%s'@'%%' IDENTIFIED BY '%s';"+
+				" ALTER USER 'root'@'%%' IDENTIFIED BY '%s';"+
+				" ALTER USER 'root'@'localhost' IDENTIFIED BY '%s';"+
+				" FLUSH PRIVILEGES;",
+			strings.ReplaceAll(dbUser, "'", "''"), newPassSQL, newPassSQL, newPassSQL)
+		// Try 'mariadb' client (MariaDB 11.x) then 'mysql' (MySQL 8.x).
+		// MYSQL_PWD env var avoids exposing the password in the process list.
+		for _, client := range []string{"mariadb", "mysql"} {
+			out, err := podmanCmd("exec",
+				"-e", "MYSQL_PWD="+oldPass,
+				cName,
+				client, "-uroot", "--connect-timeout=10",
+				"-e", sqlStmt,
+			).CombinedOutput()
+			if err == nil {
+				return nil
+			}
+			outStr := strings.TrimSpace(string(out))
+			// If the client binary is absent in this image, try the next one.
+			if strings.Contains(outStr, "not found") || strings.Contains(outStr, "executable file") {
+				continue
+			}
+			return fmt.Errorf("%s exec failed: %v — %s", client, err, outStr)
+		}
+		return fmt.Errorf("neither mariadb nor mysql client found in container %s", cName)
+	case "postgres":
+		// Change the app user and the postgres superuser.
+		// PGPASSWORD env var avoids the password appearing in the process list.
+		sqlStmt := fmt.Sprintf(
+			`ALTER USER "%s" WITH PASSWORD '%s'; ALTER USER postgres WITH PASSWORD '%s';`,
+			dbUser, newPassSQL, newPassSQL)
+		out, err := podmanCmd("exec",
+			"-e", "PGPASSWORD="+oldPass,
+			cName,
+			"psql", "-U", "postgres", "-c", sqlStmt,
+		).CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("psql exec failed: %v — %s", err, strings.TrimSpace(string(out)))
+		}
+		return nil
+	default:
+		return fmt.Errorf("unsupported database type %q for password change", dbType)
+	}
 }
 
 // dbRegistryImages returns candidate image references in pull-priority order.
@@ -2272,9 +2358,11 @@ func dbContainerCmdArgs(dbType string) []string {
 		// /bin/bash /usr/local/bin/docker-entrypoint.sh mysqld
 		return []string{"/usr/local/bin/docker-entrypoint.sh", "mysqld"}
 	case "mariadb":
-		// MariaDB LTS (11.x) uses mariadbd but also recognises mysqld as an alias.
-		// Using mysqld keeps parity with the MySQL path and avoids version sniffing.
-		return []string{"/usr/local/bin/docker-entrypoint.sh", "mysqld"}
+		// MariaDB 11.x renamed the daemon binary from mysqld to mariadbd.
+		// mysqld is no longer present in MariaDB 11.x — passing it as $1 causes
+		// docker-entrypoint.sh line 105 to try `mysqld --verbose --help` which
+		// fails with "command not found".
+		return []string{"/usr/local/bin/docker-entrypoint.sh", "mariadbd"}
 	case "postgres":
 		// /bin/bash /usr/local/bin/docker-entrypoint.sh postgres
 		return []string{"/usr/local/bin/docker-entrypoint.sh", "postgres"}
