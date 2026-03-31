@@ -1610,8 +1610,10 @@ func startDatabaseRetrying(db *sql.DB, jwtSecret string, dbID int64, attempt int
 	}
 
 	// Persist data in a named volume so it survives container re-creation.
+	// The volume is NEVER deleted by Stop or Restart — only an explicit
+	// database deletion with purge=true removes it.
 	volumeName := dbVolumeName(dbID)
-	log.add("[volume] ensuring data volume %s → %s", volumeName, dbDataMountPath(dbType, dbVersion))
+	log.add("[volume] ensuring persistent data volume %s → %s (data survives stop/restart)", volumeName, dbDataMountPath(dbType, dbVersion))
 	if err := ensureDatabaseVolume(dbID); err != nil {
 		log.add("ERROR: volume ensure failed: %v", err)
 		db.Exec(`UPDATE databases SET status='error', last_error=?, updated_at=datetime('now') WHERE id=?`, err.Error(), dbID) //nolint
@@ -1638,12 +1640,15 @@ func startDatabaseRetrying(db *sql.DB, jwtSecret string, dbID int64, attempt int
 	if !useLimits {
 		resourceDesc = "(resource limits skipped — cgroup v1 or no delegation)"
 	}
-	entrypointDesc := "image default entrypoint"
-	if entrypoint != "" {
-		entrypointDesc = fmt.Sprintf("entrypoint %s", entrypoint)
+	cmdArgs := dbContainerCmdArgs(dbType)
+	effectiveCmd := "(image default)"
+	if entrypoint != "" && len(cmdArgs) > 0 {
+		effectiveCmd = fmt.Sprintf("%s %s", entrypoint, strings.Join(cmdArgs, " "))
+	} else if entrypoint != "" {
+		effectiveCmd = entrypoint
 	}
-	log.add("[podman] run  --name %s  --restart on-failure:10  %s  port %s  image %s  %s  (log-opt rotation disabled for rootless compat)",
-		cName, resourceDesc, portBind, activeImage, entrypointDesc)
+	log.add("[podman] run  --name %s  --restart on-failure:10  %s  port %s  image %s  cmd: %s",
+		cName, resourceDesc, portBind, activeImage, effectiveCmd)
 
 	runArgs := []string{
 		"run", "-d",
@@ -1663,6 +1668,10 @@ func startDatabaseRetrying(db *sql.DB, jwtSecret string, dbID int64, attempt int
 		// the container's stdout/stderr to not be captured (empty podman logs)
 		// and can produce spurious exit-127 failures for the container process.
 		// The default k8s-file driver without rotation is sufficient and reliable.
+		// Use the k8s-file log driver explicitly so podman logs always works in
+		// rootless mode. Without this, some distributions default to journald
+		// which may be inaccessible to the rootless featherdeploy user.
+		"--log-driver", "k8s-file",
 		"-v", mountSpec,
 	}
 	if useLimits {
@@ -1687,9 +1696,9 @@ func startDatabaseRetrying(db *sql.DB, jwtSecret string, dbID int64, attempt int
 	// Inject the DB engine's environment variables (credentials, database name).
 	runArgs = append(runArgs, dbContainerEnvArgs(dbType, dbVersion, dbName, dbUser, clearPass)...)
 	runArgs = append(runArgs, activeImage)
-	// Append the engine command explicitly so Podman does not need to resolve the
-	// image's default PATH-based command/entrypoint combination.
-	runArgs = append(runArgs, dbContainerCmdArgs(dbType)...)
+	// Append cmd args (script path + engine binary) after the image name.
+	// cmdArgs is already computed above for the log line.
+	runArgs = append(runArgs, cmdArgs...)
 
 	out, err := podmanCmd(runArgs...).CombinedOutput()
 	outStr := strings.TrimSpace(string(out))
@@ -1777,10 +1786,25 @@ func startDatabaseRetrying(db *sql.DB, jwtSecret string, dbID int64, attempt int
 						log.add("[engine] %s", t)
 					}
 				}
+			} else {
+				// No log output — ask podman for the OCI runtime error string.
+				// This is distinct from the container's own stderr; it contains
+				// crun/runc error messages like "exec format error" or "no such file".
+				if ociErr, _ := podmanCmd("inspect", "--format", "{{.State.Error}}", cID).Output(); len(ociErr) > 0 {
+					if se := strings.TrimSpace(string(ociErr)); se != "" {
+						log.add("[health] OCI runtime error: %s", se)
+					}
+				}
 			}
 
 			if exitCode == "127" && subSecondExit {
-				log.add("[health] exit 127 happened before the engine emitted logs — forcing a fresh pull and retry")
+				log.add("[health] exit 127 in <2 s with no logs — the container process could not be exec'd")
+				log.add("[health] this usually means the OCI runtime (crun) failed to start the entrypoint binary")
+				log.add("[health] common rootless Podman fixes:")
+				log.add("[health]   1) Check subuid/subgid mapping:  grep featherdeploy /etc/subuid /etc/subgid")
+				log.add("[health]   2) Verify fuse-overlayfs:        podman info | grep graphDriverName (expect overlay)")
+				log.add("[health]   3) Reset overlay storage (WARN: destroys all images/containers):")
+				log.add("[health]      podman system reset && podman pull %s", pulledImage)
 			}
 
 			if attempt >= maxDBStartAttempts {
@@ -2024,17 +2048,28 @@ func GetDatabaseLogs(dbID int64) (string, error) {
 		"Status: {{.State.Status}}\nExit code: {{.State.ExitCode}}\nRestarts: {{.RestartCount}}\nOOM killed: {{.State.OOMKilled}}\nError: {{.State.Error}}\nStarted: {{.State.StartedAt}}\nFinished: {{.State.FinishedAt}}",
 		cName,
 	).Output()
-	diag := "[No log output — container may be writing logs to an internal file rather than stdout, or it is exiting before producing any output.]"
+	diag := "[No log output — container is exiting before producing any output.]"
 	if inspErr == nil {
-		diag = fmt.Sprintf("[No log output]\n\nContainer state:\n%s\n\n"+
-			"Possible causes:\n"+
-			"  • First-run database initialization is slow (wait 30–60s then refresh)\n"+
-			"  • cgroup v2 resource limits (--memory/--cpus) are unsupported in this environment\n"+
-			"  • Insufficient disk space in the container volume\n\n"+
-			"To see more detail run as featherdeploy user:\n"+
+		inspStr := strings.TrimSpace(string(inspOut))
+		// Specific guidance for exit 127 with no logs — the most common rootless
+		// Podman failure indicating the container's init binary couldn't be exec'd.
+		exitHint := "\n\nPossible causes:\n" +
+			"  • First-run database initialization is slow (wait 30–60s then refresh)\n" +
+			"  • Insufficient disk space in the container volume"
+		if strings.Contains(inspStr, "Exit code: 127") {
+			exitHint = "\n\nExit 127 with no logs — OCI runtime could not exec the entrypoint binary.\n" +
+				"This is a rootless Podman environment issue, not a database config error.\n" +
+				"Investigate as the featherdeploy user:\n" +
+				"  podman info | grep -E 'graphDriver|overlay'\n" +
+				"  grep featherdeploy /etc/subuid /etc/subgid\n" +
+				"If the overlay storage is corrupt:\n" +
+				"  podman system reset   (WARNING: destroys all containers and images)"
+		}
+		diag = fmt.Sprintf("[No log output]\n\nContainer state:\n%s\n%s\n\n"+
+			"For raw container output run as featherdeploy user:\n"+
 			"  podman logs %s\n"+
 			"  podman inspect %s | grep -i state",
-			strings.TrimSpace(string(inspOut)), cName, cName)
+			inspStr, exitHint, cName, cName)
 	}
 	return diag, nil
 }
@@ -2171,10 +2206,13 @@ func dbVolumeMountSpec(volumeName, mountPath string) string {
 
 func dbContainerEntrypoint(dbType string) string {
 	switch dbType {
-	case "postgres":
-		return "/usr/local/bin/docker-entrypoint.sh"
-	case "mysql":
-		return "/usr/local/bin/docker-entrypoint.sh"
+	case "mysql", "postgres":
+		// Use /bin/bash as the explicit entrypoint so the OCI runtime exec's a
+		// real ELF binary instead of a shell script. In rootless Podman the
+		// kernel shebang-interpreter lookup can silently fail (ENOENT → exit 127
+		// with no log output) when the user-namespace subuid mapping isn't fully
+		// resolved at exec time. Delegating to bash avoids that path entirely.
+		return "/bin/bash"
 	default:
 		return ""
 	}
@@ -2206,15 +2244,18 @@ func dbContainerEnvArgs(dbType, version, dbName, dbUser, clearPass string) []str
 	}
 }
 
-// dbContainerCmdArgs returns the engine command appended after the image name.
-// We pass it explicitly so rootless Podman does not depend on PATH resolution
-// for the image's default command.
+// dbContainerCmdArgs returns the arguments appended after the image name.
+// Because dbContainerEntrypoint returns /bin/bash, these become bash argv;
+// the first element must be the absolute path to the docker-entrypoint.sh
+// script so bash sources+executes it, followed by the engine command.
 func dbContainerCmdArgs(dbType string) []string {
 	switch dbType {
-	case "postgres":
-		return []string{"postgres"}
 	case "mysql":
-		return []string{"mysqld"}
+		// /bin/bash /usr/local/bin/docker-entrypoint.sh mysqld
+		return []string{"/usr/local/bin/docker-entrypoint.sh", "mysqld"}
+	case "postgres":
+		// /bin/bash /usr/local/bin/docker-entrypoint.sh postgres
+		return []string{"/usr/local/bin/docker-entrypoint.sh", "postgres"}
 	default:
 		return nil
 	}
