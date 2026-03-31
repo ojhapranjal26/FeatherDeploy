@@ -509,9 +509,16 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 		"--name", cName,
 		"--restart", "unless-stopped",
 		"-p", fmt.Sprintf("%d:%d", hostPort, appPort),
-		// Rotate container logs: max 10 MB per file, keep 3 files
-		"--log-opt", "max-size=10m",
-		"--log-opt", "max-file=3",
+		// NOTE: --log-opt max-size/max-file is intentionally omitted.
+		// In rootless Podman, log rotation via conmon requires a minimum conmon
+		// version and correct cgroup delegation. When unsupported, it causes
+		// the container's stdout/stderr to not be captured (empty podman logs)
+		// and can produce spurious exit-127 failures for the container process.
+		// The default k8s-file driver without rotation is sufficient and reliable.
+		// Use the k8s-file log driver explicitly so podman logs always works in
+		// rootless mode. Without this, some distributions default to journald
+		// which may be inaccessible to the rootless featherdeploy user.
+		"--log-driver", "k8s-file",
 	}
 	// Use slirp4netns with host-loopback access so the container can reach the
 	// fdnet proxy (bound on the host) via 10.0.2.2:<clusterPort>.

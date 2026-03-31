@@ -159,6 +159,14 @@ func serve() {
 	deploy.SetNetDaemon(netDaemon)
 	slog.Info("fdnet: network daemon ready")
 
+	// Re-sync database container states after a restart or update.
+	// Must run after SetNetDaemon so that re-registered containers can be
+	// proxied immediately.  Databases whose container is still running need
+	// no intervention — fdnet already restored their TCP proxy above via
+	// ReconcileRegistered().  Databases whose container stopped while we were
+	// down are attempted a re-start here so services don't see a dead proxy.
+	go reconcileDatabaseStates(db)
+
 	// ─── Brain heartbeat + SSH key
 	if err := ensureSSHKey(db); err != nil {
 		slog.Warn("SSH key setup", "err", err)
@@ -567,6 +575,80 @@ func reconcileServiceStates(db *sql.DB) {
 			`UPDATE services SET status=?, updated_at=datetime('now') WHERE id=?`,
 			wantedStatus, svcID)
 		slog.Info("startup reconcile: synced service", "svc_id", svcID, "container_state", state, "db_status", wantedStatus)
+	}
+}
+
+// reconcileDatabaseStates is called once at startup (after SetNetDaemon) in a
+// goroutine.  It synchronises the databases.status column with the real Podman
+// container state and attempts to restart containers that stopped while the
+// previous process was down.
+//
+// Zero-downtime update path:
+//   - Running containers survive the binary restart untouched.
+//   - fdnet already restored TCP proxies via ReconcileRegistered() (state file).
+//   - This function only corrects stale status rows and tries to revive
+//     containers that died while featherdeploy was offline.
+func reconcileDatabaseStates(db *sql.DB) {
+	rows, err := db.Query(
+		`SELECT id, db_type FROM databases WHERE status IN ('running','starting','error')`)
+	if err != nil {
+		slog.Warn("startup reconcile databases: query", "err", err)
+		return
+	}
+	defer rows.Close()
+
+	type dbRow struct {
+		id     int64
+		dbType string
+	}
+	var entries []dbRow
+	for rows.Next() {
+		var e dbRow
+		if rows.Scan(&e.id, &e.dbType) == nil {
+			entries = append(entries, e)
+		}
+	}
+	rows.Close()
+
+	for _, e := range entries {
+		if e.dbType == "sqlite" {
+			// SQLite has no container — it is always "running" as long as its
+			// named volume exists (which it does unless the user explicitly deleted it).
+			db.Exec( //nolint
+				`UPDATE databases SET status='running', updated_at=datetime('now') WHERE id=?`, e.id)
+			slog.Info("startup reconcile: sqlite database marked running", "db_id", e.id)
+			continue
+		}
+
+		cName := fmt.Sprintf("fd-db-%d", e.id)
+		out, inspErr := deploy.PodmanCmd("inspect",
+			"--format", "{{.State.Status}}", cName).Output()
+		if inspErr != nil {
+			// Container doesn't exist.
+			db.Exec( //nolint
+				`UPDATE databases SET status='error', updated_at=datetime('now') WHERE id=?`, e.id)
+			slog.Info("startup reconcile: database container missing", "db_id", e.id)
+			continue
+		}
+
+		state := strings.TrimSpace(string(out))
+		wantedStatus := "error"
+		if state == "running" {
+			wantedStatus = "running"
+		} else if state == "exited" || state == "stopped" || state == "created" {
+			// Container is stopped — try to bring it back before marking error.
+			if startOut, startErr := deploy.PodmanCmd("start", cName).CombinedOutput(); startErr == nil {
+				wantedStatus = "running"
+				slog.Info("startup reconcile: restarted stopped database container", "db_id", e.id)
+			} else {
+				slog.Warn("startup reconcile: could not restart database container",
+					"db_id", e.id, "output", strings.TrimSpace(string(startOut)))
+			}
+		}
+		db.Exec( //nolint
+			`UPDATE databases SET status=?, updated_at=datetime('now') WHERE id=?`,
+			wantedStatus, e.id)
+		slog.Info("startup reconcile: synced database", "db_id", e.id, "container_state", state, "db_status", wantedStatus)
 	}
 }
 

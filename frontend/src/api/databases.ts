@@ -30,12 +30,10 @@ export interface CreateDatabasePayload {
   db_name?: string
   db_user?: string
   db_password?: string
-  network_public?: boolean
 }
 
 export interface UpdateDatabasePayload {
   db_version?: string
-  network_public: boolean
 }
 
 export interface DatabaseLogsResponse {

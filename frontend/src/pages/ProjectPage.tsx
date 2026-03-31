@@ -277,7 +277,7 @@ function DatabaseCard({ database, projectId, canEdit }: { database: DatabaseReco
   const [statsOpen, setStatsOpen] = useState(false)
   const [editOpen, setEditOpen] = useState(false)
   const [editVersion, setEditVersion] = useState(database.db_version)
-  const [editPublic, setEditPublic] = useState(database.network_public)
+
 
   const copyToClipboard = (text: string, label: string) => {
     navigator.clipboard.writeText(text).then(
@@ -398,7 +398,7 @@ function DatabaseCard({ database, projectId, canEdit }: { database: DatabaseReco
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
                 {!isSQLite && (
-                  <DropdownMenuItem onClick={() => { setEditVersion(database.db_version); setEditPublic(database.network_public); setEditOpen(true) }}>
+                  <DropdownMenuItem onClick={() => { setEditVersion(database.db_version); setEditOpen(true) }}>
                     <Settings2 className="mr-2 h-3.5 w-3.5" /> Edit configuration
                   </DropdownMenuItem>
                 )}
@@ -566,25 +566,13 @@ function DatabaseCard({ database, projectId, canEdit }: { database: DatabaseReco
                 className="font-mono"
               />
             </div>
-            <div className="flex items-center gap-3">
-              <input
-                id="edit-db-public"
-                type="checkbox"
-                checked={editPublic}
-                onChange={(e) => setEditPublic(e.target.checked)}
-                className="h-4 w-4 rounded border-input"
-              />
-              <Label htmlFor="edit-db-public" className="cursor-pointer">
-                Expose on a host port (public access)
-              </Label>
-            </div>
           </div>
           <DialogFooter className="gap-2">
             <Button variant="ghost" size="sm" onClick={() => setEditOpen(false)} disabled={updateMutation.isPending}>Cancel</Button>
             <Button
               size="sm"
               disabled={updateMutation.isPending}
-              onClick={() => updateMutation.mutate({ db_version: editVersion, network_public: editPublic })}
+              onClick={() => updateMutation.mutate({ db_version: editVersion })}
             >
               {updateMutation.isPending ? 'Saving…' : 'Save changes'}
             </Button>
@@ -853,7 +841,6 @@ export function ProjectPage() {
   const [newDbDatabaseName, setNewDbDatabaseName] = useState('')
   const [newDbUser, setNewDbUser] = useState('')
   const [newDbPassword, setNewDbPassword] = useState('')
-  const [newDbAccess, setNewDbAccess] = useState<'private' | 'public'>('private')
   const searchRef = useRef<HTMLDivElement>(null)
 
   const { data: project, isLoading: projLoading } = useQuery({
@@ -935,7 +922,6 @@ export function ProjectPage() {
     setNewDbDatabaseName('')
     setNewDbUser('')
     setNewDbPassword('')
-    setNewDbAccess('private')
   }
 
   const createSvcMutation = useMutation({
@@ -958,7 +944,6 @@ export function ProjectPage() {
       db_name: newDbDatabaseName || undefined,
       db_user: newDbType === 'sqlite' ? undefined : (newDbUser || undefined),
       db_password: newDbType === 'sqlite' ? undefined : (newDbPassword || undefined),
-      network_public: newDbType === 'sqlite' ? false : newDbAccess === 'public',
     }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['databases', projectId] })
@@ -1377,7 +1362,6 @@ export function ProjectPage() {
                 setNewDbType(nextType)
                 setNewDbVersion(defaultDatabaseVersion(nextType))
                 if (nextType === 'sqlite') {
-                  setNewDbAccess('private')
                   setNewDbUser('')
                   setNewDbPassword('')
                 }
@@ -1440,19 +1424,6 @@ export function ProjectPage() {
                     value={newDbPassword}
                     onChange={(e) => setNewDbPassword(e.target.value)}
                   />
-                </div>
-
-                <div>
-                  <Label htmlFor="db-access">Exposure</Label>
-                  <Select value={newDbAccess} onValueChange={(value) => setNewDbAccess(value as 'private' | 'public')}>
-                    <SelectTrigger id="db-access" className="mt-1.5">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="private">Private to project network</SelectItem>
-                      <SelectItem value="public">Expose on a host port</SelectItem>
-                    </SelectContent>
-                  </Select>
                 </div>
               </>
             )}
