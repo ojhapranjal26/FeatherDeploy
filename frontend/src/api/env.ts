@@ -22,14 +22,14 @@ export const envApi = {
   upsert: (projectId: string | number, serviceId: string | number, data: UpsertEnvPayload): Promise<void> =>
     client.put(`/projects/${projectId}/services/${serviceId}/env`, data).then(() => undefined),
 
-  bulkUpsert: async (
+  bulkUpsert: (
     projectId: string | number,
     serviceId: string | number,
     data: UpsertEnvPayload[]
-  ): Promise<{ upserted: number }> => {
-    await Promise.all(data.map((item) => envApi.upsert(projectId, serviceId, item)))
-    return { upserted: data.length }
-  },
+  ): Promise<{ upserted: number }> =>
+    client
+      .post<{ upserted: number }>(`/projects/${projectId}/services/${serviceId}/env/bulk`, data)
+      .then((r) => r.data),
 
   // The backend deletes by key, not by ID
   delete: (projectId: string | number, serviceId: string | number, key: string): Promise<void> =>

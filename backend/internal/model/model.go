@@ -87,7 +87,7 @@ type EnvVar struct {
 	ID        int64     `json:"id"`
 	ServiceID int64     `json:"service_id"`
 	Key       string    `json:"key"`
-	Value     string    `json:"value,omitempty"` // omitted for secrets in list
+	Value     string    `json:"value"`          // empty for secrets in list
 	IsSecret  bool      `json:"is_secret"`
 	UpdatedAt time.Time `json:"updated_at"`
 }

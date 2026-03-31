@@ -439,6 +439,7 @@ func serve() {
 				// ── Env vars ─────────────────────────────────────────────
 				r.Get("/api/projects/{projectID}/services/{serviceID}/env", envH.List)
 				r.Put("/api/projects/{projectID}/services/{serviceID}/env", envH.Upsert)
+				r.Post("/api/projects/{projectID}/services/{serviceID}/env/bulk", envH.BulkUpsert)
 				r.Delete("/api/projects/{projectID}/services/{serviceID}/env/{key}", envH.Delete)
 				r.Get("/api/projects/{projectID}/services/{serviceID}/env/{key}/reveal", envH.Reveal)
 				// ── Container live stats SSE and Domains ─────────────────

@@ -571,7 +571,7 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 	// the port-bind and Caddy's first health-check may get ECONNREFUSED,
 	// caching a 502 until the next reload.
 	go func() {
-		time.Sleep(2 * time.Second)
+		time.Sleep(5 * time.Second)
 		caddy.Reload(db)
 	}()
 

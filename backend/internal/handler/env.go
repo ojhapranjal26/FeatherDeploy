@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -102,6 +103,61 @@ func (h *EnvHandler) Upsert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// POST /api/projects/{projectID}/services/{serviceID}/env/bulk
+func (h *EnvHandler) BulkUpsert(w http.ResponseWriter, r *http.Request) {
+	svcID, err := strconv.ParseInt(r.PathValue("serviceID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errMap("invalid serviceID"))
+		return
+	}
+	var items []model.UpsertEnvVarRequest
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	if err := json.NewDecoder(r.Body).Decode(&items); err != nil {
+		writeJSON(w, http.StatusBadRequest, errMap("invalid JSON: "+err.Error()))
+		return
+	}
+	if len(items) == 0 {
+		writeJSON(w, http.StatusBadRequest, errMap("empty list"))
+		return
+	}
+	if len(items) > 200 {
+		writeJSON(w, http.StatusBadRequest, errMap("too many variables (max 200)"))
+		return
+	}
+
+	upserted := 0
+	for _, req := range items {
+		if req.Key == "" || req.Value == "" {
+			continue
+		}
+		valueToStore := req.Value
+		if req.IsSecret {
+			enc, encErr := crypto.Encrypt(req.Value, h.jwtSecret)
+			if encErr != nil {
+				slog.Error("bulk encrypt env var", "key", req.Key, "err", encErr)
+				continue
+			}
+			valueToStore = encryptedPrefix + enc
+		}
+		secretInt := 0
+		if req.IsSecret {
+			secretInt = 1
+		}
+		_, execErr := h.db.ExecContext(r.Context(),
+			`INSERT INTO env_variables (service_id, key, value, is_secret, updated_at)
+			 VALUES (?,?,?,?,datetime('now'))
+			 ON CONFLICT(service_id, key) DO UPDATE
+			   SET value=excluded.value, is_secret=excluded.is_secret, updated_at=excluded.updated_at`,
+			svcID, req.Key, valueToStore, secretInt)
+		if execErr != nil {
+			slog.Error("bulk upsert env var", "key", req.Key, "err", execErr)
+			continue
+		}
+		upserted++
+	}
+	writeJSON(w, http.StatusOK, map[string]int{"upserted": upserted})
 }
 
 // DELETE /api/projects/{projectID}/services/{serviceID}/env/{key}

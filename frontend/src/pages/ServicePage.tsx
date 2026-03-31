@@ -409,33 +409,36 @@ export function ServicePage() {
   }
 
   // Reveal all unrevealed secrets in parallel, return merged map
-  const revealAll = async (): Promise<Record<number, string> | null> => {
-    const unrevealed = (envVars ?? []).filter(v => v.is_secret && revealedValues[v.id] === undefined)
-    if (unrevealed.length === 0) return {}
-    try {
-      const results = await Promise.all(
+  const revealAll = async (): Promise<Record<number, string>> => {
+    const secrets = (envVars ?? []).filter(v => v.is_secret)
+    if (secrets.length === 0) return {}
+    // Reveal any not yet cached
+    const unrevealed = secrets.filter(v => revealedValues[v.id] === undefined)
+    if (unrevealed.length > 0) {
+      const results = await Promise.allSettled(
         unrevealed.map(v => envApi.reveal(projectId!, serviceId!, v.key).then(val => [v.id, val] as [number, string]))
       )
-      const extra = Object.fromEntries(results)
+      const extra: Record<number, string> = {}
+      for (const r of results) {
+        if (r.status === 'fulfilled') {
+          extra[r.value[0]] = r.value[1]
+        }
+      }
       setRevealedValues(prev => ({ ...prev, ...extra }))
-      return extra
-    } catch {
-      toast.error('Failed to reveal secrets.')
-      return null
+      return { ...revealedValues, ...extra }
     }
+    return { ...revealedValues }
   }
 
   const copyEnv = async () => {
-    const extra = await revealAll()
-    if (extra === null) return
-    try { await navigator.clipboard.writeText(buildEnvText(extra)); toast.success('Copied to clipboard.') }
+    const revealed = await revealAll()
+    try { await navigator.clipboard.writeText(buildEnvText(revealed)); toast.success('Copied to clipboard.') }
     catch { toast.error('Clipboard copy failed.') }
   }
 
   const downloadEnv = async () => {
-    const extra = await revealAll()
-    if (extra === null) return
-    const blob = new Blob([buildEnvText(extra)], { type: 'text/plain' })
+    const revealed = await revealAll()
+    const blob = new Blob([buildEnvText(revealed)], { type: 'text/plain' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a'); a.href = url; a.download = '.env'; a.click()
     URL.revokeObjectURL(url)
@@ -1247,7 +1250,7 @@ export function ServicePage() {
                     <div className="bg-muted/40 px-3 py-1.5 text-xs font-medium text-muted-foreground">
                       {envPreviewRows.length} variable{envPreviewRows.length !== 1 ? 's' : ''} — review &amp; edit before importing
                     </div>
-                    <div className="max-h-56 overflow-y-auto">
+                    <div className="max-h-56 overflow-auto">
                       <Table>
                         <TableHeader>
                           <TableRow>
@@ -1291,12 +1294,15 @@ export function ServicePage() {
                   </div>
                 )}
                 <div className="flex justify-end gap-2">
-                  <Button variant="outline" onClick={() => setEnvBulkOpen(false)}>Cancel</Button>
+                  <Button variant="outline" onClick={() => setEnvBulkOpen(false)} disabled={bulkEnvMutation.isPending}>Cancel</Button>
                   <Button onClick={importEnvPreview}
-                    disabled={!envPreviewRows.filter(r => r.key.trim()).length || bulkEnvMutation.isPending}>
-                    {envPreviewRows.filter(r => r.key.trim()).length > 0
-                      ? `Import ${envPreviewRows.filter(r => r.key.trim()).length} variable${envPreviewRows.filter(r => r.key.trim()).length !== 1 ? 's' : ''}`
-                      : 'Import'}
+                    disabled={!envPreviewRows.filter(r => r.key.trim()).length || bulkEnvMutation.isPending}
+                    className="gap-1.5">
+                    {bulkEnvMutation.isPending
+                      ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Importing…</>
+                      : envPreviewRows.filter(r => r.key.trim()).length > 0
+                        ? `Import ${envPreviewRows.filter(r => r.key.trim()).length} variable${envPreviewRows.filter(r => r.key.trim()).length !== 1 ? 's' : ''}`
+                        : 'Import'}
                   </Button>
                 </div>
               </div>
