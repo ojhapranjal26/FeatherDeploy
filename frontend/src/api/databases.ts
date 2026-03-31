@@ -1,6 +1,6 @@
 import client from './client'
 
-export type DatabaseType = 'postgres' | 'mysql' | 'sqlite'
+export type DatabaseType = 'postgres' | 'mysql' | 'sqlite' | 'mariadb' | 'redis' | 'mongodb'
 export type DatabaseStatus = 'stopped' | 'starting' | 'running' | 'error'
 
 export interface DatabaseRecord {

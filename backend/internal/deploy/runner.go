@@ -1295,6 +1295,17 @@ func DBConnectionURL(dbType, dbName, dbUser, clearPassword, alias string) string
 	case "mysql":
 		return fmt.Sprintf("mysql://%s:%s@%s:3306/%s",
 			esc(dbUser), esc(clearPassword), alias, dbName)
+	case "mariadb":
+		return fmt.Sprintf("mysql://%s:%s@%s:3306/%s",
+			esc(dbUser), esc(clearPassword), alias, dbName)
+	case "redis":
+		if clearPassword != "" {
+			return fmt.Sprintf("redis://:%s@%s:6379", esc(clearPassword), alias)
+		}
+		return fmt.Sprintf("redis://%s:6379", alias)
+	case "mongodb":
+		return fmt.Sprintf("mongodb://%s:%s@%s:27017/%s?authSource=admin",
+			esc(dbUser), esc(clearPassword), alias, dbName)
 	case "sqlite":
 		return fmt.Sprintf("sqlite:///%s", strings.TrimPrefix(filepath.Join(sqliteMountTarget(alias), sqliteDatabaseFilename(dbName)), "/"))
 	}
@@ -1309,8 +1320,16 @@ func dbConnectionURLFDNet(dbType, dbName, dbUser, clearPassword, host string, po
 	case "postgres":
 		return fmt.Sprintf("postgresql://%s:%s@%s:%d/%s",
 			esc(dbUser), esc(clearPassword), host, port, dbName)
-	case "mysql":
+	case "mysql", "mariadb":
 		return fmt.Sprintf("mysql://%s:%s@%s:%d/%s",
+			esc(dbUser), esc(clearPassword), host, port, dbName)
+	case "redis":
+		if clearPassword != "" {
+			return fmt.Sprintf("redis://:%s@%s:%d", esc(clearPassword), host, port)
+		}
+		return fmt.Sprintf("redis://%s:%d", host, port)
+	case "mongodb":
+		return fmt.Sprintf("mongodb://%s:%s@%s:%d/%s?authSource=admin",
 			esc(dbUser), esc(clearPassword), host, port, dbName)
 	}
 	return ""
@@ -1324,8 +1343,16 @@ func DBPublicConnectionURL(dbType, dbName, dbUser, clearPassword string, hostPor
 	case "postgres":
 		return fmt.Sprintf("postgresql://%s:%s@HOST:%d/%s",
 			esc(dbUser), esc(clearPassword), hostPort, dbName)
-	case "mysql":
+	case "mysql", "mariadb":
 		return fmt.Sprintf("mysql://%s:%s@HOST:%d/%s",
+			esc(dbUser), esc(clearPassword), hostPort, dbName)
+	case "redis":
+		if clearPassword != "" {
+			return fmt.Sprintf("redis://:%s@HOST:%d", esc(clearPassword), hostPort)
+		}
+		return fmt.Sprintf("redis://HOST:%d", hostPort)
+	case "mongodb":
+		return fmt.Sprintf("mongodb://%s:%s@HOST:%d/%s?authSource=admin",
 			esc(dbUser), esc(clearPassword), hostPort, dbName)
 	}
 	return ""
@@ -1456,7 +1483,18 @@ func (l *dbLog) text() string {
 
 // StartDatabase pulls the database image and starts the container in the
 // project's network. Safe to call for both new and stopped databases.
+// StartDatabase launches (or re-launches) the container for a managed database.
+// It is the top-level entry point; retries are handled internally.
 func StartDatabase(db *sql.DB, jwtSecret string, dbID int64) error {
+	return startDatabaseRetrying(db, jwtSecret, dbID, 0)
+}
+
+// startDatabaseRetrying is the inner implementation of StartDatabase.
+// attempt tracks how many times we have already retried after an exit-127;
+// it must never exceed maxDBStartAttempts.
+const maxDBStartAttempts = 2
+
+func startDatabaseRetrying(db *sql.DB, jwtSecret string, dbID int64, attempt int) error {
 	var projectID int64
 	var name, dbType, dbVersion, dbName, dbUser, encPass string
 	var hostPortNull sql.NullInt64
@@ -1496,32 +1534,25 @@ func StartDatabase(db *sql.DB, jwtSecret string, dbID int64) error {
 
 	cName := fmt.Sprintf("fd-db-%d", dbID)
 	alias := DBNetworkAlias(name)
-	image := dbImageName(dbType, dbVersion)
+	image := dbImageName(dbType, dbVersion) // primary Docker Hub ref (for local-cache check)
 	log.add("[db-start] container name: %s  image: %s  alias: %s", cName, image, alias)
 
 	db.Exec(`UPDATE databases SET status='starting', updated_at=datetime('now') WHERE id=?`, dbID) //nolint
 
-	// Pull the image only when it is missing locally to avoid re-downloading a
-	// cached database image on every start.
+	// activeImage is the image ref actually passed to podman run. It equals
+	// image when Docker Hub is used; it may differ when a fallback registry
+	// (e.g. AWS ECR Public) is used because Docker Hub was rate-limited.
+	activeImage := image
+
 	if image != "" && !podmanImageExists(image) {
-		log.add("[pull] image %s not found locally — pulling from registry...", image)
-		pullCmd := podmanCmd("pull", image)
-		pullOut, pullErr := pullCmd.CombinedOutput()
-		pullOutStr := strings.TrimSpace(string(pullOut))
-		if pullOutStr != "" {
-			for _, line := range strings.Split(pullOutStr, "\n") {
-				if t := strings.TrimSpace(line); t != "" {
-					log.add("  %s", t)
-				}
-			}
-		}
+		pulled, pullErr := pullDBImage(log, dbType, dbVersion)
 		if pullErr != nil {
-			errMsg := fmt.Sprintf("pull image %s: %v — %s", image, pullErr, pullOutStr)
-			log.add("ERROR: %s", errMsg)
+			errMsg := pullErr.Error()
+			log.add("ERROR: all registries failed — %s", errMsg)
 			db.Exec(`UPDATE databases SET status='error', last_error=?, updated_at=datetime('now') WHERE id=?`, errMsg, dbID) //nolint
-			return fmt.Errorf("pull database image %s: %v — %s", image, pullErr, pullOutStr)
+			return fmt.Errorf("pull database image: %w", pullErr)
 		}
-		log.add("[pull] image pulled successfully")
+		activeImage = pulled
 	} else if image != "" {
 		log.add("[pull] image %s already present locally — skipping pull", image)
 	}
@@ -1599,7 +1630,9 @@ func StartDatabase(db *sql.DB, jwtSecret string, dbID int64) error {
 	}
 	// Inject the DB engine's environment variables (credentials, database name).
 	runArgs = append(runArgs, dbContainerEnvArgs(dbType, dbName, dbUser, clearPass)...)
-	runArgs = append(runArgs, image)
+	runArgs = append(runArgs, activeImage)
+	// Append per-engine command overrides (e.g. redis-server --requirepass).
+	runArgs = append(runArgs, dbContainerCmdArgs(dbType, clearPass)...)
 
 	out, err := podmanCmd(runArgs...).CombinedOutput()
 	outStr := strings.TrimSpace(string(out))
@@ -1635,12 +1668,15 @@ func StartDatabase(db *sql.DB, jwtSecret string, dbID int64) error {
 	log.add("[db-start] ✓ database is running — waiting for engine to initialize (this can take 10–30s for first-run)")
 	slog.Info("database container started", "db_id", dbID, "container", cName)
 
-	// Background health check: exit code 127 from inside a database container
-	// (bash/entrypoint not found) almost always means the overlay image layers
-	// are stale or incomplete on this host. If detected within the first few
-	// seconds, force-repull the image to refresh layers and retry once.
-	if image != "" {
-		go func(cID string) {
+	// Background health check: exit code 127 inside a database container means
+	// the entrypoint/binary was not found — this almost always indicates stale
+	// or incomplete overlay image layers in podman's local storage. Recovery:
+	//   1. Remove the image from local storage (not just re-pull — that may
+	//      reuse broken layers).  Force a completely fresh layer download.
+	//   2. Re-pull using the full registry fallback list.
+	//   3. Restart the database.  Give up after maxDBStartAttempts total retries.
+	if activeImage != "" {
+		go func(cID, pulledImage string) {
 			time.Sleep(6 * time.Second)
 			inspOut, inspErr := podmanCmd("inspect", "--format",
 				"{{.State.Running}}|{{.State.ExitCode}}|{{.RestartCount}}", cID).Output()
@@ -1656,38 +1692,57 @@ func StartDatabase(db *sql.DB, jwtSecret string, dbID int64) error {
 			if len(parts) == 3 {
 				restarts = parts[2]
 			}
-			log.add("[health] container stopped after start  exitCode=%s  restarts=%s", exitCode, restarts)
+			log.add("[health] container stopped after start  exitCode=%s  restarts=%s  attempt=%d/%d",
+				exitCode, restarts, attempt+1, maxDBStartAttempts+1)
 
-			if exitCode == "127" {
-				log.add("[health] exit 127 = entrypoint not found — image layers likely incomplete; repulling %s", image)
-				slog.Warn("database container exited 127 — image layers likely incomplete; repulling",
-					"db_id", dbID, "image", image)
-				podmanCmd("rm", "-f", cID).Run() //nolint
-				log.add("[pull] force-pulling %s to refresh layers...", image)
-				if pullOut, pullErr := podmanCmd("pull", image).CombinedOutput(); pullErr != nil {
-					msg := strings.TrimSpace(string(pullOut))
-					log.add("ERROR: repull failed: %v — %s", pullErr, msg)
-					slog.Error("image repull failed after exit 127",
-						"db_id", dbID, "image", image, "err", pullErr, "output", msg)
-				} else {
-					log.add("[pull] repull complete — retrying StartDatabase")
-				}
-				// Retry the full start sequence via StartDatabase so all
-				// fdnet registration, status updates, etc. are correct.
-				if retryErr := StartDatabase(db, jwtSecret, dbID); retryErr != nil {
-					log.add("ERROR: retry after repull failed: %v", retryErr)
-					slog.Error("database start failed after image repull", "db_id", dbID, "err", retryErr)
-					db.Exec( //nolint
-						`UPDATE databases SET status='error', last_error=?, updated_at=datetime('now') WHERE id=?`,
-						"Container exited with code 127 even after image repull. "+
-							"Container storage may need resetting — run 'sudo featherdeploy update' on the server. "+
-							"As the featherdeploy user, check: podman info | grep -i graphDriver",
-						dbID)
-				}
-			} else {
-				log.add("[health] NOTE: container exited — this is normal for a crash loop (exit %s); check logs below for engine output", exitCode)
+			if exitCode != "127" {
+				log.add("[health] NOTE: container exited with code %s — check container output logs for details", exitCode)
+				return
 			}
-		}(containerID)
+
+			// Exit 127 handling
+			if attempt >= maxDBStartAttempts {
+				msg := fmt.Sprintf(
+					"Container exited with code 127 on all %d attempts. "+
+						"Podman overlay storage may be corrupt. "+
+						"Run 'sudo featherdeploy update' or as the featherdeploy user: "+
+						"podman system reset (WARNING: destroys all containers/images).",
+					attempt+1)
+				log.add("[health] ERROR: %s", msg)
+				slog.Error("database start: exit 127 exceeded retry limit",
+					"db_id", dbID, "attempts", attempt+1)
+				db.Exec( //nolint
+					`UPDATE databases SET status='error', last_error=?, updated_at=datetime('now') WHERE id=?`,
+					msg, dbID)
+				return
+			}
+
+			log.add("[health] exit 127 detected (attempt %d/%d) — image layers incomplete",
+				attempt+1, maxDBStartAttempts+1)
+			slog.Warn("database container exited 127 — removing image and repulling",
+				"db_id", dbID, "image", pulledImage, "attempt", attempt+1)
+
+			// Step 1: remove the container (it is stopped already but clean up)
+			podmanCmd("rm", "-f", cID).Run() //nolint
+
+			// Step 2: REMOVE the image entirely so podman fetches fresh layers.
+			// A plain re-pull may reuse the same (broken) cached layers.
+			log.add("[health] removing image %s from local storage to force fresh download...", pulledImage)
+			if rmOut, rmErr := podmanCmd("image", "rm", "-f", pulledImage).CombinedOutput(); rmErr != nil {
+				log.add("[health] WARNING: image remove failed (continuing anyway): %v — %s",
+					rmErr, strings.TrimSpace(string(rmOut)))
+			} else {
+				log.add("[health] image removed from local storage")
+			}
+
+			// Step 3: retry the full start sequence (which will re-pull).
+			log.add("[health] retrying StartDatabase (attempt %d/%d)...", attempt+2, maxDBStartAttempts+1)
+			if retryErr := startDatabaseRetrying(db, jwtSecret, dbID, attempt+1); retryErr != nil {
+				log.add("ERROR: retry failed: %v", retryErr)
+				slog.Error("database start failed after image repull",
+					"db_id", dbID, "attempt", attempt+1, "err", retryErr)
+			}
+		}(containerID, activeImage)
 	}
 	return nil
 }
@@ -1886,24 +1941,91 @@ func UpdateDatabase(db *sql.DB, dbID int64, dbVersion string, networkPublic bool
 	return err
 }
 
-// dbImageName returns the full image reference for a database type + version tag.
-func dbImageName(dbType, version string) string {
+// dbRegistryImages returns candidate image references in pull-priority order.
+// Docker Hub (docker.io/library) is always first — it is the canonical source
+// with the widest image selection. AWS ECR Public is a free, unauthenticated
+// mirror of Docker Hub official images and is used as a fallback when Docker
+// Hub is rate-limited or temporarily unreachable.
+//
+// Registry cheat-sheet:
+//   Docker Hub:     docker.io/library/<name>:<tag>
+//   AWS ECR Public: public.ecr.aws/docker/library/<name>:<tag>
+//   GitHub GHCR:    ghcr.io/<org>/<name>:<tag>  (no official mirrors here)
+//   Google GCR:     gcr.io/<project>/<name>:<tag>
+func dbRegistryImages(dbType, version string) []string {
 	if version == "" || version == "latest" {
 		version = "latest"
 	}
-	// Use fully-qualified docker.io/library/ names to avoid short-name
-	// resolution failures on systems without unqualified-search-registries
-	// configured in /etc/containers/registries.conf (e.g. RHEL/Fedora defaults).
+	// Map FeatherDeploy DB type to Docker Hub image name.
+	var libName string
 	switch dbType {
 	case "postgres":
-		return "docker.io/library/postgres:" + version
+		libName = "postgres"
 	case "mysql":
-		return "docker.io/library/mysql:" + version
-	case "sqlite":
-		return ""
+		libName = "mysql"
+	case "mariadb":
+		libName = "mariadb"
+	case "redis":
+		libName = "redis"
+	case "mongodb":
+		libName = "mongo"
 	default:
+		return nil // sqlite or unknown — no container image needed
+	}
+	return []string{
+		"docker.io/library/" + libName + ":" + version,
+		// AWS ECR Public mirrors all Docker Hub official images at no cost,
+		// no authentication, and with higher rate limits.
+		"public.ecr.aws/docker/library/" + libName + ":" + version,
+	}
+}
+
+// dbImageName returns the primary (Docker Hub) image reference for a database
+// type. Kept for callers that only need one canonical ref (e.g. image-exists
+// checks, volume-cleanup). Use pullDBImage for actual pulls.
+func dbImageName(dbType, version string) string {
+	refs := dbRegistryImages(dbType, version)
+	if len(refs) == 0 {
 		return ""
 	}
+	return refs[0]
+}
+
+// pullDBImage pulls the image for the given database type+version, trying each
+// registry in dbRegistryImages priority order until one succeeds. It writes
+// progress to the dbLog so the user can see which registry was used.
+// Returns the image reference that was successfully pulled (may be a fallback).
+func pullDBImage(log *dbLog, dbType, version string) (string, error) {
+	refs := dbRegistryImages(dbType, version)
+	if len(refs) == 0 {
+		return "", fmt.Errorf("no image defined for database type %q", dbType)
+	}
+	var lastErr error
+	for i, ref := range refs {
+		if i == 0 {
+			log.add("[pull] pulling %s from Docker Hub...", ref)
+		} else {
+			log.add("[pull] Docker Hub unavailable — trying fallback: %s", ref)
+		}
+		out, err := podmanCmd("pull", ref).CombinedOutput()
+		outStr := strings.TrimSpace(string(out))
+		for _, line := range strings.Split(outStr, "\n") {
+			if t := strings.TrimSpace(line); t != "" {
+				log.add("  %s", t)
+			}
+		}
+		if err == nil {
+			if i == 0 {
+				log.add("[pull] ✓ pulled successfully from Docker Hub")
+			} else {
+				log.add("[pull] ✓ pulled from fallback registry (Docker Hub was unavailable)")
+			}
+			return ref, nil
+		}
+		log.add("[pull] ERROR: registry %d/%d failed: %v", i+1, len(refs), err)
+		lastErr = fmt.Errorf("pull %s: %v — %s", ref, err, outStr)
+	}
+	return "", fmt.Errorf("all registries failed (tried %d): %w", len(refs), lastErr)
 }
 
 // dbInternalPort returns the default listening port for a database type.
@@ -1911,8 +2033,12 @@ func dbInternalPort(dbType string) int {
 	switch dbType {
 	case "postgres":
 		return 5432
-	case "mysql":
+	case "mysql", "mariadb":
 		return 3306
+	case "redis":
+		return 6379
+	case "mongodb":
+		return 27017
 	default:
 		return 5432
 	}
@@ -1923,8 +2049,12 @@ func dbDataMountPath(dbType string) string {
 	switch dbType {
 	case "postgres":
 		return "/var/lib/postgresql/data"
-	case "mysql":
+	case "mysql", "mariadb":
 		return "/var/lib/mysql"
+	case "redis":
+		return "/data"
+	case "mongodb":
+		return "/data/db"
 	case "sqlite":
 		return "/data"
 	default:
@@ -1933,7 +2063,9 @@ func dbDataMountPath(dbType string) string {
 }
 
 // dbContainerEnvArgs returns -e KEY=VALUE pairs for the DB engine container.
-// Redis credentials are handled via a command override, not env vars.
+// Redis credentials are passed as command arguments (see dbContainerCmdArgs),
+// not environment variables, because the official Redis image has no env var
+// for the password — only redis-server --requirepass is supported.
 func dbContainerEnvArgs(dbType, dbName, dbUser, clearPass string) []string {
 	switch dbType {
 	case "postgres":
@@ -1943,15 +2075,49 @@ func dbContainerEnvArgs(dbType, dbName, dbUser, clearPass string) []string {
 			"-e", "POSTGRES_PASSWORD=" + clearPass,
 		}
 	case "mysql":
+		// MYSQL_ROOT_PASSWORD is required; the named user+password are optional.
+		// Use a distinct root password (same value for simplicity) and expose
+		// the service via the non-root user to follow least-privilege practices.
 		return []string{
 			"-e", "MYSQL_DATABASE=" + dbName,
 			"-e", "MYSQL_USER=" + dbUser,
 			"-e", "MYSQL_PASSWORD=" + clearPass,
 			"-e", "MYSQL_ROOT_PASSWORD=" + clearPass,
 		}
-	default:
+	case "mariadb":
+		// MariaDB 10.4+ uses MARIADB_* vars (mirrors MYSQL_* for compat).
+		return []string{
+			"-e", "MARIADB_DATABASE=" + dbName,
+			"-e", "MARIADB_USER=" + dbUser,
+			"-e", "MARIADB_PASSWORD=" + clearPass,
+			"-e", "MARIADB_ROOT_PASSWORD=" + clearPass,
+		}
+	case "mongodb":
+		// MONGO_INITDB_ROOT_* creates an admin superuser on first init.
+		// MONGO_INITDB_DATABASE selects the default auth database.
+		return []string{
+			"-e", "MONGO_INITDB_ROOT_USERNAME=" + dbUser,
+			"-e", "MONGO_INITDB_ROOT_PASSWORD=" + clearPass,
+			"-e", "MONGO_INITDB_DATABASE=" + dbName,
+		}
+	default: // redis: credentials via redis-server --requirepass (see dbContainerCmdArgs)
 		return nil
 	}
+}
+
+// dbContainerCmdArgs returns optional command arguments that are appended
+// after the image name in the podman run invocation, overriding the default
+// container CMD. Currently used for Redis where the only supported way to set
+// a password in the official image is via redis-server command-line flags.
+func dbContainerCmdArgs(dbType, clearPass string) []string {
+	switch dbType {
+	case "redis":
+		if clearPass != "" {
+			return []string{"redis-server", "--requirepass", clearPass, "--save", "60", "1", "--loglevel", "notice"}
+		}
+		return []string{"redis-server", "--save", "60", "1", "--loglevel", "notice"}
+	}
+	return nil
 }
 
 func ensureDatabaseVolume(dbID int64) error {
