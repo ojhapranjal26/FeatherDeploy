@@ -988,8 +988,8 @@ export function ProjectPage() {
         </div>
       ) : (
         <div className="flex items-start justify-between gap-4 flex-wrap">
-          <div>
-            <div className="flex items-center gap-2">
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2 flex-wrap">
               <h1 className="text-2xl font-bold tracking-tight">{project?.name}</h1>
               {project?.my_role && (
                 <Badge variant={project.my_role === 'owner' ? 'default' : 'secondary'} className="text-xs capitalize">
@@ -1010,7 +1010,7 @@ export function ProjectPage() {
               )}
             </p>
           </div>
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2 w-full sm:w-auto">
             {isOwner && (
               <Button
                 size="sm"

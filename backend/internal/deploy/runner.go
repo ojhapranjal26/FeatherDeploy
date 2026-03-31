@@ -508,15 +508,10 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 		"--replace",
 		"--name", cName,
 		"--restart", "unless-stopped",
-		// Publish to 0.0.0.0 (no explicit host IP) so that rootlessport always
-		// succeeds in binding the port.  Some Podman + slirp4netns versions
-		// silently fail to bind when a specific host IP such as 127.0.0.1 is
-		// given, leaving the port completely unbound; the container appears
-		// running but Caddy gets ECONNREFUSED.  Publishing to 0.0.0.0 is
-		// universally supported and still reachable from Caddy via 127.0.0.1:
-		// any process on the host can connect to 127.0.0.1:hostPort because
-		// 0.0.0.0 includes the loopback interface.
-		"-p", fmt.Sprintf("%d:%d", hostPort, appPort),
+		// Bind to 127.0.0.1 so the service is only accessible locally.
+		// Caddy reverse-proxies external traffic; direct internet access to
+		// the container port is intentionally blocked.
+		"-p", fmt.Sprintf("127.0.0.1:%d:%d", hostPort, appPort),
 		// NOTE: --log-opt max-size/max-file is intentionally omitted.
 		// In rootless Podman, log rotation via conmon requires a minimum conmon
 		// version and correct cgroup delegation. When unsupported, it causes
@@ -536,7 +531,7 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 	runArgs = append(runArgs, envArgs...)
 	runArgs = append(runArgs, imageName)
 
-	log.add("[podman] podman run -d --name %s -p %d:%d --network slirp4netns %s", cName, hostPort, appPort, imageName)
+	log.add("[podman] podman run -d --name %s -p 127.0.0.1:%d:%d --network slirp4netns %s", cName, hostPort, appPort, imageName)
 	out, err := podmanCmd(runArgs...).CombinedOutput()
 	if err != nil {
 		log.add("ERROR: podman run failed: %v\n%s", err, strings.TrimSpace(string(out)))
@@ -571,7 +566,14 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 		newContainerID, hostPort, svcID)
 
 	// Update Caddy so the service is reachable via its registered domains.
-	go caddy.Reload(db)
+	// Small delay: rootlessport needs a moment to bind the published port
+	// before Caddy can reverse-proxy to it.  Without this the reload races
+	// the port-bind and Caddy's first health-check may get ECONNREFUSED,
+	// caching a 502 until the next reload.
+	go func() {
+		time.Sleep(2 * time.Second)
+		caddy.Reload(db)
+	}()
 
 	// Tag the freshly built image as the stable snapshot so it can be used as
 	// a fallback if a future deployment build fails.
@@ -1710,11 +1712,8 @@ func startDatabaseRetrying(db *sql.DB, jwtSecret string, dbID int64, attempt int
 	}
 	// Use slirp4netns instead of Podman named networks (no aardvark-dns needed).
 	runArgs = append(runArgs, netdaemon.NetworkArgs()...)
-	// Publish to 0.0.0.0 (no host IP prefix) so that rootlessport reliably
-	// binds the port.  Some Podman + slirp4netns versions silently fail to
-	// bind when a specific IP is given (127.0.0.1), leaving the port unbound.
-	// fdnet connects to 127.0.0.1:hostPort which is included in 0.0.0.0.
-	runArgs = append(runArgs, "-p", fmt.Sprintf("%d:%d", hostPort, internalPort))
+	// Bind databases to 127.0.0.1 — internal-only resources accessed via fdnet.
+	runArgs = append(runArgs, "-p", fmt.Sprintf("127.0.0.1:%d:%d", hostPort, internalPort))
 	// Inject the DB engine's environment variables (credentials, database name).
 	runArgs = append(runArgs, dbContainerEnvArgs(activeDBEngine, dbVersion, dbName, dbUser, clearPass)...)
 	runArgs = append(runArgs, activeImage)

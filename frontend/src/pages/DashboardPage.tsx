@@ -124,9 +124,9 @@ function StatCard({ title, value, icon: Icon, iconCls, bgCls, loading }: {
 }) {
   return (
     <Card className="border-border/60">
-      <CardContent className="flex items-center gap-4 p-5">
-        <div className={cn('flex h-11 w-11 shrink-0 items-center justify-center rounded-xl', bgCls)}>
-          <Icon className={cn('h-5 w-5', iconCls)} />
+      <CardContent className="flex items-center gap-3 p-4 sm:gap-4 sm:p-5">
+        <div className={cn('flex h-10 w-10 sm:h-11 sm:w-11 shrink-0 items-center justify-center rounded-xl', bgCls)}>
+          <Icon className={cn('h-4 w-4 sm:h-5 sm:w-5', iconCls)} />
         </div>
         <div>
           {loading ? <Skeleton className="h-8 w-12 mb-1" /> : (
@@ -512,7 +512,7 @@ export function DashboardPage() {
       </div>
 
       {/* Stats row */}
-      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+      <div className="grid grid-cols-1 gap-3 xs:grid-cols-2 sm:gap-4 lg:grid-cols-4">
         <StatCard title="Projects" value={dash?.total_projects ?? 0}
           icon={FolderGit2} iconCls="text-indigo-600 dark:text-indigo-400"
           bgCls="bg-indigo-500/10" loading={dashLoading} />
@@ -566,7 +566,7 @@ export function DashboardPage() {
           <Card className="border-border/60 overflow-hidden">
             <div className="divide-y divide-border/60">
               {recentDeps.slice(0, 8).map(dep => (
-                <div key={dep.id} className="flex items-center gap-3 px-4 py-3 hover:bg-muted/40 transition-colors">
+                <div key={dep.id} className="flex items-center gap-2 sm:gap-3 px-3 sm:px-4 py-3 hover:bg-muted/40 transition-colors">
                   <span className={cn(
                     'text-xs font-medium rounded-full px-2 py-0.5 shrink-0',
                     dep.status === 'success' ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400' :
@@ -576,13 +576,13 @@ export function DashboardPage() {
                   )}>
                     {dep.status}
                   </span>
-                  <span className="text-sm font-medium truncate">{dep.service_name}</span>
+                  <span className="text-sm font-medium truncate min-w-0">{dep.service_name}</span>
                   {dep.commit_sha && (
-                    <span className="text-xs font-mono text-muted-foreground shrink-0">
+                    <span className="hidden sm:inline text-xs font-mono text-muted-foreground shrink-0">
                       {dep.commit_sha.slice(0, 7)}
                     </span>
                   )}
-                  <span className="ml-auto text-xs text-muted-foreground shrink-0">
+                  <span className="ml-auto text-xs text-muted-foreground shrink-0 whitespace-nowrap">
                     {fmt(new Date(dep.created_at).getTime())}
                   </span>
                 </div>
