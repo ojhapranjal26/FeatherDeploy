@@ -2080,9 +2080,8 @@ func dbImageRefParts(dbType, version string) (string, string) {
 	case "postgres":
 		return "postgres", version
 	case "mysql":
-		if version != "latest" && !strings.Contains(version, "-") && (strings.HasPrefix(version, "8.0") || strings.HasPrefix(version, "8.4") || version == "8") {
-			return "mysql", version + "-bookworm"
-		}
+		// MySQL 8.4+ dropped Debian variants entirely; all tags are OracleLinux9.
+		// Use the plain version tag (e.g. "8.4", "9.6", "latest").
 		return "mysql", version
 	default:
 		return "", ""

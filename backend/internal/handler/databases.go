@@ -129,6 +129,17 @@ func (h *DatabaseHandler) Create(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, errMap("sqlite databases cannot be exposed publicly"))
 		return
 	}
+	// MySQL does not allow "root" as the MYSQL_USER — the docker-entrypoint
+	// rejects it and the container fails to initialize.
+	if req.DBType == model.DatabaseTypeMySQL && strings.EqualFold(req.DBUser, "root") {
+		writeJSON(w, http.StatusBadRequest, errMap("mysql user cannot be 'root'; choose a different username"))
+		return
+	}
+	// Public databases are reachable from the internet — require a strong password.
+	if req.NetworkPublic && req.DBType != model.DatabaseTypeSQLite && req.DBPassword != "" && len(req.DBPassword) < 12 {
+		writeJSON(w, http.StatusBadRequest, errMap("password must be at least 12 characters for publicly accessible databases"))
+		return
+	}
 	// Auto-generate a cryptographically random password when none is provided.
 	if req.DBType != model.DatabaseTypeSQLite && req.DBPassword == "" {
 		req.DBPassword = genSecurePassword(24)
