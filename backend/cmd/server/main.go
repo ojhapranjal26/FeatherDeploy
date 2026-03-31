@@ -19,6 +19,7 @@ import (
 	"github.com/go-chi/cors"
 
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/auth"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/caddy"
 	appDb "github.com/ojhapranjal26/featherdeploy/backend/internal/db"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/deploy"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/handler"
@@ -166,6 +167,14 @@ func serve() {
 	// ReconcileRegistered().  Databases whose container stopped while we were
 	// down are attempted a re-start here so services don't see a dead proxy.
 	go reconcileDatabaseStates(db)
+
+	// Reload Caddy after every process restart so the domain→port mapping in
+	// /etc/caddy/featherdeploy-services.caddy is always current with the DB.
+	// Without this, if a domain was added while Caddy was running under the
+	// previous process the new block would already be on disk; but if the Caddy
+	// config was manually cleared or the file was recreated by build.sh the
+	// reload here repairs it before any user traffic arrives.
+	go caddy.Reload(db)
 
 	// ─── Brain heartbeat + SSH key
 	if err := ensureSSHKey(db); err != nil {

@@ -508,7 +508,12 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 		"--replace",
 		"--name", cName,
 		"--restart", "unless-stopped",
-		"-p", fmt.Sprintf("%d:%d", hostPort, appPort),
+		// Bind to 127.0.0.1 explicitly so the published port is accessible from
+		// the host loopback (Caddy uses reverse_proxy 127.0.0.1:hostPort).
+		// In rootless Podman + slirp4netns, publishing to 0.0.0.0 (no explicit
+		// bind address) is not reliably reachable from 127.0.0.1 on all
+		// distributions; the explicit 127.0.0.1 binding always works.
+		"-p", fmt.Sprintf("127.0.0.1:%d:%d", hostPort, appPort),
 		// NOTE: --log-opt max-size/max-file is intentionally omitted.
 		// In rootless Podman, log rotation via conmon requires a minimum conmon
 		// version and correct cgroup delegation. When unsupported, it causes
@@ -528,7 +533,7 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 	runArgs = append(runArgs, envArgs...)
 	runArgs = append(runArgs, imageName)
 
-	log.add("[podman] podman run -d --name %s -p %d:%d --network slirp4netns %s", cName, hostPort, appPort, imageName)
+	log.add("[podman] podman run -d --name %s -p 127.0.0.1:%d:%d --network slirp4netns %s", cName, hostPort, appPort, imageName)
 	out, err := podmanCmd(runArgs...).CombinedOutput()
 	if err != nil {
 		log.add("ERROR: podman run failed: %v\n%s", err, strings.TrimSpace(string(out)))
