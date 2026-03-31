@@ -281,7 +281,7 @@ func (c *conn) query(query string, args []driver.Value) (driver.Rows, error) {
 		return nil, fmt.Errorf("rqlite: marshal query: %w", err)
 	}
 
-	resp, err := c.client.Post(c.baseURL+"/db/query?level=weak&timings", "application/json", bytes.NewReader(body))
+	resp, err := c.client.Post(c.baseURL+"/db/query?level=strong&timings", "application/json", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("rqlite: query POST: %w", err)
 	}
