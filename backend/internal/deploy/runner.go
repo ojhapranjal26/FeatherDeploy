@@ -97,6 +97,35 @@ var (
 // without importing the full netdaemon package in callers.
 var NetDaemon *netdaemon.Daemon
 
+// cgroupResourcesOnce / cgroupResourcesOK cache whether the host supports
+// cgroup v2 cpu+memory controllers in rootless Podman containers.
+// On cgroup v1 (or cgroup v2 without user delegation), passing --cpus/--memory
+// to `podman run` causes crun to fail immediately (exit 127 in < 1 ms) before
+// the container process ever starts.  We detect this once and skip those flags
+// when they are not supported.
+var (
+	cgroupResourcesOnce sync.Once
+	cgroupResourcesOK   bool
+)
+
+// cgroupV2ResourcesAvailable returns true when the host kernel reports cgroup v2
+// with both "cpu" and "memory" controllers available at the root cgroup mount.
+// That is a prerequisite for --cpus / --memory to work in rootless containers.
+func cgroupV2ResourcesAvailable() bool {
+	cgroupResourcesOnce.Do(func() {
+		// cgroupv2 unified hierarchy: /sys/fs/cgroup/cgroup.controllers lists the
+		// controllers enabled at the root.  On cgroupv1 this file does not exist.
+		data, err := os.ReadFile("/sys/fs/cgroup/cgroup.controllers")
+		if err != nil {
+			cgroupResourcesOK = false
+			return
+		}
+		s := string(data)
+		cgroupResourcesOK = strings.Contains(s, "cpu") && strings.Contains(s, "memory")
+	})
+	return cgroupResourcesOK
+}
+
 // SetNetDaemon injects the daemon instance.  Call once from main after
 // netdaemon.New() and ReconcileRegistered() have returned.
 func SetNetDaemon(d *netdaemon.Daemon) { NetDaemon = d }
@@ -1565,8 +1594,18 @@ func startDatabaseRetrying(db *sql.DB, jwtSecret string, dbID int64, attempt int
 	if networkPublic == 1 {
 		portBind = fmt.Sprintf("0.0.0.0:%d→%d (public)", hostPort, internalPort)
 	}
-	log.add("[podman] run  --name %s  --restart on-failure:10  --cpus 2.0  --memory 1g  port %s  image %s  (log-opt rotation disabled for rootless compat)",
-		cName, portBind, activeImage)
+	// Resource limits require cgroup v2 with cpu+memory controllers available.
+	// On cgroup v1 (or cgroup v2 without user delegation), --cpus/--memory cause
+	// crun to exit immediately with code 127 before the container process starts,
+	// producing a sub-millisecond death loop with no log output.
+	// We probe once at runtime and skip those flags if unsupported.
+	useLimits := cgroupV2ResourcesAvailable()
+	resourceDesc := "--cpus 2.0  --memory 1g"
+	if !useLimits {
+		resourceDesc = "(resource limits skipped — cgroup v1 or no delegation)"
+	}
+	log.add("[podman] run  --name %s  --restart on-failure:10  %s  port %s  image %s  (log-opt rotation disabled for rootless compat)",
+		cName, resourceDesc, portBind, activeImage)
 
 	runArgs := []string{
 		"run", "-d",
@@ -1586,15 +1625,13 @@ func startDatabaseRetrying(db *sql.DB, jwtSecret string, dbID int64, attempt int
 		// the container's stdout/stderr to not be captured (empty podman logs)
 		// and can produce spurious exit-127 failures for the container process.
 		// The default k8s-file driver without rotation is sufficient and reliable.
-		//
-		// Resource limits: prevent runaway database containers from consuming
-		// all host CPU/memory. Defaults are generous but capped.
-		// --memory-swap is intentionally omitted so the kernel default applies
-		// (2× memory = 1 GB of swap allowed), preventing OOM kills during
-		// postgres/mysql initdb which is CPU+mem intensive on first startup.
-		"--cpus", "2.0",
-		"--memory", "1g",
 		"-v", volumeName + ":" + mountPath,
+	}
+	if useLimits {
+		// Cgroup v2 with cpu+memory delegation confirmed — apply resource caps.
+		// --memory-swap intentionally omitted so kernel default applies
+		// (2× memory = 1 GB swap), preventing OOM kills during first-run initdb.
+		runArgs = append(runArgs, "--cpus", "2.0", "--memory", "1g")
 	}
 	// Use slirp4netns instead of Podman named networks (no aardvark-dns needed).
 	runArgs = append(runArgs, netdaemon.NetworkArgs()...)
@@ -1646,60 +1683,111 @@ func startDatabaseRetrying(db *sql.DB, jwtSecret string, dbID int64, attempt int
 	log.add("[db-start] ✓ database is running — waiting for engine to initialize (this can take 10–30s for first-run)")
 	slog.Info("database container started", "db_id", dbID, "container", cName)
 
-	// Background health check: exit code 127 inside a database container means
-	// the entrypoint/binary was not found — this almost always indicates stale
-	// or incomplete overlay image layers in podman's local storage. Recovery:
-	//   1. Remove the image from local storage (not just re-pull — that may
-	//      reuse broken layers).  Force a completely fresh layer download.
-	//   2. Re-pull using the full registry fallback list.
-	//   3. Restart the database.  Give up after maxDBStartAttempts total retries.
+	// Background health check: if the container stops shortly after launch,
+	// diagnose the cause and optionally retry.
+	//
+	// Two exit-127 scenarios:
+	//   (A) Sub-second exit  → crun failed to set up the container spec
+	//       (e.g. --cpus/--memory rejected on cgroup v1). The image is fine;
+	//       repulling won't help. Bail immediately with a clear message.
+	//   (B) Ran for > 2 s  → the container process started but the entrypoint
+	//       exited 127 ("binary not found"). Almost always stale overlay layers.
+	//       Remove the image and repull to get fresh layers, then retry.
 	if activeImage != "" {
 		go func(cID, pulledImage string) {
 			time.Sleep(6 * time.Second)
 			inspOut, inspErr := podmanCmd("inspect", "--format",
-				"{{.State.Running}}|{{.State.ExitCode}}|{{.RestartCount}}", cID).Output()
+				"{{.State.Running}}|{{.State.ExitCode}}|{{.RestartCount}}|{{.State.StartedAt}}|{{.State.FinishedAt}}", cID).Output()
 			if inspErr != nil {
 				return // container not found (already removed) — nothing to do
 			}
-			parts := strings.SplitN(strings.TrimSpace(string(inspOut)), "|", 3)
+			parts := strings.SplitN(strings.TrimSpace(string(inspOut)), "|", 5)
 			if len(parts) < 2 || parts[0] != "false" {
 				return // still running, nothing to do
 			}
 			exitCode := parts[1]
 			restarts := ""
-			if len(parts) == 3 {
+			if len(parts) >= 3 {
 				restarts = parts[2]
 			}
+
+			// Detect whether the container died before its process could start.
+			// StartedAt == FinishedAt (or delta < 2 s) means crun itself failed
+			// (e.g. cgroup resource limit rejected) — NOT a process-level error.
+			subSecondExit := false
+			if len(parts) >= 5 {
+				startedAt, e1 := time.Parse(time.RFC3339Nano, parts[3])
+				finishedAt, e2 := time.Parse(time.RFC3339Nano, parts[4])
+				if e1 == nil && e2 == nil && finishedAt.Sub(startedAt) < 2*time.Second {
+					subSecondExit = true
+				}
+			}
+
 			log.add("[health] container stopped after start  exitCode=%s  restarts=%s  attempt=%d/%d",
 				exitCode, restarts, attempt+1, maxDBStartAttempts+1)
 
-						// Capture whatever the container wrote to stdout/stderr —
-						// these are the engine's own error messages and the most
-						// useful diagnostic for the user.
-						if podLogs, _ := podmanCmd("logs", "--tail", "50", cID).CombinedOutput(); len(podLogs) > 0 {
-							for _, line := range strings.Split(strings.TrimSpace(string(podLogs)), "\n") {
-								if t := strings.TrimSpace(line); t != "" {
-									log.add("[engine] %s", t)
-								}
-							}
-						}
-			if attempt >= maxDBStartAttempts {
-				msg := fmt.Sprintf(
-					"Container exited with code 127 on all %d attempts. "+
-						"Podman overlay storage may be corrupt. "+
-						"Run 'sudo featherdeploy update' or as the featherdeploy user: "+
-						"podman system reset (WARNING: destroys all containers/images).",
-					attempt+1)
+			// Capture whatever the container wrote to stdout/stderr —
+			// these are the engine's own error messages and the most
+			// useful diagnostic for the user.
+			if podLogs, _ := podmanCmd("logs", "--tail", "50", cID).CombinedOutput(); len(podLogs) > 0 {
+				for _, line := range strings.Split(strings.TrimSpace(string(podLogs)), "\n") {
+					if t := strings.TrimSpace(line); t != "" {
+						log.add("[engine] %s", t)
+					}
+				}
+			}
+
+			if exitCode == "127" && subSecondExit {
+				// (A) Infrastructure failure: container died before any process ran.
+				// Repulling the image will not fix this — the image is fine.
+				// Most likely cause: cgroup v2 controllers not available for
+				// --cpus/--memory in rootless Podman on this host.
+				// cgroupV2ResourcesAvailable() already cached the answer, so a
+				// restart after updating will redetect and skip those flags.
+				msg := "Container exited (code 127) in under 2 seconds — this is a " +
+					"crun/cgroup infrastructure failure, not an image problem. " +
+					"The host may be running cgroup v1 which does not support " +
+					"--cpus/--memory in rootless Podman. " +
+					"Run 'sudo featherdeploy update' to deploy the fix, then restart the database. " +
+					"If the problem persists, check: cat /sys/fs/cgroup/cgroup.controllers"
 				log.add("[health] ERROR: %s", msg)
-				slog.Error("database start: exit 127 exceeded retry limit",
-					"db_id", dbID, "attempts", attempt+1)
+				slog.Error("database start: instant exit 127 — cgroup infrastructure failure",
+					"db_id", dbID, "attempt", attempt+1)
 				db.Exec( //nolint
 					`UPDATE databases SET status='error', last_error=?, updated_at=datetime('now') WHERE id=?`,
 					msg, dbID)
 				return
 			}
 
-			log.add("[health] exit 127 detected (attempt %d/%d) — image layers incomplete",
+			if attempt >= maxDBStartAttempts {
+				msg := fmt.Sprintf(
+					"Container exited with code %s on all %d attempts. "+
+						"Podman overlay storage may be corrupt. "+
+						"Run as the featherdeploy user: "+
+						"podman system reset (WARNING: destroys all containers/images).",
+					exitCode, attempt+1)
+				log.add("[health] ERROR: %s", msg)
+				slog.Error("database start: exceeded retry limit",
+					"db_id", dbID, "attempts", attempt+1, "exitCode", exitCode)
+				db.Exec( //nolint
+					`UPDATE databases SET status='error', last_error=?, updated_at=datetime('now') WHERE id=?`,
+					msg, dbID)
+				return
+			}
+
+			if exitCode != "127" {
+				// Non-127 exit: likely an engine startup error (bad config, OOM,
+				// port conflict). Don't repull — it won't help. Just log and stop.
+				msg := fmt.Sprintf("Container exited with code %s. Check the engine logs above.", exitCode)
+				log.add("[health] ERROR: %s", msg)
+				db.Exec( //nolint
+					`UPDATE databases SET status='error', last_error=?, updated_at=datetime('now') WHERE id=?`,
+					msg, dbID)
+				return
+			}
+
+			// (B) Slow exit-127: entrypoint binary not found — stale overlay layers.
+			log.add("[health] exit 127 detected (attempt %d/%d) — image layers may be incomplete, repulling...",
 				attempt+1, maxDBStartAttempts+1)
 			slog.Warn("database container exited 127 — removing image and repulling",
 				"db_id", dbID, "image", pulledImage, "attempt", attempt+1)
