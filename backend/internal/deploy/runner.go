@@ -28,6 +28,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -108,19 +109,50 @@ var (
 	cgroupResourcesOK   bool
 )
 
-// cgroupV2ResourcesAvailable returns true when the host kernel reports cgroup v2
-// with both "cpu" and "memory" controllers available at the root cgroup mount.
-// That is a prerequisite for --cpus / --memory to work in rootless containers.
+// cgroupV2ResourcesAvailable returns true when the running process's own
+// cgroup has the cpu and memory controllers enabled in its subtree_control,
+// meaning child cgroups (i.e. Podman containers) can use --cpus/--memory.
+//
+// Why not just check /sys/fs/cgroup/cgroup.controllers?
+// That file lists controllers available at the ROOT cgroup — it is always
+// populated on a cgroup v2 system regardless of delegation. What matters
+// for rootless Podman running inside a systemd service is whether the
+// SERVICE's own cgroup has Delegate=yes set. Without Delegate=yes, systemd
+// keeps cpu/memory out of the service's cgroup.subtree_control, and crun
+// cannot create sub-cgroups with those controllers → exit 127.
 func cgroupV2ResourcesAvailable() bool {
 	cgroupResourcesOnce.Do(func() {
-		// cgroupv2 unified hierarchy: /sys/fs/cgroup/cgroup.controllers lists the
-		// controllers enabled at the root.  On cgroupv1 this file does not exist.
-		data, err := os.ReadFile("/sys/fs/cgroup/cgroup.controllers")
+		// 1. Find our own cgroup path via /proc/self/cgroup.
+		//    On cgroupv2 the entry is "0::<path>"; absent on cgroupv1/hybrid.
+		cgroupData, err := os.ReadFile("/proc/self/cgroup")
 		if err != nil {
 			cgroupResourcesOK = false
 			return
 		}
-		s := string(data)
+		var myPath string
+		for _, line := range strings.Split(strings.TrimSpace(string(cgroupData)), "\n") {
+			if strings.HasPrefix(line, "0::") {
+				myPath = strings.TrimSpace(strings.TrimPrefix(line, "0::"))
+				break
+			}
+		}
+		if myPath == "" {
+			// No unified hierarchy entry → cgroupv1 or hybrid mode.
+			cgroupResourcesOK = false
+			return
+		}
+
+		// 2. Read cgroup.subtree_control for our own cgroup.
+		//    This tells us whether cpu+memory are enabled for CHILD cgroups
+		//    (which is exactly what Podman needs to apply resource limits).
+		subtreeFile := filepath.Join("/sys/fs/cgroup", myPath, "cgroup.subtree_control")
+		ctrl, err := os.ReadFile(subtreeFile)
+		if err != nil {
+			// Our own cgroup doesn't have subtree_control — likely no delegation.
+			cgroupResourcesOK = false
+			return
+		}
+		s := string(ctrl)
 		cgroupResourcesOK = strings.Contains(s, "cpu") && strings.Contains(s, "memory")
 	})
 	return cgroupResourcesOK
@@ -1697,7 +1729,7 @@ func startDatabaseRetrying(db *sql.DB, jwtSecret string, dbID int64, attempt int
 		go func(cID, pulledImage string) {
 			time.Sleep(6 * time.Second)
 			inspOut, inspErr := podmanCmd("inspect", "--format",
-				"{{.State.Running}}|{{.State.ExitCode}}|{{.RestartCount}}|{{.State.StartedAt}}|{{.State.FinishedAt}}", cID).Output()
+				"{{.State.Running}}|{{.State.ExitCode}}|{{.RestartCount}}|{{.State.StartedAt.Unix}}|{{.State.FinishedAt.Unix}}", cID).Output()
 			if inspErr != nil {
 				return // container not found (already removed) — nothing to do
 			}
@@ -1712,13 +1744,14 @@ func startDatabaseRetrying(db *sql.DB, jwtSecret string, dbID int64, attempt int
 			}
 
 			// Detect whether the container died before its process could start.
-			// StartedAt == FinishedAt (or delta < 2 s) means crun itself failed
-			// (e.g. cgroup resource limit rejected) — NOT a process-level error.
+			// StartedAt.Unix == FinishedAt.Unix (or delta < 2 s) means crun itself
+			// failed (e.g. cgroup resource limit rejected, no Delegate=yes in the
+			// systemd unit) — NOT a process-level error from MySQL/Postgres.
 			subSecondExit := false
 			if len(parts) >= 5 {
-				startedAt, e1 := time.Parse(time.RFC3339Nano, parts[3])
-				finishedAt, e2 := time.Parse(time.RFC3339Nano, parts[4])
-				if e1 == nil && e2 == nil && finishedAt.Sub(startedAt) < 2*time.Second {
+				startUnix, e1 := strconv.ParseInt(parts[3], 10, 64)
+				finishUnix, e2 := strconv.ParseInt(parts[4], 10, 64)
+				if e1 == nil && e2 == nil && finishUnix-startUnix < 2 {
 					subSecondExit = true
 				}
 			}
@@ -1740,16 +1773,18 @@ func startDatabaseRetrying(db *sql.DB, jwtSecret string, dbID int64, attempt int
 			if exitCode == "127" && subSecondExit {
 				// (A) Infrastructure failure: container died before any process ran.
 				// Repulling the image will not fix this — the image is fine.
-				// Most likely cause: cgroup v2 controllers not available for
-				// --cpus/--memory in rootless Podman on this host.
-				// cgroupV2ResourcesAvailable() already cached the answer, so a
-				// restart after updating will redetect and skip those flags.
-				msg := "Container exited (code 127) in under 2 seconds — this is a " +
-					"crun/cgroup infrastructure failure, not an image problem. " +
-					"The host may be running cgroup v1 which does not support " +
-					"--cpus/--memory in rootless Podman. " +
-					"Run 'sudo featherdeploy update' to deploy the fix, then restart the database. " +
-					"If the problem persists, check: cat /sys/fs/cgroup/cgroup.controllers"
+				// Most likely cause: systemd unit is missing Delegate=yes, so
+				// the featherdeploy cgroup's subtree_control lacks cpu/memory
+				// controllers and crun cannot set up the container's cgroup.
+				// The fix: run 'sudo featherdeploy update' which rewrites the
+				// systemd unit with Delegate=yes, then restart the database.
+				msg := "Container exited (code 127) in under 2 seconds — crun failed " +
+					"to set up the container cgroup. This means the featherdeploy " +
+					"systemd service is missing 'Delegate=yes' (required for rootless " +
+					"Podman --cpus/--memory in a system service). " +
+					"Run 'sudo featherdeploy update' to fix the unit file, then restart " +
+					"the database. To verify after update: " +
+					"systemctl show featherdeploy | grep Delegate"
 				log.add("[health] ERROR: %s", msg)
 				slog.Error("database start: instant exit 127 — cgroup infrastructure failure",
 					"db_id", dbID, "attempt", attempt+1)

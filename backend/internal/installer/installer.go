@@ -1287,6 +1287,13 @@ Restart=always
 RestartSec=5s
 StandardOutput=journal
 StandardError=journal
+# Delegate=yes hands off cgroup subtree management to featherdeploy/podman.
+# Without this systemd retains cgroup ownership and rootless podman cannot
+# create child cgroups for resource limits (--cpus / --memory), causing every
+# database container to exit 127 immediately.  With it, systemd enables the
+# cpu/memory/io/pids controllers in this unit's delegated slice so podman can
+# manage container cgroups normally.
+Delegate=yes
 # PrivateTmp must NOT be set here. Rootless podman re-execs itself into a new
 # user namespace (via newuidmap) to set up UID mapping. The child process does
 # not inherit systemd's private /tmp bind-mount, so any build context written
