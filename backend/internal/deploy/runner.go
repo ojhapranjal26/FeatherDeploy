@@ -1611,15 +1611,15 @@ func startDatabaseRetrying(db *sql.DB, jwtSecret string, dbID int64, attempt int
 
 	// Persist data in a named volume so it survives container re-creation.
 	volumeName := dbVolumeName(dbID)
-	log.add("[volume] ensuring data volume %s → %s", volumeName, dbDataMountPath(dbType))
+	log.add("[volume] ensuring data volume %s → %s", volumeName, dbDataMountPath(dbType, dbVersion))
 	if err := ensureDatabaseVolume(dbID); err != nil {
 		log.add("ERROR: volume ensure failed: %v", err)
 		db.Exec(`UPDATE databases SET status='error', last_error=?, updated_at=datetime('now') WHERE id=?`, err.Error(), dbID) //nolint
 		return err
 	}
-	mountPath := dbDataMountPath(dbType)
-	mountSpec := dbVolumeMountSpec(dbType, volumeName, mountPath)
-	containerUser := dbContainerUser(dbType)
+	mountPath := dbDataMountPath(dbType, dbVersion)
+	mountSpec := dbVolumeMountSpec(volumeName, mountPath)
+	entrypoint := dbContainerEntrypoint(dbType)
 
 	internalPort := dbInternalPort(dbType)
 
@@ -1638,12 +1638,12 @@ func startDatabaseRetrying(db *sql.DB, jwtSecret string, dbID int64, attempt int
 	if !useLimits {
 		resourceDesc = "(resource limits skipped — cgroup v1 or no delegation)"
 	}
-	userDesc := "image default user"
-	if containerUser != "" {
-		userDesc = fmt.Sprintf("user %s (bypass entrypoint gosu handoff)", containerUser)
+	entrypointDesc := "image default entrypoint"
+	if entrypoint != "" {
+		entrypointDesc = fmt.Sprintf("entrypoint %s", entrypoint)
 	}
 	log.add("[podman] run  --name %s  --restart on-failure:10  %s  port %s  image %s  %s  (log-opt rotation disabled for rootless compat)",
-		cName, resourceDesc, portBind, activeImage, userDesc)
+		cName, resourceDesc, portBind, activeImage, entrypointDesc)
 
 	runArgs := []string{
 		"run", "-d",
@@ -1671,8 +1671,8 @@ func startDatabaseRetrying(db *sql.DB, jwtSecret string, dbID int64, attempt int
 		// (2× memory = 1 GB swap), preventing OOM kills during first-run initdb.
 		runArgs = append(runArgs, "--cpus", "2.0", "--memory", "1g")
 	}
-	if containerUser != "" {
-		runArgs = append(runArgs, "--user", containerUser)
+	if entrypoint != "" {
+		runArgs = append(runArgs, "--entrypoint", entrypoint)
 	}
 	// Use slirp4netns instead of Podman named networks (no aardvark-dns needed).
 	runArgs = append(runArgs, netdaemon.NetworkArgs()...)
@@ -1685,10 +1685,11 @@ func startDatabaseRetrying(db *sql.DB, jwtSecret string, dbID int64, attempt int
 		runArgs = append(runArgs, "-p", fmt.Sprintf("127.0.0.1:%d:%d", hostPort, internalPort))
 	}
 	// Inject the DB engine's environment variables (credentials, database name).
-	runArgs = append(runArgs, dbContainerEnvArgs(dbType, dbName, dbUser, clearPass)...)
+	runArgs = append(runArgs, dbContainerEnvArgs(dbType, dbVersion, dbName, dbUser, clearPass)...)
 	runArgs = append(runArgs, activeImage)
-	// Append per-engine command overrides (e.g. redis-server --requirepass).
-	runArgs = append(runArgs, dbContainerCmdArgs(dbType, clearPass)...)
+	// Append the engine command explicitly so Podman does not need to resolve the
+	// image's default PATH-based command/entrypoint combination.
+	runArgs = append(runArgs, dbContainerCmdArgs(dbType)...)
 
 	out, err := podmanCmd(runArgs...).CombinedOutput()
 	outStr := strings.TrimSpace(string(out))
@@ -2058,24 +2059,33 @@ func UpdateDatabase(db *sql.DB, dbID int64, dbVersion string, networkPublic bool
 // mirror of Docker Hub official images and is used as a fallback when Docker
 // Hub is rate-limited or temporarily unreachable.
 func dbRegistryImages(dbType, version string) []string {
-	if version == "" || version == "latest" {
-		version = "latest"
-	}
-	var libName string
-	switch dbType {
-	case "postgres":
-		libName = "postgres"
-	case "mysql":
-		libName = "mysql"
-	default:
+	libName, tag := dbImageRefParts(dbType, version)
+	if libName == "" || tag == "" {
 		return nil // sqlite or unknown — no container image needed
 	}
 	return []string{
-		"docker.io/library/" + libName + ":" + version,
+		"docker.io/library/" + libName + ":" + tag,
 		// AWS ECR Public mirrors Docker Hub official images at no cost,
 		// no authentication, and with higher rate limits — used as fallback
 		// when Docker Hub is rate-limited or temporarily unreachable.
-		"public.ecr.aws/docker/library/" + libName + ":" + version,
+		"public.ecr.aws/docker/library/" + libName + ":" + tag,
+	}
+}
+
+func dbImageRefParts(dbType, version string) (string, string) {
+	if version == "" || version == "latest" {
+		version = "latest"
+	}
+	switch dbType {
+	case "postgres":
+		return "postgres", version
+	case "mysql":
+		if version != "latest" && !strings.Contains(version, "-") && (strings.HasPrefix(version, "8.0") || strings.HasPrefix(version, "8.4") || version == "8") {
+			return "mysql", version + "-bookworm"
+		}
+		return "mysql", version
+	default:
+		return "", ""
 	}
 }
 
@@ -2140,9 +2150,12 @@ func dbInternalPort(dbType string) int {
 }
 
 // dbDataMountPath returns the internal data directory for persistent volume mounts.
-func dbDataMountPath(dbType string) string {
+func dbDataMountPath(dbType, version string) string {
 	switch dbType {
 	case "postgres":
+		if postgresMajorVersion(version) >= 18 {
+			return "/var/lib/postgresql"
+		}
 		return "/var/lib/postgresql/data"
 	case "mysql":
 		return "/var/lib/mysql"
@@ -2153,40 +2166,34 @@ func dbDataMountPath(dbType string) string {
 	}
 }
 
-// dbVolumeMountSpec returns the full podman -v mount spec for managed DBs.
-// MySQL and Postgres run directly as their image user in rootless mode, so we
-// add :U to shift volume ownership for that user and avoid the images'
-// root->gosu entrypoint handoff path.
-func dbVolumeMountSpec(dbType, volumeName, mountPath string) string {
-	spec := volumeName + ":" + mountPath
-	switch dbType {
-	case "postgres", "mysql":
-		return spec + ":U"
-	default:
-		return spec
-	}
+func dbVolumeMountSpec(volumeName, mountPath string) string {
+	return volumeName + ":" + mountPath
 }
 
-func dbContainerUser(dbType string) string {
+func dbContainerEntrypoint(dbType string) string {
 	switch dbType {
 	case "postgres":
-		return "postgres"
+		return "/usr/local/bin/docker-entrypoint.sh"
 	case "mysql":
-		return "mysql"
+		return "/usr/local/bin/docker-entrypoint.sh"
 	default:
 		return ""
 	}
 }
 
 // dbContainerEnvArgs returns -e KEY=VALUE pairs for the DB engine container.
-func dbContainerEnvArgs(dbType, dbName, dbUser, clearPass string) []string {
+func dbContainerEnvArgs(dbType, version, dbName, dbUser, clearPass string) []string {
 	switch dbType {
 	case "postgres":
-		return []string{
+		args := []string{
 			"-e", "POSTGRES_DB=" + dbName,
 			"-e", "POSTGRES_USER=" + dbUser,
 			"-e", "POSTGRES_PASSWORD=" + clearPass,
 		}
+		if major := postgresMajorVersion(version); major >= 18 {
+			args = append(args, "-e", fmt.Sprintf("PGDATA=/var/lib/postgresql/%d/docker", major))
+		}
+		return args
 	case "mysql":
 		// MYSQL_ROOT_PASSWORD is required; the named user+password are optional.
 		return []string{
@@ -2200,11 +2207,34 @@ func dbContainerEnvArgs(dbType, dbName, dbUser, clearPass string) []string {
 	}
 }
 
-// dbContainerCmdArgs returns optional command arguments appended after the
-// image name in the podman run invocation. Currently unused; reserved for
-// future engines that require CMD overrides.
-func dbContainerCmdArgs(_ string, _ string) []string {
-	return nil
+// dbContainerCmdArgs returns the engine command appended after the image name.
+// We pass it explicitly so rootless Podman does not depend on PATH resolution
+// for the image's default command.
+func dbContainerCmdArgs(dbType string) []string {
+	switch dbType {
+	case "postgres":
+		return []string{"postgres"}
+	case "mysql":
+		return []string{"mysqld"}
+	default:
+		return nil
+	}
+}
+
+func postgresMajorVersion(version string) int {
+	version = strings.TrimSpace(version)
+	if version == "" || version == "latest" {
+		return 0
+	}
+	majorPart := version
+	if idx := strings.IndexAny(version, ".-"); idx >= 0 {
+		majorPart = version[:idx]
+	}
+	major, err := strconv.Atoi(majorPart)
+	if err != nil {
+		return 0
+	}
+	return major
 }
 
 func ensureDatabaseVolume(dbID int64) error {
