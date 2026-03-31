@@ -6,9 +6,6 @@ const (
 	DatabaseTypePostgres = "postgres"
 	DatabaseTypeMySQL    = "mysql"
 	DatabaseTypeSQLite   = "sqlite"
-	DatabaseTypeMariaDB  = "mariadb"
-	DatabaseTypeRedis    = "redis"
-	DatabaseTypeMongoDB  = "mongodb"
 )
 
 // Database represents a managed database instance within a project.
@@ -18,7 +15,7 @@ type Database struct {
 	ID          int64     `json:"id"`
 	ProjectID   int64     `json:"project_id"`
 	Name        string    `json:"name"`
-	DBType      string    `json:"db_type"`      // postgres|mysql|sqlite|mariadb|redis|mongodb
+	DBType      string    `json:"db_type"`      // postgres|mysql|sqlite
 	DBVersion   string    `json:"db_version"`   // image tag e.g. "16", "8.4", "latest"
 	DBName      string    `json:"db_name"`      // database/schema name inside the engine
 	DBUser      string    `json:"db_user"`      // database user
@@ -46,7 +43,7 @@ type Database struct {
 // CreateDatabaseRequest is the body for POST /api/projects/{id}/databases.
 type CreateDatabaseRequest struct {
 	Name          string `json:"name"          validate:"required,min=2,max=63,slug"`
-	DBType        string `json:"db_type"       validate:"required,oneof=postgres mysql sqlite mariadb redis mongodb"`
+	DBType        string `json:"db_type"       validate:"required,oneof=postgres mysql sqlite"`
 	DBVersion     string `json:"db_version"    validate:"omitempty,max=32"`
 	DBName        string `json:"db_name"       validate:"omitempty,max=64"`
 	DBUser        string `json:"db_user"       validate:"omitempty,max=64"`

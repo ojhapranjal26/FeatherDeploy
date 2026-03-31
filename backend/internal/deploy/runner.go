@@ -1295,17 +1295,6 @@ func DBConnectionURL(dbType, dbName, dbUser, clearPassword, alias string) string
 	case "mysql":
 		return fmt.Sprintf("mysql://%s:%s@%s:3306/%s",
 			esc(dbUser), esc(clearPassword), alias, dbName)
-	case "mariadb":
-		return fmt.Sprintf("mysql://%s:%s@%s:3306/%s",
-			esc(dbUser), esc(clearPassword), alias, dbName)
-	case "redis":
-		if clearPassword != "" {
-			return fmt.Sprintf("redis://:%s@%s:6379", esc(clearPassword), alias)
-		}
-		return fmt.Sprintf("redis://%s:6379", alias)
-	case "mongodb":
-		return fmt.Sprintf("mongodb://%s:%s@%s:27017/%s?authSource=admin",
-			esc(dbUser), esc(clearPassword), alias, dbName)
 	case "sqlite":
 		return fmt.Sprintf("sqlite:///%s", strings.TrimPrefix(filepath.Join(sqliteMountTarget(alias), sqliteDatabaseFilename(dbName)), "/"))
 	}
@@ -1320,16 +1309,8 @@ func dbConnectionURLFDNet(dbType, dbName, dbUser, clearPassword, host string, po
 	case "postgres":
 		return fmt.Sprintf("postgresql://%s:%s@%s:%d/%s",
 			esc(dbUser), esc(clearPassword), host, port, dbName)
-	case "mysql", "mariadb":
+	case "mysql":
 		return fmt.Sprintf("mysql://%s:%s@%s:%d/%s",
-			esc(dbUser), esc(clearPassword), host, port, dbName)
-	case "redis":
-		if clearPassword != "" {
-			return fmt.Sprintf("redis://:%s@%s:%d", esc(clearPassword), host, port)
-		}
-		return fmt.Sprintf("redis://%s:%d", host, port)
-	case "mongodb":
-		return fmt.Sprintf("mongodb://%s:%s@%s:%d/%s?authSource=admin",
 			esc(dbUser), esc(clearPassword), host, port, dbName)
 	}
 	return ""
@@ -1343,16 +1324,8 @@ func DBPublicConnectionURL(dbType, dbName, dbUser, clearPassword string, hostPor
 	case "postgres":
 		return fmt.Sprintf("postgresql://%s:%s@HOST:%d/%s",
 			esc(dbUser), esc(clearPassword), hostPort, dbName)
-	case "mysql", "mariadb":
+	case "mysql":
 		return fmt.Sprintf("mysql://%s:%s@HOST:%d/%s",
-			esc(dbUser), esc(clearPassword), hostPort, dbName)
-	case "redis":
-		if clearPassword != "" {
-			return fmt.Sprintf("redis://:%s@HOST:%d", esc(clearPassword), hostPort)
-		}
-		return fmt.Sprintf("redis://HOST:%d", hostPort)
-	case "mongodb":
-		return fmt.Sprintf("mongodb://%s:%s@HOST:%d/%s?authSource=admin",
 			esc(dbUser), esc(clearPassword), hostPort, dbName)
 	}
 	return ""
@@ -1592,8 +1565,8 @@ func startDatabaseRetrying(db *sql.DB, jwtSecret string, dbID int64, attempt int
 	if networkPublic == 1 {
 		portBind = fmt.Sprintf("0.0.0.0:%d→%d (public)", hostPort, internalPort)
 	}
-	log.add("[podman] run  --name %s  --restart on-failure:10  --cpus 2.0  --memory 1g  port %s  image %s",
-		cName, portBind, image)
+	log.add("[podman] run  --name %s  --restart on-failure:10  --cpus 2.0  --memory 1g  port %s  image %s  (log-opt rotation disabled for rootless compat)",
+		cName, portBind, activeImage)
 
 	runArgs := []string{
 		"run", "-d",
@@ -1607,8 +1580,13 @@ func startDatabaseRetrying(db *sql.DB, jwtSecret string, dbID int64, attempt int
 		// surviving transient failures (OOM, init races). The counter resets on
 		// a successful start or an explicit Stop→Start / Restart from the UI.
 		"--restart", "on-failure:10",
-		"--log-opt", "max-size=10m",
-		"--log-opt", "max-file=3",
+		// NOTE: --log-opt max-size/max-file is intentionally omitted.
+		// In rootless Podman, log rotation via conmon requires a minimum conmon
+		// version and correct cgroup delegation. When unsupported, it causes
+		// the container's stdout/stderr to not be captured (empty podman logs)
+		// and can produce spurious exit-127 failures for the container process.
+		// The default k8s-file driver without rotation is sufficient and reliable.
+		//
 		// Resource limits: prevent runaway database containers from consuming
 		// all host CPU/memory. Defaults are generous but capped.
 		// --memory-swap is intentionally omitted so the kernel default applies
@@ -1695,12 +1673,16 @@ func startDatabaseRetrying(db *sql.DB, jwtSecret string, dbID int64, attempt int
 			log.add("[health] container stopped after start  exitCode=%s  restarts=%s  attempt=%d/%d",
 				exitCode, restarts, attempt+1, maxDBStartAttempts+1)
 
-			if exitCode != "127" {
-				log.add("[health] NOTE: container exited with code %s — check container output logs for details", exitCode)
-				return
-			}
-
-			// Exit 127 handling
+						// Capture whatever the container wrote to stdout/stderr —
+						// these are the engine's own error messages and the most
+						// useful diagnostic for the user.
+						if podLogs, _ := podmanCmd("logs", "--tail", "50", cID).CombinedOutput(); len(podLogs) > 0 {
+							for _, line := range strings.Split(strings.TrimSpace(string(podLogs)), "\n") {
+								if t := strings.TrimSpace(line); t != "" {
+									log.add("[engine] %s", t)
+								}
+							}
+						}
 			if attempt >= maxDBStartAttempts {
 				msg := fmt.Sprintf(
 					"Container exited with code 127 on all %d attempts. "+
@@ -1914,17 +1896,35 @@ func GetDatabaseLogs(dbID int64) (string, error) {
 	if logStr := strings.TrimSpace(string(out)); logStr != "" {
 		return logStr, nil
 	}
-	// Container exists but produced no output — likely crashing before first write.
-	// Inspect to surface the restart count and exit code as a diagnostic hint.
+
+	// Empty logs — try fetching recent output (last 5 minutes) in case
+	// the log driver buffered output that wasn't included in --tail.
+	out2, _ := podmanCmd("logs", "--since", "5m", cName).CombinedOutput()
+	if logStr := strings.TrimSpace(string(out2)); logStr != "" {
+		return logStr, nil
+	}
+
+	// Container exists but produced no output — likely crashing before first
+	// write, or the engine writes to an internal log file instead of stdout.
+	// Inspect to surface the restart count, exit code, and OOM status.
 	inspOut, inspErr := podmanCmd("inspect",
-		"--format", "status={{.State.Status}} restarts={{.RestartCount}} exitcode={{.State.ExitCode}}",
+		"--format",
+		"Status: {{.State.Status}}\nExit code: {{.State.ExitCode}}\nRestarts: {{.RestartCount}}\nOOM killed: {{.State.OOMKilled}}\nError: {{.State.Error}}\nStarted: {{.State.StartedAt}}\nFinished: {{.State.FinishedAt}}",
 		cName,
 	).Output()
+	diag := "[No log output — container may be writing logs to an internal file rather than stdout, or it is exiting before producing any output.]"
 	if inspErr == nil {
-		info := strings.TrimSpace(string(inspOut))
-		return fmt.Sprintf("[No log output]\nContainer diagnostic: %s\n\nThe container is crashing before writing any logs.\nUse 'Restart database' from the Actions menu to recreate it with the latest settings.", info), nil
+		diag = fmt.Sprintf("[No log output]\n\nContainer state:\n%s\n\n"+
+			"Possible causes:\n"+
+			"  • First-run database initialization is slow (wait 30–60s then refresh)\n"+
+			"  • cgroup v2 resource limits (--memory/--cpus) are unsupported in this environment\n"+
+			"  • Insufficient disk space in the container volume\n\n"+
+			"To see more detail run as featherdeploy user:\n"+
+			"  podman logs %s\n"+
+			"  podman inspect %s | grep -i state",
+			strings.TrimSpace(string(inspOut)), cName, cName)
 	}
-	return "[No log output — container may be crashing immediately on startup. Try restarting from the Actions menu.]", nil
+	return diag, nil
 }
 
 // UpdateDatabase persists configuration changes (db_version, network_public)
@@ -1946,36 +1946,24 @@ func UpdateDatabase(db *sql.DB, dbID int64, dbVersion string, networkPublic bool
 // with the widest image selection. AWS ECR Public is a free, unauthenticated
 // mirror of Docker Hub official images and is used as a fallback when Docker
 // Hub is rate-limited or temporarily unreachable.
-//
-// Registry cheat-sheet:
-//   Docker Hub:     docker.io/library/<name>:<tag>
-//   AWS ECR Public: public.ecr.aws/docker/library/<name>:<tag>
-//   GitHub GHCR:    ghcr.io/<org>/<name>:<tag>  (no official mirrors here)
-//   Google GCR:     gcr.io/<project>/<name>:<tag>
 func dbRegistryImages(dbType, version string) []string {
 	if version == "" || version == "latest" {
 		version = "latest"
 	}
-	// Map FeatherDeploy DB type to Docker Hub image name.
 	var libName string
 	switch dbType {
 	case "postgres":
 		libName = "postgres"
 	case "mysql":
 		libName = "mysql"
-	case "mariadb":
-		libName = "mariadb"
-	case "redis":
-		libName = "redis"
-	case "mongodb":
-		libName = "mongo"
 	default:
 		return nil // sqlite or unknown — no container image needed
 	}
 	return []string{
 		"docker.io/library/" + libName + ":" + version,
-		// AWS ECR Public mirrors all Docker Hub official images at no cost,
-		// no authentication, and with higher rate limits.
+		// AWS ECR Public mirrors Docker Hub official images at no cost,
+		// no authentication, and with higher rate limits — used as fallback
+		// when Docker Hub is rate-limited or temporarily unreachable.
 		"public.ecr.aws/docker/library/" + libName + ":" + version,
 	}
 }
@@ -2033,12 +2021,8 @@ func dbInternalPort(dbType string) int {
 	switch dbType {
 	case "postgres":
 		return 5432
-	case "mysql", "mariadb":
+	case "mysql":
 		return 3306
-	case "redis":
-		return 6379
-	case "mongodb":
-		return 27017
 	default:
 		return 5432
 	}
@@ -2049,12 +2033,8 @@ func dbDataMountPath(dbType string) string {
 	switch dbType {
 	case "postgres":
 		return "/var/lib/postgresql/data"
-	case "mysql", "mariadb":
+	case "mysql":
 		return "/var/lib/mysql"
-	case "redis":
-		return "/data"
-	case "mongodb":
-		return "/data/db"
 	case "sqlite":
 		return "/data"
 	default:
@@ -2063,9 +2043,6 @@ func dbDataMountPath(dbType string) string {
 }
 
 // dbContainerEnvArgs returns -e KEY=VALUE pairs for the DB engine container.
-// Redis credentials are passed as command arguments (see dbContainerCmdArgs),
-// not environment variables, because the official Redis image has no env var
-// for the password — only redis-server --requirepass is supported.
 func dbContainerEnvArgs(dbType, dbName, dbUser, clearPass string) []string {
 	switch dbType {
 	case "postgres":
@@ -2076,47 +2053,21 @@ func dbContainerEnvArgs(dbType, dbName, dbUser, clearPass string) []string {
 		}
 	case "mysql":
 		// MYSQL_ROOT_PASSWORD is required; the named user+password are optional.
-		// Use a distinct root password (same value for simplicity) and expose
-		// the service via the non-root user to follow least-privilege practices.
 		return []string{
 			"-e", "MYSQL_DATABASE=" + dbName,
 			"-e", "MYSQL_USER=" + dbUser,
 			"-e", "MYSQL_PASSWORD=" + clearPass,
 			"-e", "MYSQL_ROOT_PASSWORD=" + clearPass,
 		}
-	case "mariadb":
-		// MariaDB 10.4+ uses MARIADB_* vars (mirrors MYSQL_* for compat).
-		return []string{
-			"-e", "MARIADB_DATABASE=" + dbName,
-			"-e", "MARIADB_USER=" + dbUser,
-			"-e", "MARIADB_PASSWORD=" + clearPass,
-			"-e", "MARIADB_ROOT_PASSWORD=" + clearPass,
-		}
-	case "mongodb":
-		// MONGO_INITDB_ROOT_* creates an admin superuser on first init.
-		// MONGO_INITDB_DATABASE selects the default auth database.
-		return []string{
-			"-e", "MONGO_INITDB_ROOT_USERNAME=" + dbUser,
-			"-e", "MONGO_INITDB_ROOT_PASSWORD=" + clearPass,
-			"-e", "MONGO_INITDB_DATABASE=" + dbName,
-		}
-	default: // redis: credentials via redis-server --requirepass (see dbContainerCmdArgs)
+	default:
 		return nil
 	}
 }
 
-// dbContainerCmdArgs returns optional command arguments that are appended
-// after the image name in the podman run invocation, overriding the default
-// container CMD. Currently used for Redis where the only supported way to set
-// a password in the official image is via redis-server command-line flags.
-func dbContainerCmdArgs(dbType, clearPass string) []string {
-	switch dbType {
-	case "redis":
-		if clearPass != "" {
-			return []string{"redis-server", "--requirepass", clearPass, "--save", "60", "1", "--loglevel", "notice"}
-		}
-		return []string{"redis-server", "--save", "60", "1", "--loglevel", "notice"}
-	}
+// dbContainerCmdArgs returns optional command arguments appended after the
+// image name in the podman run invocation. Currently unused; reserved for
+// future engines that require CMD overrides.
+func dbContainerCmdArgs(_ string, _ string) []string {
 	return nil
 }
 

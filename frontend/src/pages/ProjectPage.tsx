@@ -245,12 +245,6 @@ function databaseTypeLabel(dbType: DatabaseType) {
       return 'MySQL'
     case 'sqlite':
       return 'SQLite'
-    case 'mariadb':
-      return 'MariaDB'
-    case 'redis':
-      return 'Redis'
-    case 'mongodb':
-      return 'MongoDB'
   }
 }
 
@@ -262,12 +256,6 @@ function defaultDatabaseVersion(dbType: DatabaseType) {
       return '8.4'
     case 'sqlite':
       return '3'
-    case 'mariadb':
-      return '11'
-    case 'redis':
-      return '7'
-    case 'mongodb':
-      return '7'
   }
 }
 
@@ -1366,7 +1354,7 @@ export function ProjectPage() {
               <Database className="h-4 w-4 text-primary" /> New database
             </DialogTitle>
             <DialogDescription>
-              Create a managed Postgres, MySQL, MariaDB, Redis, MongoDB, or SQLite database for this project.
+              Create a managed Postgres, MySQL, or SQLite database for this project.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-3 py-2">
@@ -1388,7 +1376,7 @@ export function ProjectPage() {
                 const nextType = value as DatabaseType
                 setNewDbType(nextType)
                 setNewDbVersion(defaultDatabaseVersion(nextType))
-                if (nextType === 'sqlite' || nextType === 'redis') {
+                if (nextType === 'sqlite') {
                   setNewDbAccess('private')
                   setNewDbUser('')
                   setNewDbPassword('')
@@ -1400,9 +1388,6 @@ export function ProjectPage() {
                 <SelectContent>
                   <SelectItem value="postgres">Postgres</SelectItem>
                   <SelectItem value="mysql">MySQL</SelectItem>
-                  <SelectItem value="mariadb">MariaDB</SelectItem>
-                  <SelectItem value="redis">Redis</SelectItem>
-                  <SelectItem value="mongodb">MongoDB</SelectItem>
                   <SelectItem value="sqlite">SQLite</SelectItem>
                 </SelectContent>
               </Select>
@@ -1421,33 +1406,29 @@ export function ProjectPage() {
               </div>
             )}
 
-            {newDbType !== 'sqlite' && newDbType !== 'redis' && (
-              <div>
-                <Label htmlFor="db-dbname">Database name</Label>
-                <Input
-                  id="db-dbname"
-                  className="mt-1.5"
-                  placeholder="Defaults to the resource name"
-                  value={newDbDatabaseName}
-                  onChange={(e) => setNewDbDatabaseName(e.target.value)}
-                />
-              </div>
-            )}
+            <div>
+              <Label htmlFor="db-dbname">Database name</Label>
+              <Input
+                id="db-dbname"
+                className="mt-1.5"
+                placeholder="Defaults to the resource name"
+                value={newDbDatabaseName}
+                onChange={(e) => setNewDbDatabaseName(e.target.value)}
+              />
+            </div>
 
             {newDbType !== 'sqlite' && (
               <>
-                {newDbType !== 'redis' && (
-                  <div>
-                    <Label htmlFor="db-user">Database user</Label>
-                    <Input
-                      id="db-user"
-                      className="mt-1.5"
-                      placeholder="Defaults to the resource name"
-                      value={newDbUser}
-                      onChange={(e) => setNewDbUser(e.target.value)}
-                    />
-                  </div>
-                )}
+                <div>
+                  <Label htmlFor="db-user">Database user</Label>
+                  <Input
+                    id="db-user"
+                    className="mt-1.5"
+                    placeholder="Defaults to the resource name"
+                    value={newDbUser}
+                    onChange={(e) => setNewDbUser(e.target.value)}
+                  />
+                </div>
 
                 <div>
                   <Label htmlFor="db-password">Database password</Label>
