@@ -1618,6 +1618,8 @@ func startDatabaseRetrying(db *sql.DB, jwtSecret string, dbID int64, attempt int
 		return err
 	}
 	mountPath := dbDataMountPath(dbType)
+	mountSpec := dbVolumeMountSpec(dbType, volumeName, mountPath)
+	containerUser := dbContainerUser(dbType)
 
 	internalPort := dbInternalPort(dbType)
 
@@ -1636,8 +1638,12 @@ func startDatabaseRetrying(db *sql.DB, jwtSecret string, dbID int64, attempt int
 	if !useLimits {
 		resourceDesc = "(resource limits skipped — cgroup v1 or no delegation)"
 	}
-	log.add("[podman] run  --name %s  --restart on-failure:10  %s  port %s  image %s  (log-opt rotation disabled for rootless compat)",
-		cName, resourceDesc, portBind, activeImage)
+	userDesc := "image default user"
+	if containerUser != "" {
+		userDesc = fmt.Sprintf("user %s (bypass entrypoint gosu handoff)", containerUser)
+	}
+	log.add("[podman] run  --name %s  --restart on-failure:10  %s  port %s  image %s  %s  (log-opt rotation disabled for rootless compat)",
+		cName, resourceDesc, portBind, activeImage, userDesc)
 
 	runArgs := []string{
 		"run", "-d",
@@ -1657,13 +1663,16 @@ func startDatabaseRetrying(db *sql.DB, jwtSecret string, dbID int64, attempt int
 		// the container's stdout/stderr to not be captured (empty podman logs)
 		// and can produce spurious exit-127 failures for the container process.
 		// The default k8s-file driver without rotation is sufficient and reliable.
-		"-v", volumeName + ":" + mountPath,
+		"-v", mountSpec,
 	}
 	if useLimits {
 		// Cgroup v2 with cpu+memory delegation confirmed — apply resource caps.
 		// --memory-swap intentionally omitted so kernel default applies
 		// (2× memory = 1 GB swap), preventing OOM kills during first-run initdb.
 		runArgs = append(runArgs, "--cpus", "2.0", "--memory", "1g")
+	}
+	if containerUser != "" {
+		runArgs = append(runArgs, "--user", containerUser)
 	}
 	// Use slirp4netns instead of Podman named networks (no aardvark-dns needed).
 	runArgs = append(runArgs, netdaemon.NetworkArgs()...)
@@ -1718,13 +1727,12 @@ func startDatabaseRetrying(db *sql.DB, jwtSecret string, dbID int64, attempt int
 	// Background health check: if the container stops shortly after launch,
 	// diagnose the cause and optionally retry.
 	//
-	// Two exit-127 scenarios:
-	//   (A) Sub-second exit  → crun failed to set up the container spec
-	//       (e.g. --cpus/--memory rejected on cgroup v1). The image is fine;
-	//       repulling won't help. Bail immediately with a clear message.
-	//   (B) Ran for > 2 s  → the container process started but the entrypoint
-	//       exited 127 ("binary not found"). Almost always stale overlay layers.
-	//       Remove the image and repull to get fresh layers, then retry.
+	// Exit-127 here means the container process never became healthy. A very
+	// short-lived exit usually means the runtime/entrypoint failed before the
+	// engine could emit logs; longer-lived failures tend to be image-layer or
+	// engine init problems. We log the distinction, but both are retried with a
+	// fresh pull because this environment has already proven to hit rootless
+	// startup edge-cases that are not fixed by a single static hint.
 	if activeImage != "" {
 		go func(cID, pulledImage string) {
 			time.Sleep(6 * time.Second)
@@ -1771,27 +1779,7 @@ func startDatabaseRetrying(db *sql.DB, jwtSecret string, dbID int64, attempt int
 			}
 
 			if exitCode == "127" && subSecondExit {
-				// (A) Infrastructure failure: container died before any process ran.
-				// Repulling the image will not fix this — the image is fine.
-				// Most likely cause: systemd unit is missing Delegate=yes, so
-				// the featherdeploy cgroup's subtree_control lacks cpu/memory
-				// controllers and crun cannot set up the container's cgroup.
-				// The fix: run 'sudo featherdeploy update' which rewrites the
-				// systemd unit with Delegate=yes, then restart the database.
-				msg := "Container exited (code 127) in under 2 seconds — crun failed " +
-					"to set up the container cgroup. This means the featherdeploy " +
-					"systemd service is missing 'Delegate=yes' (required for rootless " +
-					"Podman --cpus/--memory in a system service). " +
-					"Run 'sudo featherdeploy update' to fix the unit file, then restart " +
-					"the database. To verify after update: " +
-					"systemctl show featherdeploy | grep Delegate"
-				log.add("[health] ERROR: %s", msg)
-				slog.Error("database start: instant exit 127 — cgroup infrastructure failure",
-					"db_id", dbID, "attempt", attempt+1)
-				db.Exec( //nolint
-					`UPDATE databases SET status='error', last_error=?, updated_at=datetime('now') WHERE id=?`,
-					msg, dbID)
-				return
+				log.add("[health] exit 127 happened before the engine emitted logs — forcing a fresh pull and retry")
 			}
 
 			if attempt >= maxDBStartAttempts {
@@ -2162,6 +2150,31 @@ func dbDataMountPath(dbType string) string {
 		return "/data"
 	default:
 		return "/data"
+	}
+}
+
+// dbVolumeMountSpec returns the full podman -v mount spec for managed DBs.
+// MySQL and Postgres run directly as their image user in rootless mode, so we
+// add :U to shift volume ownership for that user and avoid the images'
+// root->gosu entrypoint handoff path.
+func dbVolumeMountSpec(dbType, volumeName, mountPath string) string {
+	spec := volumeName + ":" + mountPath
+	switch dbType {
+	case "postgres", "mysql":
+		return spec + ":U"
+	default:
+		return spec
+	}
+}
+
+func dbContainerUser(dbType string) string {
+	switch dbType {
+	case "postgres":
+		return "postgres"
+	case "mysql":
+		return "mysql"
+	default:
+		return ""
 	}
 }
 
