@@ -1546,6 +1546,18 @@ func startDatabaseRetrying(db *sql.DB, jwtSecret string, dbID int64, attempt int
 	log := newDBLog(db, dbID)
 	log.add("[db-start] starting database id=%d name=%q type=%s version=%s", dbID, name, dbType, dbVersion)
 
+	// activeDBEngine is the container image engine to use. For MySQL databases
+	// on hosts whose CPU does not support x86-64-v2 (SSE4.2/POPCNT), MySQL 8.4+
+	// OracleLinux9 images abort immediately with
+	//   "Fatal glibc error: CPU does not support x86-64-v2"
+	// MariaDB LTS is MySQL-wire-protocol compatible and compiled for older CPUs.
+	activeDBEngine := dbType
+	if dbType == "mysql" && !cpuSupportsX8664V2() {
+		activeDBEngine = "mariadb"
+		log.add("[cpu] ⚠ CPU does not support x86-64-v2 — MySQL 8.4+ OracleLinux9 images require SSE4.2/POPCNT")
+		log.add("[cpu] Automatically using MariaDB LTS (MySQL-wire-protocol compatible, same connection URL)")
+	}
+
 	clearPass := encPass
 	if strings.HasPrefix(encPass, "fdenc:") {
 		if p, decErr := appCrypto.Decrypt(encPass[len("fdenc:"):], jwtSecret); decErr == nil {
@@ -1568,7 +1580,7 @@ func startDatabaseRetrying(db *sql.DB, jwtSecret string, dbID int64, attempt int
 
 	cName := fmt.Sprintf("fd-db-%d", dbID)
 	alias := DBNetworkAlias(name)
-	image := dbImageName(dbType, dbVersion) // primary Docker Hub ref (for local-cache check)
+	image := dbImageName(activeDBEngine, dbVersion) // primary Docker Hub ref (for local-cache check)
 	log.add("[db-start] container name: %s  image: %s  alias: %s", cName, image, alias)
 
 	db.Exec(`UPDATE databases SET status='starting', updated_at=datetime('now') WHERE id=?`, dbID) //nolint
@@ -1579,7 +1591,7 @@ func startDatabaseRetrying(db *sql.DB, jwtSecret string, dbID int64, attempt int
 	activeImage := image
 
 	if image != "" && !podmanImageExists(image) {
-		pulled, pullErr := pullDBImage(log, dbType, dbVersion)
+		pulled, pullErr := pullDBImage(log, activeDBEngine, dbVersion)
 		if pullErr != nil {
 			errMsg := pullErr.Error()
 			log.add("ERROR: all registries failed — %s", errMsg)
@@ -1640,7 +1652,7 @@ func startDatabaseRetrying(db *sql.DB, jwtSecret string, dbID int64, attempt int
 	if !useLimits {
 		resourceDesc = "(resource limits skipped — cgroup v1 or no delegation)"
 	}
-	cmdArgs := dbContainerCmdArgs(dbType)
+	cmdArgs := dbContainerCmdArgs(activeDBEngine)
 	effectiveCmd := "(image default)"
 	if entrypoint != "" && len(cmdArgs) > 0 {
 		effectiveCmd = fmt.Sprintf("%s %s", entrypoint, strings.Join(cmdArgs, " "))
@@ -1694,7 +1706,7 @@ func startDatabaseRetrying(db *sql.DB, jwtSecret string, dbID int64, attempt int
 		runArgs = append(runArgs, "-p", fmt.Sprintf("127.0.0.1:%d:%d", hostPort, internalPort))
 	}
 	// Inject the DB engine's environment variables (credentials, database name).
-	runArgs = append(runArgs, dbContainerEnvArgs(dbType, dbVersion, dbName, dbUser, clearPass)...)
+	runArgs = append(runArgs, dbContainerEnvArgs(activeDBEngine, dbVersion, dbName, dbUser, clearPass)...)
 	runArgs = append(runArgs, activeImage)
 	// Append cmd args (script path + engine binary) after the image name.
 	// cmdArgs is already computed above for the log line.
@@ -2118,6 +2130,11 @@ func dbImageRefParts(dbType, version string) (string, string) {
 		// MySQL 8.4+ dropped Debian variants entirely; all tags are OracleLinux9.
 		// Use the plain version tag (e.g. "8.4", "9.6", "latest").
 		return "mysql", version
+	case "mariadb":
+		// CPU-fallback engine: always use the MariaDB LTS release.
+		// The user-specified MySQL version is ignored because MariaDB uses its
+		// own versioning scheme; "lts" always maps to the current LTS release.
+		return "mariadb", "lts"
 	default:
 		return "", ""
 	}
@@ -2176,7 +2193,7 @@ func dbInternalPort(dbType string) int {
 	switch dbType {
 	case "postgres":
 		return 5432
-	case "mysql":
+	case "mysql", "mariadb":
 		return 3306
 	default:
 		return 5432
@@ -2191,7 +2208,7 @@ func dbDataMountPath(dbType, version string) string {
 			return "/var/lib/postgresql"
 		}
 		return "/var/lib/postgresql/data"
-	case "mysql":
+	case "mysql", "mariadb":
 		return "/var/lib/mysql"
 	case "sqlite":
 		return "/data"
@@ -2206,7 +2223,7 @@ func dbVolumeMountSpec(volumeName, mountPath string) string {
 
 func dbContainerEntrypoint(dbType string) string {
 	switch dbType {
-	case "mysql", "postgres":
+	case "mysql", "postgres", "mariadb":
 		// Use /bin/bash as the explicit entrypoint so the OCI runtime exec's a
 		// real ELF binary instead of a shell script. In rootless Podman the
 		// kernel shebang-interpreter lookup can silently fail (ENOENT → exit 127
@@ -2231,8 +2248,9 @@ func dbContainerEnvArgs(dbType, version, dbName, dbUser, clearPass string) []str
 			args = append(args, "-e", fmt.Sprintf("PGDATA=/var/lib/postgresql/%d/docker", major))
 		}
 		return args
-	case "mysql":
+	case "mysql", "mariadb":
 		// MYSQL_ROOT_PASSWORD is required; the named user+password are optional.
+		// MariaDB ≥10.x also accepts MYSQL_* env vars for backward compatibility.
 		return []string{
 			"-e", "MYSQL_DATABASE=" + dbName,
 			"-e", "MYSQL_USER=" + dbUser,
@@ -2253,12 +2271,37 @@ func dbContainerCmdArgs(dbType string) []string {
 	case "mysql":
 		// /bin/bash /usr/local/bin/docker-entrypoint.sh mysqld
 		return []string{"/usr/local/bin/docker-entrypoint.sh", "mysqld"}
+	case "mariadb":
+		// MariaDB LTS (11.x) uses mariadbd but also recognises mysqld as an alias.
+		// Using mysqld keeps parity with the MySQL path and avoids version sniffing.
+		return []string{"/usr/local/bin/docker-entrypoint.sh", "mysqld"}
 	case "postgres":
 		// /bin/bash /usr/local/bin/docker-entrypoint.sh postgres
 		return []string{"/usr/local/bin/docker-entrypoint.sh", "postgres"}
 	default:
 		return nil
 	}
+}
+
+// cpuSupportsX8664V2 reports whether the host CPU supports the x86-64-v2
+// microarchitecture level (requires SSE4.1, SSE4.2, POPCNT).
+// MySQL 8.4+ OracleLinux9 images are compiled for x86-64-v2 and abort with
+// "Fatal glibc error: CPU does not support x86-64-v2" on older hardware.
+// On non-Linux systems (where /proc/cpuinfo is absent) we return true so that
+// no unnecessary fallback is triggered.
+func cpuSupportsX8664V2() bool {
+	data, err := os.ReadFile("/proc/cpuinfo")
+	if err != nil {
+		return true // non-Linux or unreadable — assume supported
+	}
+	content := string(data)
+	// Check the three key flags that glibc's x86-64-v2 runtime check requires.
+	for _, flag := range []string{"sse4_1", "sse4_2", "popcnt"} {
+		if !strings.Contains(content, flag) {
+			return false
+		}
+	}
+	return true
 }
 
 func postgresMajorVersion(version string) int {
