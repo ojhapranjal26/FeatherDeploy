@@ -497,15 +497,15 @@ export function ServicePage() {
         <ChevronLeft className="h-3.5 w-3.5" /> Back to project
       </Button>
 
-      <div className="mb-6 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <h1 className="text-2xl font-semibold">{service.name}</h1>
+      <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex items-center gap-3 min-w-0 flex-wrap">
+          <h1 className="text-2xl font-semibold truncate">{service.name}</h1>
           <ServiceStatusBadge status={service.status} />
           {service.framework && (
             <Badge variant="secondary">{service.framework}</Badge>
           )}
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 shrink-0 flex-wrap">
           {service.deploy_type === 'git' && service.repo_url && (
             <Button
               variant="outline"
@@ -596,7 +596,7 @@ export function ServicePage() {
       </Dialog>
 
       <Tabs value={activeTab} onValueChange={setActiveTab}>
-        <TabsList className="mb-6">
+        <TabsList className="mb-6 w-full max-w-full overflow-x-auto justify-start">
           <TabsTrigger value="overview">Overview</TabsTrigger>
           <TabsTrigger value="deployments">Deployments</TabsTrigger>
           <TabsTrigger value="settings" onClick={() => {
@@ -654,7 +654,7 @@ export function ServicePage() {
                 </p>
               </div>
               {/* Source type selector */}
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 xs:grid-cols-2 gap-3">
                 <button
                   type="button"
                   onClick={() => setOverviewSourceType('git')}
@@ -847,7 +847,7 @@ export function ServicePage() {
 
         {/* ── Deployments ──────────────────────────────────────────────────── */}
         <TabsContent value="deployments" className="space-y-4">
-          <div className="flex items-center justify-between">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <h2 className="font-medium">All deployments</h2>
             <Button size="sm" className="gap-1.5" onClick={handleDeployClick} disabled={isDeploying}>
               {isDeploying ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Deploying…</> : <><Rocket className="h-3.5 w-3.5" /> Deploy now</>}
@@ -860,47 +860,52 @@ export function ServicePage() {
               <p className="text-xs text-muted-foreground mt-1">Trigger your first deployment above.</p>
             </div>
           )}
-          <div className="divide-y rounded-lg border">
+          <div className="divide-y rounded-lg border overflow-hidden">
             {deploymentsData?.deployments.map((d) => (
               <div
                 key={d.id}
-                className="flex items-center gap-3 px-4 py-3 cursor-pointer hover:bg-muted/40 transition-colors"
+                className="flex flex-col gap-2 px-4 py-3 cursor-pointer hover:bg-muted/40 transition-colors sm:flex-row sm:items-center sm:gap-3"
                 onClick={() => navigate(`/projects/${projectId}/services/${serviceId}/deployments/${d.id}`)}
               >
-                <DeploymentStatusBadge status={d.status} />
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <span className="font-mono text-xs">{d.commit_sha?.slice(0, 7) ?? `#${d.id}`}</span>
-                    {d.branch && (
-                      <span className="flex items-center gap-0.5 text-[10px] text-muted-foreground font-mono">
-                        <GitBranch className="h-2.5 w-2.5" />{d.branch}
-                      </span>
+                <div className="flex items-center gap-3 flex-1 min-w-0">
+                  <DeploymentStatusBadge status={d.status} />
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="font-mono text-xs">{d.commit_sha?.slice(0, 7) ?? `#${d.id}`}</span>
+                      {d.branch && (
+                        <span className="flex items-center gap-0.5 text-[10px] text-muted-foreground font-mono">
+                          <GitBranch className="h-2.5 w-2.5" />{d.branch}
+                        </span>
+                      )}
+                      <Badge variant="outline" className="text-[10px]">{d.deploy_type}</Badge>
+                    </div>
+                    {d.started_at && (
+                      <p className="text-xs text-muted-foreground">{new Date(d.started_at).toLocaleString()}</p>
                     )}
-                    <Badge variant="outline" className="text-[10px]">{d.deploy_type}</Badge>
                   </div>
-                  {d.started_at && (
-                    <p className="text-xs text-muted-foreground">{new Date(d.started_at).toLocaleString()}</p>
-                  )}
                 </div>
-                <div className="flex items-center gap-1 text-xs text-muted-foreground shrink-0">
+                <div className="flex items-center gap-2 text-xs text-muted-foreground shrink-0 pl-8 sm:pl-0">
                   <Clock className="h-3 w-3" />
                   {formatDuration(d.started_at, d.finished_at)}
+                  <ExternalLink className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
                 </div>
-                <ExternalLink className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
               </div>
             ))}
           </div>
         </TabsContent>
 
         {/* ── Settings ─────────────────────────────────────────────────────── */}
-        <TabsContent value="settings" className="space-y-8">
+        <TabsContent value="settings" className="space-y-6">
 
           {/* Repository section */}
-          <div className="space-y-4">
-            <div className="flex items-center gap-2">
-              <GitFork className="h-4 w-4 text-muted-foreground" />
-              <h2 className="font-medium">Repository</h2>
-            </div>
+          <Card>
+            <CardHeader className="pb-4">
+              <CardTitle className="flex items-center gap-2 text-base">
+                <GitFork className="h-4 w-4 text-muted-foreground" />
+                Repository
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
 
             {service.repo_url ? (
               <div className="rounded-lg border p-4 space-y-3">
@@ -987,16 +992,18 @@ export function ServicePage() {
                 )}
               </div>
             )}
-          </div>
-
-          <Separator />
+            </CardContent>
+          </Card>
 
           {/* Build configuration section */}
-          <div className="space-y-4">
-            <div className="flex items-center gap-2">
-              <Settings2 className="h-4 w-4 text-muted-foreground" />
-              <h2 className="font-medium">Build configuration</h2>
-            </div>
+          <Card>
+            <CardHeader className="pb-4">
+              <CardTitle className="flex items-center gap-2 text-base">
+                <Settings2 className="h-4 w-4 text-muted-foreground" />
+                Build configuration
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-1.5">
                 <Label htmlFor="cfg-build" className="text-xs">Build command</Label>
@@ -1046,12 +1053,13 @@ export function ServicePage() {
                 {updateMutation.isPending ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Saving…</> : 'Save configuration'}
               </Button>
             </div>
-          </div>
+            </CardContent>
+          </Card>
         </TabsContent>
 
         {/* ── Environment ──────────────────────────────────────────────────── */}
         <TabsContent value="env" className="space-y-4">
-          <div className="flex items-center justify-between">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
             <div>
               <h2 className="font-medium">Environment variables</h2>
               <p className="text-xs text-muted-foreground mt-0.5">Applied to every deployment. Secrets are encrypted at rest.</p>
@@ -1088,7 +1096,7 @@ export function ServicePage() {
               </div>
             </div>
           ) : (
-            <div className="rounded-lg border">
+            <div className="rounded-lg border overflow-x-auto">
               <Table>
                 <TableHeader>
                   <TableRow>

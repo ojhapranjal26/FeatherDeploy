@@ -6,12 +6,16 @@
 package caddy
 
 import (
+	"bytes"
 	"database/sql"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 const (
@@ -24,8 +28,10 @@ const (
 // reload.  It is intentionally fire-and-forget friendly: all errors are logged
 // but never returned so callers don't need to handle them.
 func Reload(db *sql.DB) {
-	if _, err := exec.LookPath("caddy"); err != nil {
-		return // dev / CI environment — Caddy not installed
+	// Skip when Caddy is not installed (dev / CI) — check both common paths
+	// and PATH so we don't miss it when the service user has a restricted PATH.
+	if !caddyInstalled() {
+		return
 	}
 
 	content, err := buildConfig(db)
@@ -34,13 +40,44 @@ func Reload(db *sql.DB) {
 		return
 	}
 
+	slog.Info("caddy: generated config", "sites", strings.Count(content, "reverse_proxy"), "bytes", len(content))
+
 	if err := writeServicesFile(content); err != nil {
 		slog.Warn("caddy: write services file", "err", err)
 		return
 	}
+	slog.Info("caddy: services file written", "path", servicesFile)
 
 	ensureImport()
 	reloadCaddy()
+}
+
+// caddyInstalled checks whether caddy is present on the system.
+func caddyInstalled() bool {
+	if _, err := exec.LookPath("caddy"); err == nil {
+		return true
+	}
+	// exec.LookPath relies on the current PATH which may be restricted inside
+	// a systemd service.  Check common install locations directly.
+	for _, p := range []string{"/usr/bin/caddy", "/usr/local/bin/caddy"} {
+		if _, err := os.Stat(p); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// caddyBin returns the absolute path of the caddy binary.
+func caddyBin() string {
+	if p, err := exec.LookPath("caddy"); err == nil {
+		return p
+	}
+	for _, p := range []string{"/usr/bin/caddy", "/usr/local/bin/caddy"} {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	return "caddy"
 }
 
 // buildConfig queries all (domain, tls, host_port) rows and returns a Caddyfile
@@ -81,18 +118,33 @@ func buildConfig(db *sql.DB) (string, error) {
 	return sb.String(), nil
 }
 
-// writeServicesFile writes content to servicesFile atomically via a temp file.
-// Falls back to direct write if the rename fails (cross-device edge case).
+// writeServicesFile writes content to servicesFile.  It tries, in order:
+//  1. Atomic write via temp file + rename (works when /etc/caddy/ is writable)
+//  2. Direct truncate + write (works when the file is owned by the service user)
+//  3. sudo tee (guaranteed by the NOPASSWD sudoers rule from build.sh)
 func writeServicesFile(content string) error {
+	// Attempt 1: temp file + atomic rename
 	tmp := servicesFile + ".tmp"
-	if err := os.WriteFile(tmp, []byte(content), 0644); err != nil {
-		// /etc/caddy might not be writable by the service user on first run;
-		// the build.sh step creates the file with the right ownership.
-		return os.WriteFile(servicesFile, []byte(content), 0644)
-	}
-	if err := os.Rename(tmp, servicesFile); err != nil {
+	if err := os.WriteFile(tmp, []byte(content), 0644); err == nil {
+		if err := os.Rename(tmp, servicesFile); err == nil {
+			return nil
+		}
 		os.Remove(tmp) //nolint
-		return os.WriteFile(servicesFile, []byte(content), 0644)
+	}
+
+	// Attempt 2: direct write (file must be writable by current user)
+	if err := os.WriteFile(servicesFile, []byte(content), 0644); err == nil {
+		return nil
+	}
+
+	// Attempt 3: sudo tee — the build.sh sudoers rule allows this without a
+	// password: featherdeploy ALL=(root) NOPASSWD: /usr/bin/tee /etc/caddy/featherdeploy-services.caddy
+	slog.Info("caddy: falling back to sudo tee for services file")
+	cmd := exec.Command("sudo", "-n", "tee", servicesFile)
+	cmd.Stdin = strings.NewReader(content)
+	cmd.Stdout = io.Discard
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("all write methods failed (last: sudo tee: %w)", err)
 	}
 	return nil
 }
@@ -121,6 +173,7 @@ func ensureImport() {
 	snippet := fmt.Sprintf("\n%s\n", importLine)
 	cmd := exec.Command("sudo", "-n", "tee", "-a", mainFile)
 	cmd.Stdin = strings.NewReader(snippet)
+	cmd.Stdout = io.Discard
 	if err := cmd.Run(); err != nil {
 		slog.Warn("caddy: could not add import to Caddyfile", "err", err)
 	} else {
@@ -129,19 +182,79 @@ func ensureImport() {
 }
 
 // reloadCaddy signals Caddy to reload its config without downtime.
-// First tries the Caddy admin API (no root needed), then falls back to
-// systemctl reload via sudo.
+// It tries three methods in order of reliability:
+//  1. Caddy admin API via HTTP (no CLI dependency, works from any user)
+//  2. sudo systemctl reload caddy (NOPASSWD sudoers rule from build.sh)
+//  3. caddy reload CLI (requires caddy binary in PATH + admin API access)
 func reloadCaddy() {
-	// caddy reload --config <file> talks to the admin API on localhost:2019
-	err := exec.Command("caddy", "reload", "--config", mainFile, "--adapter", "caddyfile").Run()
-	if err == nil {
-		slog.Info("caddy: reloaded via admin API")
+	// Method 1: POST the full Caddyfile to Caddy's admin API.
+	// This is the most reliable because it doesn't depend on PATH, sudo, or
+	// the caddy CLI binary being accessible to the current user.
+	if reloadViaAPI() {
+		slog.Info("caddy: reloaded via admin API (HTTP)")
 		return
 	}
-	// Fallback: systemctl reload caddy (requires NOPASSWD sudoers rule)
-	if out, err := exec.Command("sudo", "-n", "systemctl", "reload", "caddy").CombinedOutput(); err != nil {
-		slog.Warn("caddy: reload failed", "err", err, "out", strings.TrimSpace(string(out)))
-	} else {
+
+	// Method 2: sudo systemctl reload caddy (sends SIGUSR1 → graceful reload)
+	if out, err := exec.Command("sudo", "-n", "systemctl", "reload", "caddy").CombinedOutput(); err == nil {
 		slog.Info("caddy: reloaded via systemctl")
+		return
+	} else {
+		slog.Warn("caddy: systemctl reload failed", "err", err, "out", strings.TrimSpace(string(out)))
 	}
+
+	// Method 3: caddy reload CLI → admin API on localhost:2019
+	bin := caddyBin()
+	if out, err := exec.Command(bin, "reload", "--config", mainFile, "--adapter", "caddyfile").CombinedOutput(); err == nil {
+		slog.Info("caddy: reloaded via CLI")
+		return
+	} else {
+		slog.Warn("caddy: CLI reload failed", "err", err, "bin", bin, "out", strings.TrimSpace(string(out)))
+	}
+
+	slog.Error("caddy: all reload methods failed — domains may not resolve until next reload")
+}
+
+// reloadViaAPI reads the main Caddyfile, adapts it to JSON via the admin API,
+// then loads the resulting JSON config.
+func reloadViaAPI() bool {
+	c := &http.Client{Timeout: 5 * time.Second}
+
+	// Read the full Caddyfile (which contains the import directive)
+	data, err := os.ReadFile(mainFile)
+	if err != nil {
+		slog.Warn("caddy: api reload: cannot read Caddyfile", "err", err)
+		return false
+	}
+
+	// Step 1: Adapt the Caddyfile to JSON via POST /adapt
+	adaptReq, _ := http.NewRequest("POST", "http://localhost:2019/adapt", bytes.NewReader(data))
+	adaptReq.Header.Set("Content-Type", "text/caddyfile")
+	adaptResp, err := c.Do(adaptReq)
+	if err != nil {
+		slog.Warn("caddy: api reload: adapt request failed", "err", err)
+		return false
+	}
+	defer adaptResp.Body.Close()
+	jsonConfig, _ := io.ReadAll(adaptResp.Body)
+	if adaptResp.StatusCode != 200 {
+		slog.Warn("caddy: api reload: adapt returned error", "status", adaptResp.StatusCode, "body", string(jsonConfig))
+		return false
+	}
+
+	// Step 2: Load the JSON config via POST /load
+	loadReq, _ := http.NewRequest("POST", "http://localhost:2019/load", bytes.NewReader(jsonConfig))
+	loadReq.Header.Set("Content-Type", "application/json")
+	loadResp, err := c.Do(loadReq)
+	if err != nil {
+		slog.Warn("caddy: api reload: load request failed", "err", err)
+		return false
+	}
+	defer loadResp.Body.Close()
+	if loadResp.StatusCode != 200 {
+		body, _ := io.ReadAll(loadResp.Body)
+		slog.Warn("caddy: api reload: load returned error", "status", loadResp.StatusCode, "body", string(body))
+		return false
+	}
+	return true
 }
