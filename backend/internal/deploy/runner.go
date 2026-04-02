@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -573,45 +574,50 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 		`UPDATE services SET status='running', container_id=?, host_port=?, updated_at=datetime('now') WHERE id=?`,
 		newContainerID, hostPort, svcID)
 
-	// Async port probe: 10 s after deploy, check that the published host port
-	// actually responds.  A 502 almost always means the app is not listening on
-	// the configured app_port.  We append a diagnostic WARNING to the deployment
-	// log so the user has a clear actionable message rather than a mystery 502.
-	go func(hPort, aPort int, dID int64) {
-		time.Sleep(10 * time.Second)
-		client := &http.Client{
-			Timeout: 2 * time.Second,
-			// Do not follow redirects — a 301/302 still means "something answered".
-			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
-		}
-		probeOK := false
-		for i := 0; i < 10; i++ {
-			if resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/", hPort)); err == nil {
-				resp.Body.Close()
-				probeOK = true
-				break
+	// Wait for the container's published host port to accept TCP connections
+	// before reloading Caddy.  This is the correct fix for the "502 on second
+	// domain" problem: the app may need 10-90 s to start (JVM, large Python deps,
+	// etc.).  If we reload Caddy with a fixed 5 s delay the domain is registered
+	// BEFORE the app is listening — Caddy connects, gets ECONNREFUSED, and serves
+	// 502 for every request until the next periodic reload.
+	//
+	// By waiting for a successful TCP dial we guarantee the domain only enters
+	// the Caddy config at the moment the app is actually ready to serve traffic.
+	//
+	// Max wait: 90 s (generous for slow-starting apps on small VPS hosts).
+	// If the port still doesn't respond after 90 s we reload Caddy anyway (the
+	// 60 s periodic sync keeps retrying) and append a clear diagnostic WARNING
+	// to the deployment log so the user knows the app_port is likely wrong.
+	go func(hPort, aPort int, dID, sID int64) {
+		const (
+			maxWait  = 90 * time.Second
+			interval = 2 * time.Second
+		)
+		deadline := time.Now().Add(maxWait)
+		for time.Now().Before(deadline) {
+			conn, err := net.DialTimeout("tcp",
+				fmt.Sprintf("127.0.0.1:%d", hPort), 1*time.Second)
+			if err == nil {
+				conn.Close()
+				// App is up — reload Caddy so traffic starts flowing immediately.
+				caddy.Reload(db)
+				return
 			}
-			time.Sleep(2 * time.Second)
+			time.Sleep(interval)
 		}
-		if !probeOK {
-			db.Exec( //nolint
-				`UPDATE deployments SET deploy_log=deploy_log||? WHERE id=?`,
-				fmt.Sprintf("\nWARNING: port %d did not respond after 30s — the app may not be listening on port %d (configured app_port). If you see 502 errors, update the app_port in service settings to match what the app actually listens on.", hPort, aPort),
-				dID)
-		}
-	}(hostPort, appPort, depID)
-
-	// Update Caddy so the service is reachable via its registered domains.
-	// Small delay: rootlessport needs a moment to bind the published port
-	// before Caddy can reverse-proxy to it.  Without this the reload races
-	// the port-bind and Caddy's first health-check may get ECONNREFUSED,
-	// caching a 502 until the next reload.
-	go func() {
-		time.Sleep(5 * time.Second)
+		// Port never responded in 90 s — append actionable diagnostic and reload anyway.
+		db.Exec( //nolint
+			`UPDATE deployments SET deploy_log=deploy_log||? WHERE id=?`,
+			fmt.Sprintf(
+				"\nWARNING: port %d did not respond within 90 s after container start."+
+					"\n  The app is not listening on app_port=%d."+
+					"\n  FIX: edit the service → change app_port to the port your app"+
+					" actually listens on (check your code or Dockerfile EXPOSE)."+
+					"\n  DEBUG: run \"podman logs fd-svc-%d\" on your server to see the startup output.",
+				hPort, aPort, sID),
+			dID)
 		caddy.Reload(db)
-	}()
+	}(hostPort, appPort, depID, svcID)
 
 	// Tag the freshly built image as the stable snapshot so it can be used as
 	// a fallback if a future deployment build fails.

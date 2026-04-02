@@ -695,6 +695,7 @@ cat > /etc/sudoers.d/featherdeploy-podman << 'SUDOEOF'
 featherdeploy ALL=(root) NOPASSWD: /bin/systemctl reload caddy
 featherdeploy ALL=(root) NOPASSWD: /usr/bin/systemctl reload caddy
 featherdeploy ALL=(root) NOPASSWD: /usr/bin/tee /etc/caddy/featherdeploy-services.caddy
+featherdeploy ALL=(root) NOPASSWD: /usr/bin/tee /etc/caddy/Caddyfile
 featherdeploy ALL=(root) NOPASSWD: /usr/local/bin/featherdeploy-update
 SUDOEOF
 chmod 440 /etc/sudoers.d/featherdeploy-podman
@@ -742,7 +743,12 @@ echo "==> Preparing Caddy services include file..."
 touch /etc/caddy/featherdeploy-services.caddy
 chown "${SVC_USER}:${SVC_USER}" /etc/caddy/featherdeploy-services.caddy
 chmod 644 /etc/caddy/featherdeploy-services.caddy
-echo "  /etc/caddy/featherdeploy-services.caddy ready"
+# Allow the service user to atomically rename temp config files inside /etc/caddy/.
+# Without group-write on the directory, the atomic rename (fastest write path
+# in the Go daemon) fails silently and falls back to sudo tee every time.
+chgrp "${SVC_USER}" /etc/caddy
+chmod g+w /etc/caddy
+echo "  /etc/caddy/featherdeploy-services.caddy ready (dir group-writable for ${SVC_USER})"
 
 # -- 9. Set up data directory with correct ownership, then install + start rqlite
 echo "==> Setting up data directory..."
