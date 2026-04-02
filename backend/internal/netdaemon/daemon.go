@@ -29,10 +29,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"math/rand"
 	"os"
 	"strings"
 	"sync"
+	"time"
 )
 
 const (
@@ -68,6 +68,7 @@ type Daemon struct {
 	proxies   map[string]*tcpProxy     // key: same as services
 	ports     map[int]bool             // allocated cluster ports
 	statePath string
+	done      chan struct{} // closed by Stop() to signal background goroutines
 }
 
 // New creates a Daemon using statePath for persistent state.
@@ -80,6 +81,7 @@ func New(statePath string) *Daemon {
 		proxies:   make(map[string]*tcpProxy),
 		ports:     make(map[int]bool),
 		statePath: statePath,
+		done:      make(chan struct{}),
 	}
 	d.loadState()
 	return d
@@ -245,10 +247,21 @@ func (d *Daemon) ReconcileRegistered() {
 		slog.Info("fdnet: proxy restarted for persisted service", "key", k,
 			"clusterPort", entry.ClusterPort)
 	}
+
+	// Start the watchdog after reconcile so it monitors all just-started proxies.
+	d.startWatchdog()
 }
 
 // Stop shuts down all active proxies.  Call during server shutdown.
 func (d *Daemon) Stop() {
+	// Signal the watchdog goroutine to exit.
+	select {
+	case <-d.done:
+		// already closed
+	default:
+		close(d.done)
+	}
+
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -274,14 +287,62 @@ func (d *Daemon) Stats() []ServiceEntry {
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
 func (d *Daemon) allocatePort() (int, error) {
-	for i := 0; i < 1000; i++ {
-		p := clusterPortMin + rand.Intn(clusterPortMax-clusterPortMin)
+	// Sequential search is O(n) but predictable and avoids the 1000-iteration
+	// retry limit of the previous random approach.  With a 30k-port range and
+	// at most a few hundred services, this is always fast.
+	for p := clusterPortMin; p <= clusterPortMax; p++ {
 		if !d.ports[p] {
 			return p, nil
 		}
 	}
-	return 0, fmt.Errorf("fdnet: exhausted cluster port range %d-%d",
+	return 0, fmt.Errorf("fdnet: exhausted cluster port range [%d-%d]",
 		clusterPortMin, clusterPortMax)
+}
+
+// startWatchdog launches a background goroutine that checks every 30 seconds
+// whether the TCP proxy for each "active" service is still running.  If a
+// proxy goroutine has died (e.g. after a transient bind failure at startup)
+// it is automatically restarted so services self-heal without requiring a
+// full featherdeploy restart.
+func (d *Daemon) startWatchdog() {
+	ticker := time.NewTicker(30 * time.Second)
+	go func() {
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				d.repairDeadProxies()
+			case <-d.done:
+				return
+			}
+		}
+	}()
+}
+
+// repairDeadProxies restarts any proxy that should be running but isn't.
+// It is called periodically by the watchdog goroutine.
+func (d *Daemon) repairDeadProxies() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	for k, entry := range d.services {
+		if entry.Status != "active" {
+			continue
+		}
+		if _, running := d.proxies[k]; running {
+			continue
+		}
+		// Proxy is missing for an active service — restart it.
+		proxy := newTCPProxy(entry.ClusterPort, entry.NodeAddr, entry.HostPort)
+		if err := proxy.start(); err != nil {
+			slog.Warn("fdnet watchdog: could not restart dead proxy",
+				"key", k, "clusterPort", entry.ClusterPort, "err", err)
+			continue
+		}
+		d.proxies[k] = proxy
+		slog.Info("fdnet watchdog: restarted dead proxy",
+			"key", k, "clusterPort", entry.ClusterPort)
+	}
 }
 
 func (d *Daemon) saveState() {

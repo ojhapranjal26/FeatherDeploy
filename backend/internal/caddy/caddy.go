@@ -119,33 +119,40 @@ func buildConfig(db *sql.DB) (string, error) {
 }
 
 // writeServicesFile writes content to servicesFile.  It tries, in order:
-//  1. Atomic write via temp file + rename (works when /etc/caddy/ is writable)
+//  1. Atomic write via temp file + rename (works when /etc/caddy/ is group-writable
+//     for the featherdeploy user, set by the installer via chgrp+chmod g+w)
 //  2. Direct truncate + write (works when the file is owned by the service user)
-//  3. sudo tee (guaranteed by the NOPASSWD sudoers rule from build.sh)
+//  3. sudo tee (guaranteed by the NOPASSWD sudoers rule written by writeSudoersFile)
 func writeServicesFile(content string) error {
-	// Attempt 1: temp file + atomic rename
+	// Attempt 1: temp file + atomic rename.
+	// Requires write+execute on the /etc/caddy/ directory (set by installer).
 	tmp := servicesFile + ".tmp"
 	if err := os.WriteFile(tmp, []byte(content), 0644); err == nil {
 		if err := os.Rename(tmp, servicesFile); err == nil {
+			slog.Info("caddy: services file written (atomic rename)", "path", servicesFile)
 			return nil
 		}
 		os.Remove(tmp) //nolint
 	}
 
-	// Attempt 2: direct write (file must be writable by current user)
+	// Attempt 2: direct write (works when the file is owned by the service user).
 	if err := os.WriteFile(servicesFile, []byte(content), 0644); err == nil {
+		slog.Info("caddy: services file written (direct write)", "path", servicesFile)
 		return nil
 	}
 
-	// Attempt 3: sudo tee — the build.sh sudoers rule allows this without a
-	// password: featherdeploy ALL=(root) NOPASSWD: /usr/bin/tee /etc/caddy/featherdeploy-services.caddy
+	// Attempt 3: sudo tee — requires the NOPASSWD rule written by writeSudoersFile().
+	// featherdeploy ALL=(root) NOPASSWD: /usr/bin/tee /etc/caddy/featherdeploy-services.caddy
 	slog.Info("caddy: falling back to sudo tee for services file")
 	cmd := exec.Command("sudo", "-n", "tee", servicesFile)
 	cmd.Stdin = strings.NewReader(content)
+	var teeErr bytes.Buffer
 	cmd.Stdout = io.Discard
+	cmd.Stderr = &teeErr
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("all write methods failed (last: sudo tee: %w)", err)
+		return fmt.Errorf("all write methods failed (sudo tee: %w — stderr: %s)", err, strings.TrimSpace(teeErr.String()))
 	}
+	slog.Info("caddy: services file written (sudo tee)", "path", servicesFile)
 	return nil
 }
 

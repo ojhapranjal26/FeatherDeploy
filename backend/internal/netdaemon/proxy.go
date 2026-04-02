@@ -10,12 +10,12 @@ import (
 	"time"
 )
 
-// copyBufPool recycles 4 KB byte slices for io.CopyBuffer.
-// Using a pool instead of per-call allocations significantly reduces GC
-// pressure when many short-lived proxy connections are created.
+// copyBufPool recycles 32 KB byte slices for io.CopyBuffer.
+// 32 KB matches the typical Linux TCP socket buffer and halves syscall overhead
+// versus the previous 4 KB slice on high-throughput connections.
 var copyBufPool = sync.Pool{
 	New: func() any {
-		b := make([]byte, 4*1024)
+		b := make([]byte, 32*1024)
 		return &b
 	},
 }
@@ -142,9 +142,11 @@ func copyConn(dst io.Writer, src io.Reader) {
 	io.CopyBuffer(dst, src, *bufp) //nolint:errcheck — EOF is normal
 }
 
-// setKeepalive enables TCP keepalive on a connection if it supports it.
+// setKeepalive enables TCP keepalive on a connection so stalled idle
+// connections are detected and cleaned up (avoids zombie goroutines).
 func setKeepalive(conn net.Conn) {
 	if tc, ok := conn.(*net.TCPConn); ok {
-		tc.SetKeepAlive(true) //nolint:errcheck
+		tc.SetKeepAlive(true)                  //nolint:errcheck
+		tc.SetKeepAlivePeriod(30 * time.Second) //nolint:errcheck
 	}
 }
