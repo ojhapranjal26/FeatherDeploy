@@ -218,6 +218,10 @@ ORIGIN=%s
 	writeCaddyfile(domain)
 	fmt.Printf("  ✓ wrote %s\n", caddyConf)
 
+	// ── Step 8b: Write sudoers rules so featherdeploy can reload Caddy ───────
+	writeSudoersFile(svcUser)
+	fmt.Println("  ✓ sudoers rules written")
+
 	// ── Step 9: Systemd service ───────────────────────────────────────────────
 	fmt.Println("\n── Installing systemd service ──────────────────────────────────")
 	writeSystemdService(svcUser)
@@ -814,6 +818,33 @@ func mustMkdir(path string) {
 	if err := os.MkdirAll(path, 0755); err != nil {
 		die("cannot create directory %s: %v", path, err)
 	}
+}
+
+// writeSudoersFile writes the NOPASSWD sudoers rules that allow the service
+// user to:
+//   - Reload Caddy via systemctl (both /bin and /usr/bin paths)
+//   - Write the Caddy services include file via tee
+//   - Run the self-update helper script
+//
+// This is called by both Run() and RunUpdate() so the file is always current
+// regardless of which install path was used.
+func writeSudoersFile(svcUser string) {
+	const sudoersFile = "/etc/sudoers.d/featherdeploy-podman"
+	content := svcUser + " ALL=(root) NOPASSWD: /bin/systemctl reload caddy\n" +
+		svcUser + " ALL=(root) NOPASSWD: /usr/bin/systemctl reload caddy\n" +
+		svcUser + " ALL=(root) NOPASSWD: /usr/bin/tee /etc/caddy/featherdeploy-services.caddy\n" +
+		svcUser + " ALL=(root) NOPASSWD: /usr/local/bin/featherdeploy-update\n"
+	if err := os.WriteFile(sudoersFile, []byte(content), 0440); err != nil {
+		slog.Warn("installer: could not write sudoers file", "path", sudoersFile, "err", err)
+		return
+	}
+	// Validate syntax with visudo --check so a bad file doesn't lock out sudo.
+	if err := exec.Command("visudo", "--check", "-f", sudoersFile).Run(); err != nil {
+		slog.Warn("installer: sudoers file failed visudo check — removing", "err", err)
+		os.Remove(sudoersFile)
+		return
+	}
+	fmt.Printf("  ✓ %s\n", sudoersFile)
 }
 
 func copyFile(src, dst string) {
@@ -1442,6 +1473,7 @@ func RunUpdate() {
 	if runSilent("systemctl", "is-active", "--quiet", "caddy") == nil {
 		ensureCaddyServicesFile(defaultSvcUser)
 		ensureCaddyImport()
+		writeSudoersFile(defaultSvcUser)
 		runSilent("systemctl", "reload", "caddy")
 		fmt.Println("  ✓ Caddy reloaded")
 	}

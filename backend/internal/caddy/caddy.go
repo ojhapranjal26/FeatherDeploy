@@ -182,41 +182,51 @@ func ensureImport() {
 }
 
 // reloadCaddy signals Caddy to reload its config without downtime.
-// It tries three methods in order of reliability:
+// It tries three methods in order of reliability, retrying each up to 3 times
+// with a 2-second gap so transient systemd / socket races don't cause failures:
 //  1. sudo systemctl reload caddy — sends SIGUSR1; Caddy re-reads the
 //     Caddyfile from disk and resolves all import directives itself.
 //  2. caddy reload CLI — reads the config file and POSTs it via the admin API.
 //  3. Caddy admin API via HTTP — we manually inline imported files and POST
-//     the merged config.  This is the fallback because import resolution
+//     the merged config.  Fallback because import resolution
 //     via the /adapt endpoint can be unreliable.
 func reloadCaddy() {
+	const maxTries = 3
+
 	// Method 1: sudo systemctl reload caddy (sends SIGUSR1 → graceful reload).
-	// This is the most reliable: Caddy reads the config from disk itself so
-	// all `import` directives are correctly resolved.
-	if out, err := exec.Command("sudo", "-n", "systemctl", "reload", "caddy").CombinedOutput(); err == nil {
-		slog.Info("caddy: reloaded via systemctl")
-		return
-	} else {
-		slog.Warn("caddy: systemctl reload failed", "err", err, "out", strings.TrimSpace(string(out)))
+	// Most reliable: Caddy reads config from disk and resolves all imports.
+	for i := 0; i < maxTries; i++ {
+		if out, err := exec.Command("sudo", "-n", "systemctl", "reload", "caddy").CombinedOutput(); err == nil {
+			slog.Info("caddy: reloaded via systemctl")
+			return
+		} else {
+			slog.Warn("caddy: systemctl reload attempt failed", "attempt", i+1, "err", err, "out", strings.TrimSpace(string(out)))
+		}
+		time.Sleep(2 * time.Second)
 	}
 
-	// Method 2: caddy reload CLI reads the config file from disk and POSTs
-	// the adapted JSON to the admin API.  Import directives are resolved
-	// by the caddy binary which has full filesystem context.
+	// Method 2: caddy reload CLI reads the config from disk and POSTs to admin
+	// API.  Import directives are resolved by the caddy binary.
 	bin := caddyBin()
-	if out, err := exec.Command(bin, "reload", "--config", mainFile, "--adapter", "caddyfile").CombinedOutput(); err == nil {
-		slog.Info("caddy: reloaded via CLI")
-		return
-	} else {
-		slog.Warn("caddy: CLI reload failed", "err", err, "bin", bin, "out", strings.TrimSpace(string(out)))
+	for i := 0; i < maxTries; i++ {
+		if out, err := exec.Command(bin, "reload", "--config", mainFile, "--adapter", "caddyfile").CombinedOutput(); err == nil {
+			slog.Info("caddy: reloaded via CLI")
+			return
+		} else {
+			slog.Warn("caddy: CLI reload attempt failed", "attempt", i+1, "err", err, "bin", bin, "out", strings.TrimSpace(string(out)))
+		}
+		time.Sleep(2 * time.Second)
 	}
 
-	// Method 3: POST the Caddyfile to the admin API.  We manually inline the
-	// services import file because the /adapt endpoint may not resolve
-	// file-based import directives when the config is sent as a POST body.
-	if reloadViaAPI() {
-		slog.Info("caddy: reloaded via admin API (HTTP)")
-		return
+	// Method 3: POST the Caddyfile to the admin API with inlined imports.
+	for i := 0; i < maxTries; i++ {
+		if reloadViaAPI() {
+			slog.Info("caddy: reloaded via admin API (HTTP)")
+			return
+		}
+		if i < maxTries-1 {
+			time.Sleep(2 * time.Second)
+		}
 	}
 
 	slog.Error("caddy: all reload methods failed — domains may not resolve until next reload")

@@ -176,6 +176,17 @@ func serve() {
 	// reload here repairs it before any user traffic arrives.
 	go caddy.Reload(db)
 
+	// Periodic Caddy sync: re-generate and reload the services file every 60s.
+	// This self-heals any situation where the initial reload failed (e.g. Caddy
+	// started after featherdeploy, a transient sudo timeout, etc.).
+	go func() {
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			caddy.Reload(db)
+		}
+	}()
+
 	// ─── Brain heartbeat + SSH key
 	if err := ensureSSHKey(db); err != nil {
 		slog.Warn("SSH key setup", "err", err)
