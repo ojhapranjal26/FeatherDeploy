@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -189,12 +190,16 @@ func Run() {
 	frontendOrigin := "https://" + domain
 	rqliteURL := "http://127.0.0.1:4001"
 
+	// Detect the server's public IP so DNS verification works correctly.
+	serverIP := installerDetectPublicIP()
+
 	envContent := fmt.Sprintf(`# FeatherDeploy — generated %s
 RQLITE_URL=%s
 JWT_SECRET=%s
 ADDR=127.0.0.1:%s
 ORIGIN=%s
-`, time.Now().Format(time.RFC3339), rqliteURL, jwtSecret, backendPort, frontendOrigin)
+SERVER_IP=%s
+`, time.Now().Format(time.RFC3339), rqliteURL, jwtSecret, backendPort, frontendOrigin, serverIP)
 
 	writeFile(envFile, envContent, 0600)
 	mustRun("chown", "root:"+svcUser, envFile)
@@ -879,6 +884,19 @@ func randomHex(n int) string {
 	return hex.EncodeToString(b)
 }
 
+// installerDetectPublicIP uses a UDP routing trick to find the server's
+// public-facing IP without sending any traffic.
+// The OS picks the outbound interface for reaching 1.1.1.1 and LocalAddr()
+// returns that interface's IP — which is the server's public/routable IP.
+func installerDetectPublicIP() string {
+	conn, err := net.DialTimeout("udp", "1.1.1.1:80", 3*time.Second)
+	if err != nil {
+		return ""
+	}
+	defer conn.Close()
+	return conn.LocalAddr().(*net.UDPAddr).IP.String()
+}
+
 // ─── Package installation ─────────────────────────────────────────────────────
 
 type pkgCmd struct {
@@ -1490,6 +1508,19 @@ func RunUpdate() {
 
 	mustRun("systemctl", "restart", "featherdeploy")
 	fmt.Println("  ✓ featherdeploy service restarted")
+
+	// ── Ensure SERVER_IP is in the env file ───────────────────────────────────
+	// Existing installations (before this installer version) won't have
+	// SERVER_IP set, causing DNS verification to show "expected: (empty)".
+	if readEnvVar(envFile, "SERVER_IP") == "" {
+		if publicIP := installerDetectPublicIP(); publicIP != "" {
+			if f, err := os.OpenFile(envFile, os.O_APPEND|os.O_WRONLY, 0640); err == nil {
+				fmt.Fprintf(f, "SERVER_IP=%s\n", publicIP)
+				f.Close()
+				fmt.Printf("  ✓ SERVER_IP=%s written to env file\n", publicIP)
+			}
+		}
+	}
 
 	// ── Reload Caddy ──────────────────────────────────────────────────────────
 	if runSilent("systemctl", "is-active", "--quiet", "caddy") == nil {

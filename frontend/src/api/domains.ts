@@ -29,9 +29,9 @@ export const domainsApi = {
     projectId: string | number,
     serviceId: string | number,
     domainId: string | number
-  ): Promise<{ verified: boolean; resolved_ip: string; server_ip: string }> =>
+  ): Promise<{ verified: boolean; resolved_ip: string; server_ip: string; dns_error?: string }> =>
     client
-      .post<{ verified: boolean; resolved_ip: string; server_ip: string }>(
+      .post<{ verified: boolean; resolved_ip: string; server_ip: string; dns_error?: string }>(
         `/projects/${projectId}/services/${serviceId}/domains/${domainId}/verify`
       )
       .then((r) => r.data),

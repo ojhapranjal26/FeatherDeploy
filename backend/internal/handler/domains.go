@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"database/sql"
 	"log/slog"
 	"net"
@@ -8,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	caddypkg "github.com/ojhapranjal26/featherdeploy/backend/internal/caddy"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/model"
@@ -104,7 +106,9 @@ func (h *DomainHandler) Delete(w http.ResponseWriter, r *http.Request) {
 
 // POST /api/projects/{projectID}/services/{serviceID}/domains/{domainID}/verify
 // Performs a DNS lookup to check that the domain resolves to this server's IP.
-// Set the SERVER_IP environment variable to the expected IP; if unset any resolved IP marks verified.
+// Uses Cloudflare's 1.1.1.1:53 directly to avoid systemd-resolved stub issues.
+// SERVER_IP env var overrides auto-detection; if unset, the host's public IP is
+// detected via a UDP routing trick.
 func (h *DomainHandler) Verify(w http.ResponseWriter, r *http.Request) {
 	domainID, err := strconv.ParseInt(r.PathValue("domainID"), 10, 64)
 	if err != nil {
@@ -123,11 +127,43 @@ func (h *DomainHandler) Verify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Determine the expected server IP.
+	// Prefer the SERVER_IP env var (set by the installer); fall back to
+	// auto-detecting the host's public-facing IP via UDP routing trick.
 	serverIP := os.Getenv("SERVER_IP")
+	if serverIP == "" {
+		serverIP = detectOwnPublicIP()
+	}
 
-	addrs, dnsErr := net.LookupHost(domainName)
+	// Use Cloudflare's public resolver directly (1.1.1.1:53).
+	// The system default resolver on Ubuntu 22.04+ is the systemd-resolved stub
+	// at 127.0.0.53 which can fail or return stale results from within a
+	// restricted systemd unit.  Hitting 1.1.1.1 directly is always reliable.
+	resolver := &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			d := net.Dialer{Timeout: 5 * time.Second}
+			// Try Cloudflare first, fall back to Google
+			for _, server := range []string{"1.1.1.1:53", "8.8.8.8:53"} {
+				conn, err := d.DialContext(ctx, "udp", server)
+				if err == nil {
+					return conn, nil
+				}
+			}
+			return nil, context.DeadlineExceeded
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
+	defer cancel()
+	addrs, dnsErr := resolver.LookupHost(ctx, domainName)
+
 	resolvedIP := ""
-	if dnsErr == nil && len(addrs) > 0 {
+	var dnsErrStr string
+	if dnsErr != nil {
+		dnsErrStr = dnsErr.Error()
+		slog.Warn("dns verify: lookup failed", "domain", domainName, "err", dnsErr)
+	} else if len(addrs) > 0 {
 		resolvedIP = addrs[0]
 	}
 
@@ -141,7 +177,21 @@ func (h *DomainHandler) Verify(w http.ResponseWriter, r *http.Request) {
 		"verified":    verified,
 		"resolved_ip": resolvedIP,
 		"server_ip":   serverIP,
+		"dns_error":   dnsErrStr,
 	})
 	go caddypkg.Reload(h.db)
+}
+
+// detectOwnPublicIP uses a UDP "connect" trick to determine the host's
+// public-facing IP address without sending any packets.  The OS routing
+// table picks the interface that would be used to reach 1.1.1.1, and
+// LocalAddr() on the resulting UDP conn gives us that interface's IP.
+func detectOwnPublicIP() string {
+	conn, err := net.DialTimeout("udp", "1.1.1.1:80", 2*time.Second)
+	if err != nil {
+		return ""
+	}
+	defer conn.Close()
+	return conn.LocalAddr().(*net.UDPAddr).IP.String()
 }
 

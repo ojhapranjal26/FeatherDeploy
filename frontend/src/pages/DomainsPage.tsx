@@ -86,9 +86,15 @@ export function DomainsPage() {
       qc.invalidateQueries({ queryKey: ['domains', serviceId] })
       if (d.verified) {
         toast.success('DNS verified successfully.')
+      } else if (d.dns_error || !d.resolved_ip) {
+        toast.error(
+          `DNS lookup failed — the domain did not resolve. ` +
+          `Check that your A record is pointing to ${d.server_ip || 'this server'} and wait for propagation.`
+        )
       } else {
         toast.error(
-          `DNS not verified. Resolved: ${d.resolved_ip ?? 'none'}, expected: ${d.server_ip}`
+          `DNS resolves to ${d.resolved_ip} but this server's IP is ${d.server_ip}. ` +
+          `Update your A record to point to ${d.server_ip}.`
         )
       }
     },
