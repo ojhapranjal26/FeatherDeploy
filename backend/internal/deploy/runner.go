@@ -528,6 +528,14 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 	// This works on every distribution without netavark or aardvark-dns.
 	runArgs = append(runArgs, netdaemon.NetworkArgs()...)
 	runArgs = append(runArgs, mountArgs...)
+	// Inject PORT so apps that read process.env.PORT / os.environ['PORT'] at
+	// runtime bind to the same port that Caddy is proxying to.  This is the
+	// most common cause of 502: the app defaults to port 8080 or 3000 while
+	// app_port is configured differently.  User-defined PORT in env_variables
+	// takes priority because envArgs are appended after this default.
+	if appPort > 0 {
+		runArgs = append(runArgs, "-e", fmt.Sprintf("PORT=%d", appPort))
+	}
 	runArgs = append(runArgs, envArgs...)
 	runArgs = append(runArgs, imageName)
 
@@ -564,6 +572,36 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 	db.Exec(
 		`UPDATE services SET status='running', container_id=?, host_port=?, updated_at=datetime('now') WHERE id=?`,
 		newContainerID, hostPort, svcID)
+
+	// Async port probe: 10 s after deploy, check that the published host port
+	// actually responds.  A 502 almost always means the app is not listening on
+	// the configured app_port.  We append a diagnostic WARNING to the deployment
+	// log so the user has a clear actionable message rather than a mystery 502.
+	go func(hPort, aPort int, dID int64) {
+		time.Sleep(10 * time.Second)
+		client := &http.Client{
+			Timeout: 2 * time.Second,
+			// Do not follow redirects — a 301/302 still means "something answered".
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		}
+		probeOK := false
+		for i := 0; i < 10; i++ {
+			if resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/", hPort)); err == nil {
+				resp.Body.Close()
+				probeOK = true
+				break
+			}
+			time.Sleep(2 * time.Second)
+		}
+		if !probeOK {
+			db.Exec( //nolint
+				`UPDATE deployments SET deploy_log=deploy_log||? WHERE id=?`,
+				fmt.Sprintf("\nWARNING: port %d did not respond after 30s — the app may not be listening on port %d (configured app_port). If you see 502 errors, update the app_port in service settings to match what the app actually listens on.", hPort, aPort),
+				dID)
+		}
+	}(hostPort, appPort, depID)
 
 	// Update Caddy so the service is reachable via its registered domains.
 	// Small delay: rootlessport needs a moment to bind the published port
@@ -942,6 +980,7 @@ func generateDockerfile(workDir, framework, buildCmd, startCmd string, appPort i
 		sb.WriteString("\nFROM " + baseImage + "\n")
 		sb.WriteString("WORKDIR /app\n")
 		sb.WriteString("COPY --from=builder /app .\n")
+		sb.WriteString(fmt.Sprintf("ENV PORT %d\n", appPort))
 		sb.WriteString(fmt.Sprintf("EXPOSE %d\n", appPort))
 		sb.WriteString(`CMD ["/bin/sh", "-c", "` + strings.ReplaceAll(startCmd, `"`, `\"`) + `"]` + "\n")
 
@@ -981,6 +1020,7 @@ func generateDockerfile(workDir, framework, buildCmd, startCmd string, appPort i
 		sb.WriteString("COPY --from=builder /venv /venv\n")
 		sb.WriteString("COPY --from=builder /app .\n")
 		sb.WriteString("ENV PATH=\"/venv/bin:$PATH\"\n")
+		sb.WriteString(fmt.Sprintf("ENV PORT %d\n", appPort))
 		sb.WriteString(fmt.Sprintf("EXPOSE %d\n", appPort))
 		sb.WriteString(`CMD ["/bin/sh", "-c", "` + strings.ReplaceAll(startCmd, `"`, `\"`) + `"]` + "\n")
 
@@ -992,6 +1032,7 @@ func generateDockerfile(workDir, framework, buildCmd, startCmd string, appPort i
 		if strings.TrimSpace(buildCmd) != "" {
 			sb.WriteString("RUN " + buildCmd + "\n")
 		}
+		sb.WriteString(fmt.Sprintf("ENV PORT %d\n", appPort))
 		sb.WriteString(fmt.Sprintf("EXPOSE %d\n", appPort))
 		sb.WriteString(`CMD ["/bin/sh", "-c", "` + strings.ReplaceAll(startCmd, `"`, `\"`) + `"]` + "\n")
 	}
