@@ -500,10 +500,12 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 
 	// ── 9. Run new container ──────────────────────────────────────────────────
 
-	// Bind the app to the allocated host port directly. With --network host the
-	// container shares the host namespace, so the app must listen on hostPort.
-	// The start command now honors PORT, so injecting PORT=hostPort makes the
-	// app bind exactly where fdnet and Caddy expect.
+	// With slirp4netns the container gets its own network namespace.
+	// PORT=hostPort is injected so the app listens on hostPort inside the
+	// container; -p 127.0.0.1:hostPort:hostPort tells rootlessport to bind
+	// 127.0.0.1:hostPort in the system's network namespace and forward to
+	// the container's hostPort. fdnet dials 127.0.0.1:hostPort and reaches
+	// the app through rootlessport.
 	runArgs := []string{
 		"run", "-d",
 		// --replace atomically stops and removes any existing container with the
@@ -514,8 +516,6 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 		"--replace",
 		"--name", cName,
 		"--restart", "unless-stopped",
-		// No -p flag is needed with host networking. The app binds hostPort
-		// directly inside the host's network namespace.
 		// NOTE: --log-opt max-size/max-file is intentionally omitted.
 		// In rootless Podman, log rotation via conmon requires a minimum conmon
 		// version and correct cgroup delegation. When unsupported, it causes
@@ -527,9 +527,13 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 		// which may be inaccessible to the rootless featherdeploy user.
 		"--log-driver", "k8s-file",
 	}
-	// With host networking the app binds directly on hostPort, and fdnet and
-	// Caddy both dial 127.0.0.1:hostPort without any port-forward helper.
+	// Apply slirp4netns networking: rootlessport will forward
+	// 127.0.0.1:hostPort (system namespace) → container:hostPort.
 	runArgs = append(runArgs, netdaemon.NetworkArgs()...)
+	// Bind the host port: rootlessport listens on 127.0.0.1:hostPort in the
+	// system's network namespace and forwards into the container's hostPort.
+	// Both sides use the same port because PORT=hostPort is injected below.
+	runArgs = append(runArgs, "-p", fmt.Sprintf("127.0.0.1:%d:%d", hostPort, hostPort))
 	runArgs = append(runArgs, mountArgs...)
 	// Inject PORT so apps that read process.env.PORT / os.environ['PORT'] at
 	// runtime bind to the host port that Caddy is proxying to.
@@ -537,7 +541,7 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 	runArgs = append(runArgs, "-e", fmt.Sprintf("PORT=%d", hostPort))
 	runArgs = append(runArgs, imageName)
 
-	log.add("[podman] podman run -d --name %s --network host PORT=%d %s", cName, hostPort, imageName)
+	log.add("[podman] podman run -d --name %s --network slirp4netns -p 127.0.0.1:%d:%d PORT=%d %s", cName, hostPort, hostPort, hostPort, imageName)
 	out, err := podmanCmd(runArgs...).CombinedOutput()
 	if err != nil {
 		log.add("ERROR: podman run failed: %v\n%s", err, strings.TrimSpace(string(out)))

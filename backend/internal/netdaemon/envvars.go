@@ -6,9 +6,9 @@ import (
 )
 
 // SlirpGateway is the address that a container can use to reach services on
-// the host. With host networking, the container shares the host's network
-// namespace, so host-local services are reachable on 127.0.0.1 directly.
-const SlirpGateway = "127.0.0.1"
+// the host via the slirp4netns virtual network. 10.0.2.2 is the default
+// gateway address assigned by slirp4netns that routes to the host's loopback.
+const SlirpGateway = "10.0.2.2"
 
 // EnvVarsForPeers returns the env-var arguments ([-e KEY=VALUE, ...]) that
 // should be injected into a newly started container so it can reach all
@@ -51,15 +51,21 @@ func (d *Daemon) EnvVarsForPeers(projectID int64, ownServiceName string) []strin
 // NetworkArgs returns the podman run arguments that configure container
 // networking.
 //
-// FeatherDeploy uses --network host because the app now binds the allocated
-// host port directly via the PORT env var. That removes the slirp4netns /
-// rootlessport forwarding layer that was producing "no route to host" while
-// still keeping the container rootless.
+// FeatherDeploy uses slirp4netns because it is universally available on
+// rootless Podman and does not require netavark/aardvark-dns.
 //
-// Each service still gets a unique high host port, so even with host networking
-// there are no port conflicts between services.
+// allow_host_loopback=true enables containers to reach 10.0.2.2 (the
+// slirp4netns gateway) which routes traffic back to the host's loopback.
+// This is used for service-to-service communication via the fdnet proxy.
+//
+// IMPORTANT: with rootless podman, --network host gives the container access
+// to the *rootless user's* network namespace, NOT the system namespace where
+// the FeatherDeploy process runs. This means 127.0.0.1:hostPort bound inside
+// a host-network container is invisible to the fdnet daemon, causing i/o
+// timeout errors. slirp4netns + rootlessport (-p flag) is the correct approach
+// because rootlessport binds the host port in the system's network namespace.
 func NetworkArgs() []string {
-	return []string{"--network", "host"}
+	return []string{"--network", "slirp4netns:allow_host_loopback=true"}
 }
 
 // sanitizeEnvKey converts an arbitrary service/database name into a valid
