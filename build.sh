@@ -731,6 +731,9 @@ echo "==> Building FeatherDeploy binary..."
 cd "$INSTALL_DIR/backend"
 CGO_ENABLED=0 go build -ldflags="-s -w" -o "$BINARY" ./cmd/server/
 
+echo "==> Cleaning up old logs..."
+journalctl --vacuum-time=1s 2>/dev/null || true
+
 echo "==> Running database migrations + restarting service..."
 exec "$BINARY" update
 UPDATEEOF
@@ -788,6 +791,9 @@ if [ "$MODE" = "reinstall" ]; then
 
 # -- 11. Update: migrate + restart
 elif [ "$MODE" = "update" ]; then
+  echo "" ; echo "==> Cleaning up old logs..."
+  journalctl --vacuum-time=1s 2>/dev/null || true
+  
   echo "" ; echo "==> Updating FeatherDeploy..."
   exec "$BINARY" update
 
