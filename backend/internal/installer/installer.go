@@ -249,6 +249,9 @@ SERVER_IP=%s
 		fmt.Println("  ✓ Caddy reloaded")
 	}
 
+	// ── Step 11: Protect internal port ranges ────────────────────────────────
+	setupIPTablesProtection()
+
 	printSuccess(domain, svcUser)
 }
 
@@ -881,6 +884,98 @@ func writeFile(path, content string, perm os.FileMode) {
 	if err := os.WriteFile(path, []byte(content), perm); err != nil {
 		die("cannot write %s: %v", path, err)
 	}
+}
+
+// setupIPTablesProtection installs iptables INPUT DROP rules that block
+// direct external access to FeatherDeploy's internal port ranges:
+//
+//	10000–14999  service container host ports (rootlessport bound)
+//	15000–29999  database container host ports (rootlessport bound)
+//	30000–59999  fdnet cluster ports (Go TCP proxy, reachable only via Caddy)
+//
+// Containers use "-p 0.0.0.0:hostPort:appPort" so rootlessport can bind
+// reliably (loopback-only binding is unreliable in some nftables/netavark
+// configurations). These iptables rules ensure those ports are never
+// reachable from the internet while still being accessible via localhost
+// (Caddy → fdnet → rootlessport → container).
+//
+// Rules are written to /etc/iptables/rules.v4 (Debian/Ubuntu) and
+// /etc/sysconfig/iptables (RHEL/Fedora) for persistence across reboots.
+func setupIPTablesProtection() {
+	fmt.Println("\n── Protecting internal port ranges with iptables ───────────────")
+
+	// Check if iptables is available.
+	iptablesPath, err := exec.LookPath("iptables")
+	if err != nil {
+		fmt.Println("  WARNING: iptables not found — skipping port protection")
+		fmt.Println("  Install manually: apt-get install -y iptables")
+		return
+	}
+
+	type rule struct {
+		comment string
+		startPort, endPort int
+	}
+	rules := []rule{
+		{"featherdeploy service ports", 10000, 14999},
+		{"featherdeploy database ports", 15000, 29999},
+		{"featherdeploy fdnet cluster ports", 30000, 59999},
+	}
+
+	added := 0
+	for _, r := range rules {
+		portRange := fmt.Sprintf("%d:%d", r.startPort, r.endPort)
+		// Check if rule already exists.
+		checkArgs := []string{"-C", "INPUT", "!", "-i", "lo", "-p", "tcp",
+			"--dport", portRange, "-m", "comment", "--comment", r.comment,
+			"-j", "DROP"}
+		if exec.Command(iptablesPath, checkArgs...).Run() == nil {
+			// Rule already exists.
+			continue
+		}
+		// Insert at position 1 so it takes priority (before ACCEPT rules).
+		addArgs := []string{"-I", "INPUT", "1", "!", "-i", "lo", "-p", "tcp",
+			"--dport", portRange, "-m", "comment", "--comment", r.comment,
+			"-j", "DROP"}
+		if out, err2 := exec.Command(iptablesPath, addArgs...).CombinedOutput(); err2 != nil {
+			fmt.Printf("  WARNING: could not add iptables rule for %s: %v — %s\n",
+				r.comment, err2, strings.TrimSpace(string(out)))
+		} else {
+			fmt.Printf("  ✓ iptables INPUT DROP for ports %s (%s)\n", portRange, r.comment)
+			added++
+		}
+	}
+	if added == 0 {
+		fmt.Println("  ✓ iptables rules already present — no changes needed")
+	}
+
+	// Persist rules so they survive reboots.
+	persistIPTables()
+}
+
+// persistIPTables saves the current iptables ruleset for persistence.
+func persistIPTables() {
+	// Debian / Ubuntu: iptables-persistent reads /etc/iptables/rules.v4.
+	if err := os.MkdirAll("/etc/iptables", 0755); err == nil {
+		if out, err := exec.Command("iptables-save").Output(); err == nil {
+			if wErr := os.WriteFile("/etc/iptables/rules.v4", out, 0640); wErr == nil {
+				fmt.Println("  ✓ iptables rules saved to /etc/iptables/rules.v4")
+				return
+			}
+		}
+	}
+	// RHEL / Fedora: /etc/sysconfig/iptables.
+	if err := os.MkdirAll("/etc/sysconfig", 0755); err == nil {
+		if out, err := exec.Command("iptables-save").Output(); err == nil {
+			if wErr := os.WriteFile("/etc/sysconfig/iptables", out, 0640); wErr == nil {
+				fmt.Println("  ✓ iptables rules saved to /etc/sysconfig/iptables")
+				return
+			}
+		}
+	}
+	fmt.Println("  NOTE: could not persist iptables rules — they will be lost on reboot")
+	fmt.Println("  Run: apt-get install -y iptables-persistent   # Debian/Ubuntu")
+	fmt.Println("       dnf install -y iptables-services          # RHEL/Fedora")
 }
 
 func randomHex(n int) string {
@@ -1536,6 +1631,12 @@ func RunUpdate() {
 		runSilent("systemctl", "reload", "caddy")
 		fmt.Println("  ✓ Caddy reloaded")
 	}
+
+	// ── Protect internal port ranges ──────────────────────────────────────────
+	// Block external access to host/cluster port ranges so containers can use
+	// 0.0.0.0 port binding (which is more reliable than 127.0.0.1 binding with
+	// rootlessport/netavark) without exposing raw service ports to the internet.
+	setupIPTablesProtection()
 
 	fmt.Println(`
   ══════════════════════════════════════════════════════

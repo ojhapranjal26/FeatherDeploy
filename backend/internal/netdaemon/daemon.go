@@ -312,6 +312,7 @@ func (d *Daemon) startWatchdog() {
 			select {
 			case <-ticker.C:
 				d.repairDeadProxies()
+				d.checkBackendHealth()
 			case <-d.done:
 				return
 			}
@@ -342,6 +343,31 @@ func (d *Daemon) repairDeadProxies() {
 		d.proxies[k] = proxy
 		slog.Info("fdnet watchdog: restarted dead proxy",
 			"key", k, "clusterPort", entry.ClusterPort)
+	}
+}
+
+// checkBackendHealth probes each active service's backend hostPort to detect
+// cases where rootlessport has failed to bind the port. Logs a clear warning
+// so the operator knows to redeploy the service.
+func (d *Daemon) checkBackendHealth() {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	for k, entry := range d.services {
+		if entry.Status != "active" {
+			continue
+		}
+		p, ok := d.proxies[k]
+		if !ok {
+			continue
+		}
+		if !p.reachable() {
+			slog.Warn("fdnet watchdog: backend unreachable — rootlessport may not be binding the port; redeploy the service to fix",
+				"key", k,
+				"target", p.targetAddr,
+				"clusterPort", entry.ClusterPort,
+				"hint", "run: ss -tlnp | grep "+fmt.Sprintf("%d", entry.HostPort))
+		}
 	}
 }
 

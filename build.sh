@@ -803,7 +803,7 @@ if [ "$MODE" = "reinstall" ]; then
 elif [ "$MODE" = "update" ]; then
   echo "" ; echo "==> Cleaning up old logs..."
   journalctl --vacuum-time=1s 2>/dev/null || true
-  
+
   echo "" ; echo "==> Updating FeatherDeploy..."
   exec "$BINARY" update
 

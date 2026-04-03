@@ -527,21 +527,23 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 		// which may be inaccessible to the rootless featherdeploy user.
 		"--log-driver", "k8s-file",
 	}
-	// Apply slirp4netns networking: rootlessport will forward
-	// 127.0.0.1:hostPort (system namespace) → container:hostPort.
+	// Apply slirp4netns networking.
 	runArgs = append(runArgs, netdaemon.NetworkArgs()...)
-	// Bind the host port: rootlessport listens on 127.0.0.1:hostPort in the
-	// system's network namespace and forwards into the container's hostPort.
-	// Both sides use the same port because PORT=hostPort is injected below.
-	runArgs = append(runArgs, "-p", fmt.Sprintf("127.0.0.1:%d:%d", hostPort, hostPort))
+	// IMPORTANT: bind on 0.0.0.0 (all interfaces), NOT 127.0.0.1.
+	// rootlessport reliably binds on all interfaces; with the 127.0.0.1
+	// restriction it sometimes silently fails to bind due to nftables/netavark
+	// rules conflicting with loopback forwarding, leaving the port unreachable
+	// with i/o timeout instead of connection refused.
+	// External access to the host port range is blocked by iptables INPUT DROP
+	// rules installed by build.sh, so only localhost (fdnet/Caddy) can reach it.
+	runArgs = append(runArgs, "-p", fmt.Sprintf("%d:%d", hostPort, hostPort))
 	runArgs = append(runArgs, mountArgs...)
-	// Inject PORT so apps that read process.env.PORT / os.environ['PORT'] at
-	// runtime bind to the host port that Caddy is proxying to.
+	// Inject PORT so apps honour the allocated host port inside the container.
 	runArgs = append(runArgs, envArgs...)
 	runArgs = append(runArgs, "-e", fmt.Sprintf("PORT=%d", hostPort))
 	runArgs = append(runArgs, imageName)
 
-	log.add("[podman] podman run -d --name %s --network slirp4netns -p 127.0.0.1:%d:%d PORT=%d %s", cName, hostPort, hostPort, hostPort, imageName)
+	log.add("[podman] podman run -d --name %s --network slirp4netns -p %d:%d PORT=%d %s", cName, hostPort, hostPort, hostPort, imageName)
 	out, err := podmanCmd(runArgs...).CombinedOutput()
 	if err != nil {
 		log.add("ERROR: podman run failed: %v\n%s", err, strings.TrimSpace(string(out)))
@@ -1797,8 +1799,12 @@ func startDatabaseRetrying(db *sql.DB, jwtSecret string, dbID int64, attempt int
 	}
 	// Use slirp4netns instead of Podman named networks (no aardvark-dns needed).
 	runArgs = append(runArgs, netdaemon.NetworkArgs()...)
-	// Bind databases to 127.0.0.1 — internal-only resources accessed via fdnet.
-	runArgs = append(runArgs, "-p", fmt.Sprintf("127.0.0.1:%d:%d", hostPort, internalPort))
+	// Bind on 0.0.0.0 (all interfaces) — rootlessport reliably binds this way.
+	// Database privacy is enforced by iptables INPUT DROP rules (installed by
+	// build.sh) that block external access to the host/cluster port ranges.
+	// Databases are also never given a Caddy route, so they are not reachable
+	// via any hostname — only services reach them through fdnet cluster ports.
+	runArgs = append(runArgs, "-p", fmt.Sprintf("%d:%d", hostPort, internalPort))
 	// Inject the DB engine's environment variables (credentials, database name).
 	runArgs = append(runArgs, dbContainerEnvArgs(activeDBEngine, dbVersion, dbName, dbUser, clearPass)...)
 	runArgs = append(runArgs, activeImage)

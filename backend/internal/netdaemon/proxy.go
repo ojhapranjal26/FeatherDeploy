@@ -1,10 +1,12 @@
 package netdaemon
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -50,8 +52,7 @@ func newTCPProxy(listenPort int, targetHost string, targetPort int) *tcpProxy {
 func (p *tcpProxy) start() error {
 	ln, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", p.listenPort))
 	if err != nil {
-		// Some kernels/configs keep listening on 0.0.0.0 but not on a specific
-		// address. Fall back to loopback-only if the wildcard bind fails.
+		// Fall back to loopback-only if the wildcard bind fails (unusual config).
 		ln, err = net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", p.listenPort))
 		if err != nil {
 			return fmt.Errorf("fdnet proxy: listen on port %d: %w", p.listenPort, err)
@@ -61,11 +62,11 @@ func (p *tcpProxy) start() error {
 
 	p.wg.Add(1)
 	go p.accept()
-	slog.Debug("fdnet proxy: listening", "port", p.listenPort, "target", p.targetAddr)
+	slog.Info("fdnet proxy: listening", "port", p.listenPort, "target", p.targetAddr)
 	return nil
 }
 
-// stop gracefully shuts down the proxy.  Existing forwarding goroutines drain
+// stop gracefully shuts down the proxy. Existing forwarding goroutines drain
 // naturally when the underlying connections are closed by the peers.
 func (p *tcpProxy) stop() {
 	if p.stopped.Swap(true) {
@@ -76,6 +77,17 @@ func (p *tcpProxy) stop() {
 	}
 	p.wg.Wait()
 	slog.Debug("fdnet proxy: stopped", "port", p.listenPort)
+}
+
+// reachable performs a quick dial to check if the backend is currently up.
+// Used by the daemon watchdog to detect rootlessport binding failures early.
+func (p *tcpProxy) reachable() bool {
+	conn, err := net.DialTimeout("tcp", p.targetAddr, 500*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
 }
 
 func (p *tcpProxy) accept() {
@@ -89,9 +101,9 @@ func (p *tcpProxy) accept() {
 			}
 			return
 		}
-		
-		slog.Info("fdnet proxy: incoming connection", 
-			"listenPort", p.listenPort, 
+
+		slog.Info("fdnet proxy: incoming connection",
+			"listenPort", p.listenPort,
 			"client", conn.RemoteAddr().String(),
 			"target", p.targetAddr)
 
@@ -108,8 +120,7 @@ func (p *tcpProxy) forward(src net.Conn) {
 
 	dst, err := dialBackendWithRetry(p.targetAddr, 90*time.Second)
 	if err != nil {
-		// Backend is unreachable — close the client cleanly.
-		slog.Error("fdnet proxy: dial backend failed (this causes 502 Bad Gateway)",
+		slog.Error("fdnet proxy: dial backend failed — 502 Bad Gateway",
 			"listenPort", p.listenPort, "target", p.targetAddr, "err", err)
 		return
 	}
@@ -140,30 +151,92 @@ func (p *tcpProxy) forward(src net.Conn) {
 	wg.Wait()
 }
 
-// dialBackendWithRetry retries backend connection attempts for a grace window
-// that matches the deployment pipeline's readiness probe.  This avoids a 502
-// when Caddy sends the first request before Podman's published port is fully
-// ready even though the container itself has already started.
+// dialBackendWithRetry attempts to connect to target until either the
+// connection succeeds or maxWait has elapsed.
+//
+// Root cause of 502: with slirp4netns + "-p port:port", rootlessport takes
+// 1–5 seconds to bind the host port after the container starts. Caddy may
+// send the first request before rootlessport is ready; retrying for 90 s
+// ensures the connection eventually succeeds.
+//
+// Error classification:
+//   - ECONNREFUSED: nothing is listening yet (rootlessport still starting).
+//     Use a short per-attempt timeout so we retry frequently.
+//   - Timeout / other: port is bound but not forwarding. Longer per-attempt
+//     timeout to allow rootlessport to finish initialising.
 func dialBackendWithRetry(target string, maxWait time.Duration) (net.Conn, error) {
 	deadline := time.Now().Add(maxWait)
-	backoff := 200 * time.Millisecond
+	backoff := 100 * time.Millisecond
+	attempt := 0
 	var lastErr error
+
 	for {
-		dst, err := net.DialTimeout("tcp", target, 3*time.Second)
+		attempt++
+
+		// Short timeout on loopback: a refused connection returns immediately
+		// (RST), and a successful one completes in < 1 ms.
+		perAttemptTimeout := 1 * time.Second
+		if isTimeoutErr(lastErr) {
+			// Previous attempt timed out — port is bound but not forwarding yet.
+			perAttemptTimeout = 3 * time.Second
+		}
+
+		conn, err := net.DialTimeout("tcp", target, perAttemptTimeout)
 		if err == nil {
-			return dst, nil
+			if attempt > 1 {
+				elapsed := maxWait - time.Until(deadline)
+				slog.Info("fdnet proxy: backend became reachable",
+					"target", target, "attempts", attempt,
+					"elapsed", elapsed.Truncate(time.Millisecond))
+			}
+			return conn, nil
 		}
 		lastErr = err
+
 		if time.Now().After(deadline) {
 			break
 		}
+
+		// Log progress on attempt 1, 5, 15 to avoid spamming logs.
+		if attempt == 1 || attempt == 5 || attempt == 15 {
+			if isConnRefused(err) {
+				slog.Warn("fdnet proxy: backend not ready yet (rootlessport still starting)",
+					"target", target, "attempt", attempt)
+			} else {
+				slog.Warn("fdnet proxy: backend dial stalled — if persists, check: ss -tlnp | grep PORT",
+					"target", target, "attempt", attempt, "err", err)
+			}
+		}
+
+		sleepTime := backoff
+		if remaining := time.Until(deadline); sleepTime > remaining {
+			sleepTime = remaining
+		}
+		time.Sleep(sleepTime)
+		backoff *= 2
 		if backoff > 2*time.Second {
 			backoff = 2 * time.Second
 		}
-		time.Sleep(backoff)
-		backoff *= 2
 	}
+
 	return nil, fmt.Errorf("backend %s unavailable after %s: %w", target, maxWait, lastErr)
+}
+
+// isConnRefused returns true when err is a "connection refused" error.
+func isConnRefused(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "connection refused")
+}
+
+// isTimeoutErr returns true when err is a dial timeout (i/o timeout).
+func isTimeoutErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
 // copyConn copies from src to dst using a pooled 4 KB buffer to minimise
