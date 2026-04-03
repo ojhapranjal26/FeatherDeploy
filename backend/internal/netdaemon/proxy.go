@@ -106,7 +106,7 @@ func (p *tcpProxy) forward(src net.Conn) {
 	defer p.wg.Done()
 	defer src.Close()
 
-	dst, err := dialBackendWithRetry(p.targetAddr, 20*time.Second)
+	dst, err := dialBackendWithRetry(p.targetAddr, 90*time.Second)
 	if err != nil {
 		// Backend is unreachable — close the client cleanly.
 		slog.Error("fdnet proxy: dial backend failed (this causes 502 Bad Gateway)",
@@ -140,9 +140,10 @@ func (p *tcpProxy) forward(src net.Conn) {
 	wg.Wait()
 }
 
-// dialBackendWithRetry retries backend connection attempts for a short grace
-// window so a just-started container or a just-bound published port does not
-// fail the first client request immediately.
+// dialBackendWithRetry retries backend connection attempts for a grace window
+// that matches the deployment pipeline's readiness probe.  This avoids a 502
+// when Caddy sends the first request before Podman's published port is fully
+// ready even though the container itself has already started.
 func dialBackendWithRetry(target string, maxWait time.Duration) (net.Conn, error) {
 	deadline := time.Now().Add(maxWait)
 	backoff := 200 * time.Millisecond
