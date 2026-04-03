@@ -32,14 +32,20 @@ import (
 	"github.com/ojhapranjal26/featherdeploy/backend/web"
 )
 
-const usage = `deploypaaas — self-hosted PaaS panel
+const usage = `featherdeploy — self-hosted PaaS panel
 
 Usage:
-  deploypaaas                    Run the server (default)
-  deploypaaas serve              Run the server (explicit)
-  deploypaaas install            Interactive first-time setup wizard (Linux, root)
-  deploypaaas update             Update an existing installation in-place (Linux, root)
-  deploypaaas --help             Show this help
+  featherdeploy                  Run the server (default)
+  featherdeploy serve            Run the server (explicit)
+  featherdeploy install          Interactive first-time setup wizard (Linux, root)
+  featherdeploy update           Update an existing installation in-place (Linux, root)
+  featherdeploy logs <name|id>   Show live container logs for a deployed service
+                                   e.g.  featherdeploy logs my-app
+                                         featherdeploy logs fd-svc-3
+  featherdeploy podman <args...> Run any podman command as the service user
+                                   e.g.  featherdeploy podman ps -a
+                                         featherdeploy podman logs fd-svc-1 -f
+  featherdeploy --help           Show this help
 
 Flags (all overridable via environment variables):
   --rqlite-url    RQLITE_URL        rqlite HTTP URL         (default: http://127.0.0.1:4001)
@@ -55,6 +61,46 @@ Flags (all overridable via environment variables):
   --gh-client-id      GITHUB_CLIENT_ID      GitHub OAuth client ID
   --gh-client-secret  GITHUB_CLIENT_SECRET  GitHub OAuth client secret
 `
+
+// svcUser returns the service OS user from the systemd unit, defaulting to "featherdeploy".
+func svcUserFromUnit() string {
+	data, err := os.ReadFile("/etc/systemd/system/featherdeploy.service")
+	if err != nil {
+		return "featherdeploy"
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "User=") {
+			return strings.TrimPrefix(strings.TrimSpace(line), "User=")
+		}
+	}
+	return "featherdeploy"
+}
+
+// runAsSvcUser execs a command as the featherdeploy service user using sudo.
+// This allows root (or any user with sudo rights) to operate on rootless
+// Podman containers that were created under the service account.
+func runAsSvcUser(name string, args ...string) {
+	svcUser := svcUserFromUnit()
+	// Build: sudo -u <svcUser> -H <name> <args...>
+	// -H sets HOME to the service user's home dir so Podman finds its storage.
+	full := append([]string{"-u", svcUser, "-H", name}, args...)
+	cmd := exec.Command("sudo", full...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	// Set XDG_RUNTIME_DIR so rootless Podman works correctly.
+	uidOut, _ := exec.Command("id", "-u", svcUser).Output()
+	uid := strings.TrimSpace(string(uidOut))
+	if uid != "" {
+		cmd.Env = append(os.Environ(), "XDG_RUNTIME_DIR=/run/user/"+uid)
+	}
+	if err := cmd.Run(); err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			os.Exit(exitErr.ExitCode())
+		}
+		os.Exit(1)
+	}
+}
 
 func main() {
 	// ── Subcommand dispatch ────────────────────────────────────────────────────
@@ -72,6 +118,52 @@ func main() {
 		case "--help", "-h", "help":
 			fmt.Fprint(os.Stderr, usage)
 			os.Exit(0)
+		case "podman":
+			// Pass-through: run podman as the service user.
+			// Usage: featherdeploy podman <podman-args...>
+			if len(os.Args) < 3 {
+				fmt.Fprintln(os.Stderr, "usage: featherdeploy podman <args...>")
+				os.Exit(1)
+			}
+			runAsSvcUser("podman", os.Args[2:]...)
+			return
+		case "logs":
+			// Convenience: show logs for a deployed service container.
+			// Usage: featherdeploy logs <name|id> [extra podman flags]
+			//   name can be: my-app, fd-svc-3, or a numeric service id "3"
+			if len(os.Args) < 3 {
+				fmt.Fprintln(os.Stderr, "usage: featherdeploy logs <service-name-or-id> [podman-log-flags]")
+				fmt.Fprintln(os.Stderr, "  e.g. featherdeploy logs my-app")
+				fmt.Fprintln(os.Stderr, "       featherdeploy logs fd-svc-3")
+				fmt.Fprintln(os.Stderr, "       featherdeploy logs 3 -f --tail 100")
+				os.Exit(1)
+			}
+			target := os.Args[2]
+			extra := os.Args[3:]
+			// Normalise: "3" → "fd-svc-3", "my-app" → "my-app", "fd-svc-3" → unchanged
+			if !strings.HasPrefix(target, "fd-svc-") {
+				// Check if it's a plain number → treat as service ID
+				allDigits := true
+				for _, c := range target {
+					if c < '0' || c > '9' {
+						allDigits = false
+						break
+					}
+				}
+				if allDigits {
+					target = "fd-svc-" + target
+				}
+				// Otherwise keep as-is (user might have named their container differently)
+			}
+			logArgs := append([]string{"logs", "--tail", "200", target}, extra...)
+			runAsSvcUser("podman", logArgs...)
+			return
+		default:
+			// Unknown subcommand — print helpful error instead of accidentally
+			// starting a second server instance (which would conflict on port 8080).
+			fmt.Fprintf(os.Stderr, "featherdeploy: unknown subcommand %q\n\n", os.Args[1])
+			fmt.Fprint(os.Stderr, usage)
+			os.Exit(1)
 		}
 	}
 
