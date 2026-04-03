@@ -82,12 +82,21 @@ func caddyBin() string {
 
 // buildConfig queries all (domain, tls, host_port) rows and returns a Caddyfile
 // snippet with one site block per domain.
+//
+// Only domains that meet ALL of the following are included:
+//   - DNS has been verified (d.verified = 1) — prevents broken TLS provisioning
+//     for domains not yet pointing at this server.
+//   - The backing service is actively running (s.status = 'running') — prevents
+//     502 errors when a container is stopped, crashed, or not yet deployed.
+//   - The service has a published host port (s.host_port > 0).
 func buildConfig(db *sql.DB) (string, error) {
 	rows, err := db.Query(`
 		SELECT d.domain, d.tls, s.host_port
 		FROM   domains d
 		JOIN   services s ON s.id = d.service_id
 		WHERE  s.host_port > 0
+		  AND  s.status    = 'running'
+		  AND  d.verified  = 1
 		ORDER  BY d.domain
 	`)
 	if err != nil {

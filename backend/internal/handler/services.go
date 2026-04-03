@@ -235,6 +235,7 @@ func (h *ServiceHandler) Restart(w http.ResponseWriter, r *http.Request) {
 	}
 	h.db.ExecContext(r.Context(), //nolint
 		`UPDATE services SET status='running', updated_at=datetime('now') WHERE id=?`, svcID)
+	go caddypkg.Reload(h.db)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "restarted"})
 }
 func splitLines(s string) []string {
