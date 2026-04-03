@@ -321,24 +321,24 @@ func detectPython(root string) *Result {
 		r.Framework = "fastapi"
 		r.BuildCommand = "pip install --no-cache-dir -r requirements.txt"
 		appModule := detectPythonModule(root, "app", "main", "server", "application", "api")
-		r.StartCommand = "uvicorn " + appModule + ":app --host 0.0.0.0 --port 8000"
+		r.StartCommand = "uvicorn " + appModule + ":app --host 0.0.0.0 --port ${PORT:-8000}"
 	case strings.Contains(depsContent, "django"):
 		r.Framework = "django"
 		// collectstatic requires DJANGO_SETTINGS_MODULE and a working DB;
 		// run it only if it can succeed (|| true prevents build failure).
 		r.BuildCommand = "pip install --no-cache-dir -r requirements.txt && python manage.py collectstatic --noinput || true"
 		wsgiModule := findDjangoWsgiModule(root)
-		r.StartCommand = "gunicorn --bind 0.0.0.0:8000 --workers 2 " + wsgiModule
+		r.StartCommand = "gunicorn --bind 0.0.0.0:${PORT:-8000} --workers 2 " + wsgiModule
 	case strings.Contains(depsContent, "flask"):
 		r.Framework = "flask"
 		r.BuildCommand = "pip install --no-cache-dir -r requirements.txt"
 		appVar := detectFlaskAppVar(root, flaskEntry+".py")
-		r.StartCommand = "gunicorn --bind 0.0.0.0:8000 " + flaskEntry + ":" + appVar
+		r.StartCommand = "gunicorn --bind 0.0.0.0:${PORT:-8000} " + flaskEntry + ":" + appVar
 	case strings.Contains(depsContent, "starlette"):
 		r.Framework = "starlette"
 		r.BuildCommand = "pip install --no-cache-dir -r requirements.txt"
 		appModule := detectPythonModule(root, "main", "app", "server")
-		r.StartCommand = "uvicorn " + appModule + ":app --host 0.0.0.0 --port 8000"
+		r.StartCommand = "uvicorn " + appModule + ":app --host 0.0.0.0 --port ${PORT:-8000}"
 	case strings.Contains(depsContent, "tornado"):
 		r.Framework = "tornado"
 		r.BuildCommand = "pip install --no-cache-dir -r requirements.txt"
