@@ -5,13 +5,12 @@ import (
 	"strings"
 )
 
-// SlirpGateway is the address that a container can use to reach services on
-// the host.  With --network host (the current mode), the container IS the
-// host, so host-local services are reachable on the standard loopback address.
-//
-// The constant is also used for cross-node peers where NodeAddr will be a
-// remote IP instead; in that case the value here is never used.
-const SlirpGateway = "127.0.0.1"
+// SlirpGateway is the address that a container started with
+// --network=slirp4netns can use to reach services on the host.
+// With slirp4netns:allow_host_loopback=true (or the default behaviour on
+// most distros), dialling this address from inside the container reaches
+// 127.0.0.1 on the host, where the fdnet proxy is listening.
+const SlirpGateway = "10.0.2.2"
 
 // EnvVarsForPeers returns the env-var arguments ([-e KEY=VALUE, ...]) that
 // should be injected into a newly started container so it can reach all
@@ -51,33 +50,21 @@ func (d *Daemon) EnvVarsForPeers(projectID int64, ownServiceName string) []strin
 	return args
 }
 
-// NetworkArgs returns the podman run arguments that configure container
-// networking.
+// NetworkArgs returns the podman run arguments that tell the container to use
+// slirp4netns with host-loopback access enabled.  This replaces the
+// --network=fd-proj-X named-bridge approach.
 //
-// FeatherDeploy uses --network host (container joins the host network
-// namespace).  This is the most reliable mode because:
-//   - No rootlessport daemon is needed.  rootlessport (the slirp4netns port-
-//     forwarder) can fail to bind the host port, silently leaving the service
-//     unreachable ("no route to host" / "connection refused") even though the
-//     container is running.
-//   - No slirp4netns helper process that can crash or fail to set up.
-//   - fdnet and Caddy dial 127.0.0.1:hostPort directly; one fewer network hop.
-//   - The service user runs rootless Podman so the container cannot bind
-//     privileged ports (<1024) even in host-network mode — the rootless
-//     user-namespace restriction still applies.
+// allow_host_loopback=true is the key: it makes the slirp4netns gateway
+// (10.0.2.2) route to the host's 127.0.0.1, which is where fdnet proxies
+// listen.  This option is supported on all distributions that ship slirp4netns
+// (no aardvark-dns or netavark package needed).
 //
-// Trade-off: containers share the host network namespace (no kernel-level
-// network isolation between services).  For a self-hosted single-tenant PaaS
-// this is an acceptable trade-off for reliability.
-//
-// Port uniqueness: each service is assigned a unique hostPort (10000+svcID)
-// and PORT=hostPort is injected at runtime. Modern frameworks (Node.js, Python,
-// Ruby, Go, etc.) read the PORT env var and bind on whatever port they're told,
-// so there are no port conflicts between services on the same host.
+// If slirp4netns is unavailable (e.g. very minimal environments), the caller
+// can fall back to --network=host; all cluster ports are still reachable on
+// localhost in that case.
 func NetworkArgs() []string {
-	return []string{"--network", "host"}
+	return []string{"--network", "slirp4netns:allow_host_loopback=true"}
 }
-
 
 // sanitizeEnvKey converts an arbitrary service/database name into a valid
 // shell identifier by uppercasing and replacing non-alphanumeric chars with _.
