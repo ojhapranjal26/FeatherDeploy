@@ -80,7 +80,7 @@ func caddyBin() string {
 	return "caddy"
 }
 
-// buildConfig queries all (domain, tls, host_port) rows and returns a Caddyfile
+// buildConfig queries all (domain, tls, proxy_port) rows and returns a Caddyfile
 // snippet with one site block per domain.
 //
 // Only domains that meet ALL of the following are included:
@@ -89,9 +89,21 @@ func caddyBin() string {
 //   - The backing service is actively running (s.status = 'running') — prevents
 //     502 errors when a container is stopped, crashed, or not yet deployed.
 //   - The service has a published host port (s.host_port > 0).
+//
+// Proxy target port selection (preferred → fallback):
+//   1. s.cluster_port — the fdnet Go TCP proxy port (0.0.0.0:30000+, real kernel
+//      socket).  Always reliable because fdnet's net.Listen() call creates an
+//      actual kernel TCP socket that Caddy can connect to regardless of how the
+//      container's slirp4netns port-forwarding is set up.
+//   2. s.host_port — the slirp4netns userspace port-forward (127.0.0.1:10000+).
+//      Used as a fallback for services deployed before the cluster_port column
+//      was added (backward compatibility).  This can fail for services beyond
+//      the first when the slirp4netns port-forwarding helper doesn't bind all
+//      published ports reliably.
 func buildConfig(db *sql.DB) (string, error) {
 	rows, err := db.Query(`
-		SELECT d.domain, d.tls, s.host_port
+		SELECT d.domain, d.tls,
+		       COALESCE(s.cluster_port, s.host_port) AS proxy_port
 		FROM   domains d
 		JOIN   services s ON s.id = d.service_id
 		WHERE  s.host_port > 0

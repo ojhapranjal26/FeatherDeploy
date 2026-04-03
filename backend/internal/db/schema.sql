@@ -319,3 +319,9 @@ ALTER TABLE databases ADD COLUMN last_error TEXT NOT NULL DEFAULT '';
 -- 020: add start_log to databases so startup steps are visible in the UI
 -- (image pull, container run command, exit-code diagnostics)
 ALTER TABLE databases ADD COLUMN start_log TEXT NOT NULL DEFAULT '';
+
+-- 021: add cluster_port to services so Caddy routes through the fdnet Go TCP
+-- proxy (a real kernel socket) instead of the slirp4netns userspace port-forward.
+-- This eliminates 502 errors for services after the first when slirp4netns
+-- port-forwarding helper fails to bind the published host port.
+ALTER TABLE services ADD COLUMN cluster_port INTEGER DEFAULT NULL;

@@ -160,6 +160,13 @@ func serve() {
 	deploy.SetNetDaemon(netDaemon)
 	slog.Info("fdnet: network daemon ready")
 
+	// Sync cluster_port back to the DB for all services whose fdnet proxy was
+	// restored from the state file.  This is required so Caddy's buildConfig
+	// picks up the correct proxy port (via COALESCE(cluster_port, host_port))
+	// after a server restart without waiting for the next deployment.
+	go syncFdnetClusterPorts(db, netDaemon)
+
+
 	// Re-sync database container states after a restart or update.
 	// Must run after SetNetDaemon so that re-registered containers can be
 	// proxied immediately.  Databases whose container is still running need
@@ -596,6 +603,65 @@ func reconcileServiceStates(db *sql.DB) {
 			`UPDATE services SET status=?, updated_at=datetime('now') WHERE id=?`,
 			wantedStatus, svcID)
 		slog.Info("startup reconcile: synced service", "svc_id", svcID, "container_state", state, "db_status", wantedStatus)
+	}
+}
+
+// syncFdnetClusterPorts writes the fdnet clusterPort for each active service
+// back to services.cluster_port in the DB.
+//
+// On a fresh deployment runner.go already does this immediately after fdnet.Register().
+// This function handles the restart case: when the server restarts, fdnet loads
+// its state file and ReconcileRegistered() restores the TCP proxy goroutines — but
+// the cluster_port column in the DB may be NULL for services deployed before the
+// column was added, or for services that haven't been redeployed since the fix.
+//
+// Without this, Caddy's COALESCE(cluster_port, host_port) would fall back to
+// host_port (the slirp4netns port-forward), which may not work for services
+// beyond the first.
+func syncFdnetClusterPorts(db *sql.DB, netD *netdaemon.Daemon) {
+	// Read all running services and their project/name so we can look them up
+	// in the fdnet registry.
+	rows, err := db.Query(
+		`SELECT id, project_id, name FROM services WHERE status = 'running'`)
+	if err != nil {
+		slog.Warn("syncFdnetClusterPorts: query failed", "err", err)
+		return
+	}
+	defer rows.Close()
+
+	type srow struct {
+		id        int64
+		projectID int64
+		name      string
+	}
+	var svcs []srow
+	for rows.Next() {
+		var s srow
+		if rows.Scan(&s.id, &s.projectID, &s.name) == nil {
+			svcs = append(svcs, s)
+		}
+	}
+	rows.Close()
+
+	updated := 0
+	for _, s := range svcs {
+		cp, ok := netD.Resolve(s.projectID, s.name)
+		if !ok || cp == 0 {
+			continue // not registered in fdnet — will be fixed on next deploy
+		}
+		res, err := db.Exec(
+			`UPDATE services SET cluster_port=? WHERE id=? AND (cluster_port IS NULL OR cluster_port != ?)`,
+			cp, s.id, cp)
+		if err == nil {
+			if n, _ := res.RowsAffected(); n > 0 {
+				updated++
+				slog.Info("syncFdnetClusterPorts: updated cluster_port",
+					"svc_id", s.id, "name", s.name, "cluster_port", cp)
+			}
+		}
+	}
+	if updated > 0 {
+		slog.Info("syncFdnetClusterPorts: cluster_port synced", "services", updated)
 	}
 }
 

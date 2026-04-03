@@ -552,10 +552,15 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 	// Register with fdnet so sibling services can reach this container via
 	// their <SVC>_HOST / <SVC>_PORT env vars.
 	if NetDaemon != nil {
-		if _, regErr := NetDaemon.Register(projectID, svcName, "127.0.0.1", newContainerID, hostPort, appPort); regErr != nil {
+		if cp, regErr := NetDaemon.Register(projectID, svcName, "127.0.0.1", newContainerID, hostPort, appPort); regErr != nil {
 			log.add("[fdnet] warning: could not register service %q: %v", svcName, regErr)
 		} else {
-			log.add("[fdnet] service %q registered (hostPort=%d)", svcName, hostPort)
+			log.add("[fdnet] service %q registered (hostPort=%d clusterPort=%d)", svcName, hostPort, cp)
+			// Persist the clusterPort so Caddy's buildConfig can route through the
+			// fdnet Go TCP proxy (a real kernel socket on 0.0.0.0:cp) instead of
+			// directly to the slirp4netns userspace port-forward (127.0.0.1:hostPort).
+			// This eliminates 502 errors caused by slirp4netns helper binding failures.
+			db.Exec(`UPDATE services SET cluster_port=? WHERE id=?`, cp, svcID) //nolint
 		}
 	}
 
