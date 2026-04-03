@@ -586,13 +586,18 @@ func ensureNetworkingBackend(username, homedir string) {
 		// network_config_dir IS hardcoded to Podman's documented rootless
 		// netavark path so every podman subcommand uses the same network store.
 		//
-		// FDNet always uses slirp4netns:allow_host_loopback=true explicitly
-		// in every podman run call, so we do NOT set default_rootless_network_cmd
-		// here — it would only cause confusion.
-		// network_backend is still "netavark" for `podman build` internals.
+		// default_rootless_network_cmd is explicitly set to "slirp4netns".
+		// FeatherDeploy's fdnet proxy uses 10.0.2.2 (the slirp4netns gateway)
+		// for service-to-service routing, and host ports are bound on 127.0.0.1
+		// only (-p 127.0.0.1:port:port).  Pasta's native mode clones the host
+		// network namespace, assigns the container the host's real IP (not
+		// 10.0.2.15), and port forwarding to 127.0.0.1 is unreliable in that
+		// mode — Caddy receives "connection refused" and returns 502.  Forcing
+		// slirp4netns prevents Podman from silently switching to pasta even when
+		// pasta is installed alongside slirp4netns.
 		contConf := fmt.Sprintf(
 			"[engine]\ncgroup_manager = \"cgroupfs\"\n\n"+
-				"[network]\nnetwork_backend = \"netavark\"\nnetwork_config_dir = \"%s\"\n",
+				"[network]\nnetwork_backend = \"netavark\"\ndefault_rootless_network_cmd = \"slirp4netns\"\nnetwork_config_dir = \"%s\"\n",
 			netCfgDir)
 		os.WriteFile(filepath.Join(userConfDir, "containers.conf"), []byte(contConf), 0644) //nolint
 		// Remove any storage.conf that overrides runroot — the default

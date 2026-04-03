@@ -637,17 +637,27 @@ if command -v loginctl >/dev/null 2>&1; then
   loginctl enable-linger "${SVC_USER}" 2>/dev/null && echo "  loginctl enable-linger ${SVC_USER}" || true
 fi
 
-# Write a per-user containers.conf that forces cgroupfs.
+# Write a per-user containers.conf that forces cgroupfs and slirp4netns.
 # This is the decisive setting: even if /etc/containers/containers.conf is
 # overridden by a distro update, the user-level config will always win.
+#
+# WHY slirp4netns (not pasta):
+#   FeatherDeploy's fdnet proxy uses 10.0.2.2 (slirp4netns gateway) for
+#   service-to-service routing and binds host ports on 127.0.0.1 only
+#   (e.g. -p 127.0.0.1:10002:3000).  Pasta's native mode clones the host
+#   network namespace and assigns the container the host's real IP instead of
+#   10.0.2.15; port forwarding to 127.0.0.1 is unreliable in this mode,
+#   causing Caddy to get "connection refused" and returning 502 to clients.
+#   Setting default_rootless_network_cmd="slirp4netns" ensures Podman uses
+#   slirp4netns even when pasta is also installed on the host.
 _svc_home=$(getent passwd "${SVC_USER}" | cut -d: -f6 || echo "/var/lib/featherdeploy")
 _svc_uid=$(id -u "${SVC_USER}")
 _svc_netdir="${_svc_home}/.local/share/containers/storage/networks"
 
+# Always use slirp4netns — do NOT switch to pasta even if pasta binary exists.
+# See comment above for the reason.  slirp4netns is explicitly installed by
+# this script for every supported distro, so it is guaranteed to be present.
 _rootless_cmd="slirp4netns"
-if command -v pasta >/dev/null 2>&1 || [ -f /usr/libexec/podman/pasta ] || [ -f /usr/lib/podman/pasta ]; then
-  _rootless_cmd="pasta"
-fi
 
 install -d -m 700 -o "${SVC_USER}" -g "${SVC_USER}" "/run/user/${_svc_uid}" "/run/user/${_svc_uid}/containers"
 mkdir -p "${_svc_home}/.config/containers" "${_svc_netdir}" "${_svc_home}/.cache"
@@ -657,12 +667,12 @@ cgroup_manager = "cgroupfs"
 
 [network]
 network_backend = "netavark"
-default_rootless_network_cmd = "${_rootless_cmd}"
+default_rootless_network_cmd = "slirp4netns"
 network_config_dir = "${_svc_netdir}"
 USERCONF
 rm -rf "${_svc_home}/.config/containers/networks"
 chown -R "${SVC_USER}:${SVC_USER}" "${_svc_home}/.config" "${_svc_home}/.local" "${_svc_home}/.cache" "/run/user/${_svc_uid}"
-echo "  per-user containers.conf (cgroupfs + netavark/${_rootless_cmd}) written for ${SVC_USER}"
+echo "  per-user containers.conf (cgroupfs + netavark/slirp4netns) written for ${SVC_USER}"
 
 if command -v podman >/dev/null 2>&1; then
   run_as_user_session "${SVC_USER}" \

@@ -540,7 +540,11 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 	runArgs = append(runArgs, envArgs...)
 	runArgs = append(runArgs, imageName)
 
-	log.add("[podman] podman run -d --name %s -p 127.0.0.1:%d:%d --network slirp4netns %s", cName, hostPort, appPort, imageName)
+	netMode := "slirp4netns:allow_host_loopback=true"
+	if netdaemon.PastaMode() {
+		netMode = "pasta"
+	}
+	log.add("[podman] podman run -d --name %s -p 127.0.0.1:%d:%d --network %s %s", cName, hostPort, appPort, netMode, imageName)
 	out, err := podmanCmd(runArgs...).CombinedOutput()
 	if err != nil {
 		log.add("ERROR: podman run failed: %v\n%s", err, strings.TrimSpace(string(out)))
