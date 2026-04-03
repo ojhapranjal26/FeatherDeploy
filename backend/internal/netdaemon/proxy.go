@@ -89,6 +89,12 @@ func (p *tcpProxy) accept() {
 			}
 			return
 		}
+		
+		slog.Info("fdnet proxy: incoming connection", 
+			"listenPort", p.listenPort, 
+			"client", conn.RemoteAddr().String(),
+			"target", p.targetAddr)
+
 		p.wg.Add(1)
 		go p.forward(conn)
 	}
