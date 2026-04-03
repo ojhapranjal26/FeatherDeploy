@@ -500,39 +500,28 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 
 	// ── 9. Run new container ──────────────────────────────────────────────────
 
-	// Resolve the effective container-side port for the -p mapping.
+	// FeatherDeploy uses --network host: the container runs in the host's
+	// network namespace.  This eliminates the rootlessport / slirp4netns
+	// forwarding layer that was causing "no route to host" / "connection
+	// refused" errors on port 10000+svcID.
 	//
-	// Problem: if the user has set PORT=<something> in their service env vars,
-	// the app running inside the container will bind on that port — NOT on the
-	// stored app_port.  Using app_port in the -p mapping when it differs from
-	// the user's PORT causes a systematic 502:
-	//   app binds container:userPORT
-	//   rootlessport forwards host:hostPort → container:app_port  (wrong!)
-	//   Caddy sends a request to fdnet → host:hostPort → ECONNREFUSED
+	// Port strategy with host networking:
+	//   • Each service has a pre-allocated, UNIQUE hostPort (10000 + svcID).
+	//   • We inject PORT=hostPort as the LAST env var (after the user's
+	//     env vars) so that no user-provided PORT can cause a mismatch.
+	//   • The app reads PORT env var and binds directly on 127.0.0.1:hostPort
+	//     inside the host network namespace — no userspace forwarder in between.
+	//   • fdnet dials 127.0.0.1:hostPort → directly hits the app.
 	//
-	// Fix: scan envArgs for a user-defined PORT and use it as the container
-	// port in the -p binding.  If effectivePort != stored app_port, update the
-	// DB so future deployments are also fixed.
-	effectivePort := appPort
-	for i := 0; i+1 < len(envArgs); i++ {
-		if envArgs[i] == "-e" {
-			kv := envArgs[i+1]
-			if after, ok := strings.CutPrefix(kv, "PORT="); ok {
-				if p, err := strconv.Atoi(after); err == nil && p > 0 {
-					if p != appPort {
-						effectivePort = p
-						log.add("[port] user env PORT=%d overrides detected app_port=%d — adjusting container port binding to match", p, appPort)
-						// Persist so future re-deploys don't hit this again.
-						db.Exec(`UPDATE services SET app_port=? WHERE id=?`, p, svcID) //nolint
-					}
-				}
-			}
-		}
-	}
-	if effectivePort <= 0 {
-		effectivePort = 3000 // sane default for virtually all web frameworks
-		log.add("[port] app_port not set and no PORT env var — defaulting to %d", effectivePort)
-	}
+	// When the auto-detection finds a different appPort (e.g. 3000), that value
+	// is only recorded in the DB for informational purposes (EXPOSE directive
+	// in generated Dockerfiles). It does NOT affect the actual port the app
+	// should use at runtime — that is always hostPort.
+	//
+	// Apps that hardcode their port and ignore PORT env var will not respond
+	// on hostPort.  The 90-second probe will capture their container logs and
+	// show them in the deployment page so the user can fix their Dockerfile
+	// or start_command.
 
 	runArgs := []string{
 		"run", "-d",
@@ -544,43 +533,26 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 		"--replace",
 		"--name", cName,
 		"--restart", "unless-stopped",
-		// Bind to 127.0.0.1 so the service is only accessible locally.
-		// Caddy reverse-proxies external traffic; direct internet access to
-		// the container port is intentionally blocked.
-		// effectivePort is used here (not appPort) so the rootlessport forward
-		// targets the actual port the app will listen on.
-		"-p", fmt.Sprintf("127.0.0.1:%d:%d", hostPort, effectivePort),
-		// NOTE: --log-opt max-size/max-file is intentionally omitted.
-		// In rootless Podman, log rotation via conmon requires a minimum conmon
-		// version and correct cgroup delegation. When unsupported, it causes
-		// the container's stdout/stderr to not be captured (empty podman logs)
-		// and can produce spurious exit-127 failures for the container process.
-		// The default k8s-file driver without rotation is sufficient and reliable.
+		// No -p flag needed: with --network host the container IS the host.
+		// The app binds directly on 127.0.0.1:hostPort inside the host's
+		// network namespace (PORT=hostPort injected below).
+		//
 		// Use the k8s-file log driver explicitly so podman logs always works in
 		// rootless mode. Without this, some distributions default to journald
 		// which may be inaccessible to the rootless featherdeploy user.
 		"--log-driver", "k8s-file",
 	}
-	// Use slirp4netns with host-loopback access so the container can reach the
-	// fdnet proxy (bound on the host) via 10.0.2.2:<clusterPort>.
-	// This works on every distribution without netavark or aardvark-dns.
 	runArgs = append(runArgs, netdaemon.NetworkArgs()...)
 	runArgs = append(runArgs, mountArgs...)
-	// Inject PORT so apps that read process.env.PORT / os.environ['PORT'] at
-	// runtime bind on the port that matches the -p container-side mapping.
-	// We use effectivePort (resolved above) to avoid a mismatch:
-	//   -p 127.0.0.1:hostPort:effectivePort  →  app must listen on effectivePort.
-	// User env vars appended below may override this, but effectivePort was
-	// already computed from those same env vars so the value will be identical.
-	runArgs = append(runArgs, "-e", fmt.Sprintf("PORT=%d", effectivePort))
+	// User env vars first — they take precedence over our defaults except PORT.
 	runArgs = append(runArgs, envArgs...)
+	// PORT=hostPort is injected LAST (after user envArgs) so it always wins.
+	// This guarantees the app listens on the same port fdnet and Caddy expect
+	// regardless of what port the user may have put in their env vars.
+	runArgs = append(runArgs, "-e", fmt.Sprintf("PORT=%d", hostPort))
 	runArgs = append(runArgs, imageName)
 
-	netMode := "slirp4netns:allow_host_loopback=true"
-	if netdaemon.PastaMode() {
-		netMode = "pasta"
-	}
-	log.add("[podman] podman run -d --name %s -p 127.0.0.1:%d:%d --network %s %s", cName, hostPort, effectivePort, netMode, imageName)
+	log.add("[podman] podman run -d --name %s --network host PORT=%d %s", cName, hostPort, imageName)
 	out, err := podmanCmd(runArgs...).CombinedOutput()
 	if err != nil {
 		log.add("ERROR: podman run failed: %v\n%s", err, strings.TrimSpace(string(out)))
@@ -591,6 +563,8 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 
 	// Register with fdnet so sibling services can reach this container via
 	// their <SVC>_HOST / <SVC>_PORT env vars.
+	// With --network host, fdnet dials 127.0.0.1:hostPort directly — the app
+	// is listening there (no rootlessport / slirp4netns layer in between).
 	if NetDaemon != nil {
 		if cp, regErr := NetDaemon.Register(projectID, svcName, "127.0.0.1", newContainerID, hostPort, appPort); regErr != nil {
 			log.add("[fdnet] warning: could not register service %q: %v", svcName, regErr)
@@ -628,21 +602,18 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 	//        container needs to start and call listen().  Caddy would get
 	//        ECONNREFUSED for every request until the next periodic reload.
 	//
-	// How:   Poll host:hostPort (the slirp4netns/rootlessport-published address)
-	//        every 2 s.  On first success → reload Caddy immediately.
+	// How:   Poll 127.0.0.1:hostPort every 2 s.  On first success → reload Caddy.
 	//
-	// Crash: Check every ~6 s whether the container has already exited.  If so,
+	// Crash: Check every ~10 s whether the container has already exited.  If so,
 	//        capture the last 40 lines of container logs and append them to the
 	//        deployment log so the user can see the crash without SSH access.
 	//
-	// No port noted in the [podman] line already logged: effectivePort is the
-	// container-side port (what the app listens on), hostPort is the host-side
-	// port (what rootlessport binds and what fdnet + Caddy connect to).
-	go func(hPort, ePort int, dID, sID int64, cName string) {
+	// With --network host the app binds directly on 127.0.0.1:hostPort.
+	go func(hPort int, dID, sID int64, cName string) {
 		const (
-			maxWait     = 90 * time.Second
-			interval    = 2 * time.Second
-			crashCheck  = 5 // check container status every crashCheck iterations
+			maxWait    = 90 * time.Second
+			interval   = 2 * time.Second
+			crashCheck = 5 // check container status every crashCheck iterations
 		)
 		deadline := time.Now().Add(maxWait)
 		iter := 0
@@ -651,7 +622,7 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 				fmt.Sprintf("127.0.0.1:%d", hPort), 1*time.Second)
 			if err == nil {
 				conn.Close()
-				slog.Info("[deploy] port probe success", "host_port", hPort, "container_port", ePort)
+				slog.Info("[deploy] port probe success", "host_port", hPort)
 				caddy.Reload(db)
 				return
 			}
@@ -669,11 +640,11 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 								"\n  The app crashed on startup. Last container output:"+
 								"\n%s"+
 								"\n  Common causes:"+
-								"\n    1) Wrong app_port — app listens on a different port than %d"+
-								"\n       (check your code / Dockerfile EXPOSE, then update app_port)"+
+								"\n    1) App ignores PORT env var — it must call listen() on $PORT (%d)"+
+								"\n       e.g. Node.js: app.listen(process.env.PORT || 3000)"+
 								"\n    2) Missing env var — set any required DATABASE_URL / API keys"+
 								"\n    3) Build artefact missing — ensure start_command matches Dockerfile CMD",
-							cName, code, hPort, logs, ePort),
+							cName, code, hPort, logs, hPort),
 						dID)
 					caddy.Reload(db)
 					return
@@ -684,24 +655,24 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 		}
 
 		// Port never responded in 90 s — capture logs and reload Caddy anyway.
-		// The 60 s periodic sync will keep retrying Caddy config; once the app
-		// eventually listens the domain will start serving.
+		// The 60 s periodic sync will keep retrying Caddy config.
 		logs := containerRecentLogs(cName, 30)
 		db.Exec( //nolint
 			`UPDATE deployments SET deploy_log=deploy_log||? WHERE id=?`,
 			fmt.Sprintf(
 				"\nWARNING: port %d did not respond within 90 s after container start."+
-					"\n  The app should be listening on container port %d (app_port in service settings)."+
-					"\n  If your app listens on a different port, either:"+
-					"\n    • Update app_port in the service settings to match, OR"+
-					"\n    • Add PORT=%d to the service's environment variables."+
+					"\n  Your app must listen on PORT=%d (injected by FeatherDeploy)."+
+					"\n  Most frameworks read the PORT env var automatically:"+
+					"\n    Node.js:  app.listen(process.env.PORT)"+
+					"\n    Python:   uvicorn main:app --port $PORT"+
+					"\n    Go:       http.ListenAndServe(\":\"+os.Getenv(\"PORT\"), ...)"+
 					"\n  Last container output:"+
 					"\n%s"+
 					"\n  More logs: featherdeploy logs %d    (run on the server)",
-				hPort, ePort, ePort, logs, sID),
+				hPort, hPort, logs, sID),
 			dID)
 		caddy.Reload(db)
-	}(hostPort, effectivePort, depID, svcID, cName)
+	}(hostPort, depID, svcID, cName)
 
 	// Tag the freshly built image as the stable snapshot so it can be used as
 	// a fallback if a future deployment build fails.
