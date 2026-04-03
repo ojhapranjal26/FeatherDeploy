@@ -106,7 +106,7 @@ func (p *tcpProxy) forward(src net.Conn) {
 	defer p.wg.Done()
 	defer src.Close()
 
-	dst, err := net.DialTimeout("tcp", p.targetAddr, 10*time.Second)
+	dst, err := dialBackendWithRetry(p.targetAddr, 20*time.Second)
 	if err != nil {
 		// Backend is unreachable — close the client cleanly.
 		slog.Error("fdnet proxy: dial backend failed (this causes 502 Bad Gateway)",
@@ -138,6 +138,31 @@ func (p *tcpProxy) forward(src net.Conn) {
 		}
 	}()
 	wg.Wait()
+}
+
+// dialBackendWithRetry retries backend connection attempts for a short grace
+// window so a just-started container or a just-bound published port does not
+// fail the first client request immediately.
+func dialBackendWithRetry(target string, maxWait time.Duration) (net.Conn, error) {
+	deadline := time.Now().Add(maxWait)
+	backoff := 200 * time.Millisecond
+	var lastErr error
+	for {
+		dst, err := net.DialTimeout("tcp", target, 3*time.Second)
+		if err == nil {
+			return dst, nil
+		}
+		lastErr = err
+		if time.Now().After(deadline) {
+			break
+		}
+		if backoff > 2*time.Second {
+			backoff = 2 * time.Second
+		}
+		time.Sleep(backoff)
+		backoff *= 2
+	}
+	return nil, fmt.Errorf("backend %s unavailable after %s: %w", target, maxWait, lastErr)
 }
 
 // copyConn copies from src to dst using a pooled 4 KB buffer to minimise
