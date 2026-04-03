@@ -103,8 +103,8 @@ func (p *tcpProxy) forward(src net.Conn) {
 	dst, err := net.DialTimeout("tcp", p.targetAddr, 10*time.Second)
 	if err != nil {
 		// Backend is unreachable — close the client cleanly.
-		slog.Debug("fdnet proxy: dial backend failed",
-			"target", p.targetAddr, "err", err)
+		slog.Error("fdnet proxy: dial backend failed (this causes 502 Bad Gateway)",
+			"listenPort", p.listenPort, "target", p.targetAddr, "err", err)
 		return
 	}
 	defer dst.Close()

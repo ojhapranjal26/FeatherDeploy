@@ -1338,7 +1338,8 @@ EnvironmentFile={{.EnvFile}}
 # Podman's rootless+cgroupv2 mode expects a valid login session; without one,
 # slirp4netns may fail to integrate with the user session and custom networks
 # break even when XDG paths look correct.
-PAMName=login
+# 'systemd-user' is safer than 'login' as it avoids pam_lastlog.so errors on Ubuntu 24.04.
+PAMName=systemd-user
 # Rootless podman needs HOME to locate its image store (~/.local/share/containers)
 # and XDG_RUNTIME_DIR for its socket / networking namespace.
 # RuntimeDirectory creates /run/featherdeploy-runtime owned by the service user
