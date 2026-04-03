@@ -5,12 +5,10 @@ import (
 	"strings"
 )
 
-// SlirpGateway is the address that a container started with
-// --network=slirp4netns can use to reach services on the host.
-// With slirp4netns:allow_host_loopback=true (or the default behaviour on
-// most distros), dialling this address from inside the container reaches
-// 127.0.0.1 on the host, where the fdnet proxy is listening.
-const SlirpGateway = "10.0.2.2"
+// SlirpGateway is the address that a container can use to reach services on
+// the host. With host networking, the container shares the host's network
+// namespace, so host-local services are reachable on 127.0.0.1 directly.
+const SlirpGateway = "127.0.0.1"
 
 // EnvVarsForPeers returns the env-var arguments ([-e KEY=VALUE, ...]) that
 // should be injected into a newly started container so it can reach all
@@ -50,20 +48,18 @@ func (d *Daemon) EnvVarsForPeers(projectID int64, ownServiceName string) []strin
 	return args
 }
 
-// NetworkArgs returns the podman run arguments that tell the container to use
-// slirp4netns with host-loopback access enabled.  This replaces the
-// --network=fd-proj-X named-bridge approach.
+// NetworkArgs returns the podman run arguments that configure container
+// networking.
 //
-// allow_host_loopback=true is the key: it makes the slirp4netns gateway
-// (10.0.2.2) route to the host's 127.0.0.1, which is where fdnet proxies
-// listen.  This option is supported on all distributions that ship slirp4netns
-// (no aardvark-dns or netavark package needed).
+// FeatherDeploy uses --network host because the app now binds the allocated
+// host port directly via the PORT env var. That removes the slirp4netns /
+// rootlessport forwarding layer that was producing "no route to host" while
+// still keeping the container rootless.
 //
-// If slirp4netns is unavailable (e.g. very minimal environments), the caller
-// can fall back to --network=host; all cluster ports are still reachable on
-// localhost in that case.
+// Each service still gets a unique high host port, so even with host networking
+// there are no port conflicts between services.
 func NetworkArgs() []string {
-	return []string{"--network", "slirp4netns:allow_host_loopback=true"}
+	return []string{"--network", "host"}
 }
 
 // sanitizeEnvKey converts an arbitrary service/database name into a valid

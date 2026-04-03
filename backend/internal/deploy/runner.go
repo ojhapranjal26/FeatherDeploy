@@ -499,6 +499,11 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 	}
 
 	// ── 9. Run new container ──────────────────────────────────────────────────
+
+	// Bind the app to the allocated host port directly. With --network host the
+	// container shares the host namespace, so the app must listen on hostPort.
+	// The start command now honors PORT, so injecting PORT=hostPort makes the
+	// app bind exactly where fdnet and Caddy expect.
 	runArgs := []string{
 		"run", "-d",
 		// --replace atomically stops and removes any existing container with the
@@ -509,10 +514,8 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 		"--replace",
 		"--name", cName,
 		"--restart", "unless-stopped",
-		// Bind to 127.0.0.1 so the service is only accessible locally.
-		// Caddy reverse-proxies external traffic; direct internet access to
-		// the container port is intentionally blocked.
-		"-p", fmt.Sprintf("127.0.0.1:%d:%d", hostPort, appPort),
+		// No -p flag is needed with host networking. The app binds hostPort
+		// directly inside the host's network namespace.
 		// NOTE: --log-opt max-size/max-file is intentionally omitted.
 		// In rootless Podman, log rotation via conmon requires a minimum conmon
 		// version and correct cgroup delegation. When unsupported, it causes
@@ -524,22 +527,17 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 		// which may be inaccessible to the rootless featherdeploy user.
 		"--log-driver", "k8s-file",
 	}
-	// Use slirp4netns with host-loopback access so the container can reach the
-	// fdnet proxy (bound on the host) via 10.0.2.2:<clusterPort>.
-	// This works on every distribution without netavark or aardvark-dns.
+	// With host networking the app binds directly on hostPort, and fdnet and
+	// Caddy both dial 127.0.0.1:hostPort without any port-forward helper.
 	runArgs = append(runArgs, netdaemon.NetworkArgs()...)
 	runArgs = append(runArgs, mountArgs...)
 	// Inject PORT so apps that read process.env.PORT / os.environ['PORT'] at
-	// runtime bind to the same port that Caddy is proxying to.  This is the
-	// most common cause of 502: the app defaults to port 8080 or 3000 while
-	// app_port is configured differently.  User-defined PORT in env_variables
-	// takes priority because envArgs are appended after this default.
-	if appPort > 0 {
-		runArgs = append(runArgs, "-e", fmt.Sprintf("PORT=%d", appPort))
-	}
+	// runtime bind to the host port that Caddy is proxying to.
+	runArgs = append(runArgs, envArgs...)
+	runArgs = append(runArgs, "-e", fmt.Sprintf("PORT=%d", hostPort))
 	runArgs = append(runArgs, imageName)
 
-	log.add("[podman] podman run -d --name %s -p 127.0.0.1:%d:%d --network slirp4netns %s", cName, hostPort, appPort, imageName)
+	log.add("[podman] podman run -d --name %s --network host PORT=%d %s", cName, hostPort, imageName)
 	out, err := podmanCmd(runArgs...).CombinedOutput()
 	if err != nil {
 		log.add("ERROR: podman run failed: %v\n%s", err, strings.TrimSpace(string(out)))
@@ -550,8 +548,7 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 
 	// Register with fdnet so sibling services can reach this container via
 	// their <SVC>_HOST / <SVC>_PORT env vars.
-	// With slirp4netns, fdnet dials 127.0.0.1:hostPort directly and rootlessport
-	// forwards to the container's app_port.
+	// With host networking, fdnet dials 127.0.0.1:hostPort directly.
 	if NetDaemon != nil {
 		if cp, regErr := NetDaemon.Register(projectID, svcName, "127.0.0.1", newContainerID, hostPort, appPort); regErr != nil {
 			log.add("[fdnet] warning: could not register service %q: %v", svcName, regErr)
@@ -581,22 +578,11 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 		newContainerID, hostPort, svcID)
 
 	// Wait for the container's published host port to accept TCP connections
-	// before reloading Caddy.  This is the correct fix for the "502 on second
-	// domain" problem: the app may need 10-90 s to start (JVM, large Python deps,
-	// etc.).  If we reload Caddy with a fixed 5 s delay the domain is registered
-	// BEFORE the app is listening — Caddy connects, gets ECONNREFUSED, and serves
-	// 502 for every request until the next periodic reload.
-	//
-	// By waiting for a successful TCP dial we guarantee the domain only enters
-	// the Caddy config at the moment the app is actually ready to serve traffic.
-	//
-	// Max wait: 90 s (generous for slow-starting apps on small VPS hosts).
-	// If the port still doesn't respond after 90 s we reload Caddy anyway (the
-	// 60 s periodic sync keeps retrying) and append a clear diagnostic WARNING
-	// to the deployment log so the user knows the app_port is likely wrong.
-	go func(hPort, aPort int, dID, sID int64) {
+	// before reloading Caddy.  The app now binds hostPort directly, so this
+	// probe should succeed as soon as the container has started listening.
+	go func(hPort int, dID, sID int64) {
 		const (
-			maxWait  = 90 * time.Second
+			maxWait  = 30 * time.Second
 			interval = 2 * time.Second
 		)
 		deadline := time.Now().Add(maxWait)
@@ -613,24 +599,23 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 			time.Sleep(interval)
 		}
 
-		// Port never responded in 90 s — append actionable diagnostic and reload anyway.
-		// The 60 s periodic sync keeps retrying; once the app eventually listens
-		// the domain will start serving.
+		// Port never responded in 30 s — append actionable diagnostic and reload anyway.
+		// If this happens now it indicates the app did not honor PORT=hostPort or
+		// the container exited before binding the socket.
 		logs := containerRecentLogs(cName, 30)
 		db.Exec( //nolint
 			`UPDATE deployments SET deploy_log=deploy_log||? WHERE id=?`,
 			fmt.Sprintf(
-				"\nWARNING: port %d did not respond within 90 s after container start."+
-					"\n  The app is not listening on app_port=%d."+
-					"\n  FIX: edit the service → change app_port to the port your app"+
-					" actually listens on (check your code or Dockerfile EXPOSE)."+
+				"\nWARNING: port %d did not respond within 30 s after container start."+
+					"\n  The app is not listening on PORT=%d."+
+					"\n  FIX: ensure the start command honors the PORT env var and binds it."+
 					"\n  DEBUG: run \"podman logs fd-svc-%d\" on your server to see the startup output."+
 					"\n  Last container output:"+
 					"\n%s",
-					hPort, aPort, sID, logs),
+					hPort, hPort, sID, logs),
 			dID)
 		caddy.Reload(db)
-	}(hostPort, appPort, depID, svcID)
+	}(hostPort, depID, svcID)
 
 	// Tag the freshly built image as the stable snapshot so it can be used as
 	// a fallback if a future deployment build fails.
