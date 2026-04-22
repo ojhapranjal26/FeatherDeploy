@@ -101,4 +101,16 @@ export const databasesApi = {
       filename: parseFilename(response.headers['content-disposition']),
     }
   },
+
+  togglePublic: (
+    projectId: string | number,
+    databaseId: string | number,
+    enable: boolean,
+  ): Promise<{ ok: boolean; network_public: boolean; public_connection_url?: string }> =>
+    client
+      .post<{ ok: boolean; network_public: boolean; public_connection_url?: string }>(
+        `/projects/${projectId}/databases/${databaseId}/public`,
+        { public: enable },
+      )
+      .then((r) => r.data),
 }

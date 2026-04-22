@@ -2777,6 +2777,45 @@ func pickBaseImage(framework string) string {
 // `npm run build`. Secret values are decrypted before writing.
 // Both .env and .env.local are written so Next.js and other tools pick them up.
 func writeEnvFileForBuild(db *sql.DB, svcID, projectID int64, jwtSecret, workDir string) error {
+	// ── 0. Collect build-time DB URLs for alias substitution ─────────────────
+	// Users often copy-paste the connection string shown in the UI (e.g.
+	// postgresql://user:pass@ssc:5432/db) into their DATABASE_URL env var.
+	// That hostname format uses DNS-based routing which doesn't work inside
+	// podman build containers (slirp4netns has no DNS for container aliases).
+	// We detect this pattern and rewrite it to 10.0.2.2:hostPort, which IS
+	// reachable from build containers via the slirp4netns gateway.
+	type buildDB struct {
+		alias        string
+		internalPort int
+		hostPort     int
+		connURL      string
+	}
+	var buildDBs []buildDB
+	dbRows, _ := db.Query(
+		`SELECT id, name, db_type, db_name, db_user, db_password, COALESCE(host_port, 0)
+		 FROM databases WHERE project_id=? AND status='running'`, projectID)
+	if dbRows != nil {
+		defer dbRows.Close()
+		for dbRows.Next() {
+			var dbID int64
+			var name, dbType, dbName, dbUser, encPass string
+			var hp int
+			if dbRows.Scan(&dbID, &name, &dbType, &dbName, &dbUser, &encPass, &hp) != nil || hp == 0 {
+				continue
+			}
+			clearPass := encPass
+			if strings.HasPrefix(encPass, "fdenc:") {
+				if p, decErr := appCrypto.Decrypt(encPass[len("fdenc:"):], jwtSecret); decErr == nil {
+					clearPass = p
+				}
+			}
+			alias := DBNetworkAlias(name)
+			iport := dbTypeInternalPort(dbType)
+			connURL := dbConnectionURLFDNet(dbType, dbName, dbUser, clearPass, netdaemon.SlirpGateway, hp)
+			buildDBs = append(buildDBs, buildDB{alias: alias, internalPort: iport, hostPort: hp, connURL: connURL})
+		}
+	}
+
 	rows, err := db.Query(
 		`SELECT key, value, is_secret FROM env_variables WHERE service_id=?`, svcID)
 	if err != nil {
@@ -2785,6 +2824,7 @@ func writeEnvFileForBuild(db *sql.DB, svcID, projectID int64, jwtSecret, workDir
 	defer rows.Close()
 
 	var sb strings.Builder
+	userKeys := make(map[string]bool)
 	for rows.Next() {
 		var k, v string
 		var isSecret int
@@ -2798,8 +2838,18 @@ func writeEnvFileForBuild(db *sql.DB, svcID, projectID int64, jwtSecret, workDir
 			}
 			v = plain
 		}
-		// Quote values that contain special shell chars
+		// Transparently rewrite alias:internalPort → 10.0.2.2:hostPort in any
+		// URL value so build-time tools (drizzle-kit push, prisma migrate, etc.)
+		// reach the database through the slirp4netns gateway.
+		for _, dbi := range buildDBs {
+			if dbi.internalPort > 0 {
+				old := fmt.Sprintf("@%s:%d/", dbi.alias, dbi.internalPort)
+				repl := fmt.Sprintf("@%s:%d/", netdaemon.SlirpGateway, dbi.hostPort)
+				v = strings.ReplaceAll(v, old, repl)
+			}
+		}
 		sb.WriteString(k + "=" + v + "\n")
+		userKeys[k] = true
 	}
 	// Also inject project database connection URLs so build tools (Prisma, etc.)
 	// can access them at build time.
@@ -2811,6 +2861,12 @@ func writeEnvFileForBuild(db *sql.DB, svcID, projectID int64, jwtSecret, workDir
 		}
 		sb.WriteString(pair + "\n")
 	}
+	// Auto-inject DATABASE_URL pointing to the first running database so that
+	// build tools (drizzle-kit, prisma, etc.) work out of the box without the
+	// user having to manually configure a connection string.
+	if !userKeys["DATABASE_URL"] && len(buildDBs) > 0 {
+		sb.WriteString("DATABASE_URL=" + buildDBs[0].connURL + "\n")
+	}
 	content := []byte(sb.String())
 	if len(content) == 0 {
 		return nil
@@ -2819,6 +2875,17 @@ func writeEnvFileForBuild(db *sql.DB, svcID, projectID int64, jwtSecret, workDir
 	os.WriteFile(filepath.Join(workDir, ".env"), content, 0600)       //nolint
 	os.WriteFile(filepath.Join(workDir, ".env.local"), content, 0600) //nolint
 	return nil
+}
+
+// dbTypeInternalPort returns the default listening port for a given database type.
+func dbTypeInternalPort(dbType string) int {
+	switch dbType {
+	case "postgres":
+		return 5432
+	case "mysql":
+		return 3306
+	}
+	return 0
 }
 
 // extractArtifact extracts a .zip, .tar.gz, or .tgz archive into destDir.

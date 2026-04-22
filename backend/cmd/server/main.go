@@ -323,7 +323,7 @@ func serve() {
 	userH := handler.NewUserHandler(db)
 	projH := handler.NewProjectHandler(db)
 	svcH := handler.NewServiceHandler(db)
-	dbH := handler.NewDatabaseHandler(db, *jwtSecret)
+	dbH := handler.NewDatabaseHandler(db, *jwtSecret, domainFromOrigin(*origin))
 	depH := handler.NewDeploymentHandler(db, *jwtSecret)
 	envH := handler.NewEnvHandler(db, *jwtSecret)
 	domainH := handler.NewDomainHandler(db)
@@ -572,6 +572,7 @@ func serve() {
 				r.Post("/api/projects/{projectID}/databases/{databaseID}/restart", dbH.Restart)
 				r.Post("/api/projects/{projectID}/databases/{databaseID}/stop", dbH.Stop)
 				r.Post("/api/projects/{projectID}/databases/{databaseID}/password", dbH.ChangePassword)
+				r.Post("/api/projects/{projectID}/databases/{databaseID}/public", dbH.TogglePublic)
 
 				// ── QR approve (authenticated) ────────────────────────────
 				r.Post("/api/auth/qr/{token}/approve", qrH.Approve)

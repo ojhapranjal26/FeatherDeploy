@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
@@ -21,8 +22,9 @@ import (
 
 // DatabaseHandler handles CRUD + lifecycle operations for managed database containers.
 type DatabaseHandler struct {
-	db        *sql.DB
-	jwtSecret string
+	db         *sql.DB
+	jwtSecret  string
+	serverHost string // public hostname/IP used in public connection URLs
 }
 
 var (
@@ -30,8 +32,8 @@ var (
 	imageTagRe     = regexp.MustCompile(`^[A-Za-z0-9._-]{1,32}$`)
 )
 
-func NewDatabaseHandler(db *sql.DB, jwtSecret string) *DatabaseHandler {
-	return &DatabaseHandler{db: db, jwtSecret: jwtSecret}
+func NewDatabaseHandler(db *sql.DB, jwtSecret, serverHost string) *DatabaseHandler {
+	return &DatabaseHandler{db: db, jwtSecret: jwtSecret, serverHost: serverHost}
 }
 
 // GET /api/projects/{projectID}/databases
@@ -74,8 +76,10 @@ func (h *DatabaseHandler) List(w http.ResponseWriter, r *http.Request) {
 			alias := deploy.DBNetworkAlias(d.Name)
 			d.ConnectionURL = deploy.DBConnectionURL(d.DBType, d.DBName, d.DBUser, clearPass, alias)
 			if d.NetworkPublic && d.HostPort > 0 {
-				d.PublicConnectionURL = deploy.DBPublicConnectionURL(
-					d.DBType, d.DBName, d.DBUser, clearPass, d.HostPort)
+				d.PublicConnectionURL = strings.ReplaceAll(
+					deploy.DBPublicConnectionURL(d.DBType, d.DBName, d.DBUser, clearPass, d.HostPort),
+					"HOST", h.serverHost,
+				)
 			}
 			dbs = append(dbs, d)
 		}
@@ -386,6 +390,137 @@ func (h *DatabaseHandler) ChangePassword(w http.ResponseWriter, r *http.Request)
 	})
 }
 
+// POST /api/projects/{projectID}/databases/{databaseID}/public
+// Toggles whether the database is reachable from the internet on its host
+// port.  When enabled an iptables ACCEPT rule is added specifically for
+// the database's host port (before the broad DROP rules) so external TCP
+// clients (PgAdmin, TablePlus, etc.) can connect with the usual credentials.
+// When disabled the rule is removed.
+func (h *DatabaseHandler) TogglePublic(w http.ResponseWriter, r *http.Request) {
+	projectID, err := strconv.ParseInt(r.PathValue("projectID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errMap("invalid projectID"))
+		return
+	}
+	dbID, err := strconv.ParseInt(r.PathValue("databaseID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errMap("invalid databaseID"))
+		return
+	}
+
+	var req struct {
+		Public bool `json:"public"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errMap("invalid request body"))
+		return
+	}
+
+	// Fetch current state.
+	var dbType, dbName, dbUser, encPass string
+	var hostPort int
+	var npInt int
+	err = h.db.QueryRowContext(r.Context(),
+		`SELECT db_type, db_name, db_user, db_password, COALESCE(host_port, 0), network_public
+		 FROM databases WHERE id=? AND project_id=?`, dbID, projectID,
+	).Scan(&dbType, &dbName, &dbUser, &encPass, &hostPort, &npInt)
+	if err == sql.ErrNoRows {
+		writeJSON(w, http.StatusNotFound, errMap("database not found"))
+		return
+	}
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errMap("internal error"))
+		return
+	}
+	if hostPort == 0 {
+		writeJSON(w, http.StatusBadRequest, errMap("database has no host port assigned; start it first"))
+		return
+	}
+
+	ipt, lookErr := exec.LookPath("iptables")
+	if lookErr != nil {
+		writeJSON(w, http.StatusInternalServerError, errMap("iptables not available on this server"))
+		return
+	}
+
+	portStr := strconv.Itoa(hostPort)
+	// Rule spec (without -C/-I/-D) for the specific port ACCEPT.
+	ruleSpec := []string{"-p", "tcp", "--dport", portStr,
+		"-m", "comment", "--comment", fmt.Sprintf("featherdeploy db-%d public", dbID),
+		"-j", "ACCEPT"}
+
+	if req.Public {
+		// Only add if not already present.
+		checkArgs := append([]string{"-C", "INPUT"}, ruleSpec...)
+		if exec.Command(ipt, checkArgs...).Run() != nil {
+			// Insert at position 1 — before the ESTABLISHED/RELATED ACCEPT and
+			// the broad DROP rules, so the ACCEPT is hit first for this port.
+			insertArgs := append([]string{"-I", "INPUT", "1"}, ruleSpec...)
+			if out, runErr := exec.Command(ipt, insertArgs...).CombinedOutput(); runErr != nil {
+				slog.Error("iptables: add public DB rule", "err", runErr, "out", string(out))
+				writeJSON(w, http.StatusInternalServerError, errMap("failed to add iptables rule: "+strings.TrimSpace(string(out))))
+				return
+			}
+		}
+	} else {
+		// Remove the rule if present.
+		deleteArgs := append([]string{"-D", "INPUT"}, ruleSpec...)
+		exec.Command(ipt, deleteArgs...).Run() //nolint: ignore "not present" errors
+	}
+
+	npVal := 0
+	if req.Public {
+		npVal = 1
+	}
+	if _, err := h.db.ExecContext(r.Context(),
+		`UPDATE databases SET network_public=?, updated_at=datetime('now') WHERE id=?`, npVal, dbID,
+	); err != nil {
+		slog.Error("toggle public db", "err", err)
+		writeJSON(w, http.StatusInternalServerError, errMap("internal error"))
+		return
+	}
+
+	// Persist iptables rules.
+	persistIPTablesRules()
+
+	// Build the public connection URL for the response.
+	clearPass := encPass
+	if strings.HasPrefix(encPass, "fdenc:") {
+		if p, decErr := appCrypto.Decrypt(encPass[len("fdenc:"):], h.jwtSecret); decErr == nil {
+			clearPass = p
+		}
+	}
+	publicURL := ""
+	if req.Public {
+		publicURL = strings.ReplaceAll(
+			deploy.DBPublicConnectionURL(dbType, dbName, dbUser, clearPass, hostPort),
+			"HOST", h.serverHost,
+		)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":                 true,
+		"network_public":     req.Public,
+		"public_connection_url": publicURL,
+	})
+}
+
+// persistIPTablesRules saves the current iptables ruleset to disk.
+func persistIPTablesRules() {
+	// Debian/Ubuntu
+	if err := os.MkdirAll("/etc/iptables", 0755); err == nil {
+		if out, err := exec.Command("iptables-save").Output(); err == nil {
+			os.WriteFile("/etc/iptables/rules.v4", out, 0640) //nolint
+			return
+		}
+	}
+	// RHEL/Fedora
+	if err := os.MkdirAll("/etc/sysconfig", 0755); err == nil {
+		if out, err := exec.Command("iptables-save").Output(); err == nil {
+			os.WriteFile("/etc/sysconfig/iptables", out, 0640) //nolint
+		}
+	}
+}
+
 // GET /api/projects/{projectID}/databases/{databaseID}/logs
 func (h *DatabaseHandler) GetLogs(w http.ResponseWriter, r *http.Request) {
 	projectID, err := strconv.ParseInt(r.PathValue("projectID"), 10, 64)
@@ -596,8 +731,10 @@ func (h *DatabaseHandler) getByID(w http.ResponseWriter, r *http.Request, projec
 	alias := deploy.DBNetworkAlias(d.Name)
 	d.ConnectionURL = deploy.DBConnectionURL(d.DBType, d.DBName, d.DBUser, clearPass, alias)
 	if d.NetworkPublic && d.HostPort > 0 {
-		d.PublicConnectionURL = deploy.DBPublicConnectionURL(
-			d.DBType, d.DBName, d.DBUser, clearPass, d.HostPort)
+		d.PublicConnectionURL = strings.ReplaceAll(
+			deploy.DBPublicConnectionURL(d.DBType, d.DBName, d.DBUser, clearPass, d.HostPort),
+			"HOST", h.serverHost,
+		)
 	}
 	d.EnvVarName = deploy.DBEnvKey(d.Name) + "_URL"
 

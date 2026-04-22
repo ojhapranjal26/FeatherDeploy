@@ -5,7 +5,7 @@ import {
   Plus, ChevronLeft, Rocket, Settings2, Trash2,
   ExternalLink, GitBranch, Terminal, Database,
   Globe, AlertTriangle, Users, UserMinus, Loader2,
-  Play, Square, Download, Copy, BarChart2, RotateCcw,
+  Play, Square, Download, Copy, BarChart2, RotateCcw, Lock, Unlock,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { projectsApi, usersApi, type ProjectMember } from '@/api/projects'
@@ -344,6 +344,19 @@ function DatabaseCard({ database, projectId, canEdit }: { database: DatabaseReco
     onError: (err: unknown) => toast.error((err as any)?.response?.data?.error ?? 'Failed to back up and delete database.'),
   })
 
+  const togglePublicMutation = useMutation({
+    mutationFn: (enable: boolean) => databasesApi.togglePublic(projectId, database.id, enable),
+    onSuccess: (data) => {
+      qc.invalidateQueries({ queryKey: ['databases', projectId] })
+      if (data.network_public) {
+        toast.success('Database is now publicly accessible.')
+      } else {
+        toast.success('Public access disabled.')
+      }
+    },
+    onError: (err: unknown) => toast.error((err as any)?.response?.data?.error ?? 'Failed to toggle public access.'),
+  })
+
   const updateMutation = useMutation({
     mutationFn: (data: UpdateDatabasePayload) => databasesApi.update(projectId, database.id, data),
     onSuccess: () => {
@@ -414,6 +427,17 @@ function DatabaseCard({ database, projectId, canEdit }: { database: DatabaseReco
                 <DropdownMenuItem onClick={() => backupMutation.mutate()} disabled={backupMutation.isPending || backupAndDeleteMutation.isPending}>
                   <Download className="mr-2 h-3.5 w-3.5" /> Download backup
                 </DropdownMenuItem>
+                {!isSQLite && (
+                  <DropdownMenuItem
+                    onClick={() => togglePublicMutation.mutate(!database.network_public)}
+                    disabled={togglePublicMutation.isPending}
+                  >
+                    {database.network_public
+                      ? <><Lock className="mr-2 h-3.5 w-3.5" /> Disable public access</>
+                      : <><Unlock className="mr-2 h-3.5 w-3.5" /> Enable public access</>
+                    }
+                  </DropdownMenuItem>
+                )}
                 {!isSQLite && database.status !== 'running' && (
                   <DropdownMenuItem onClick={() => startMutation.mutate()} disabled={isBusy}>
                     <Play className="mr-2 h-3.5 w-3.5" /> Start database
