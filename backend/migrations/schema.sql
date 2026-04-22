@@ -30,6 +30,8 @@ CREATE TABLE IF NOT EXISTS project_members (
 );
 
 -- 004: services
+-- NOTE: see internal/db/schema.sql for the canonical schema.
+-- This file mirrors it for reference only.
 CREATE TABLE IF NOT EXISTS services (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     project_id    INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -207,3 +209,5 @@ ALTER TABLE services    ADD COLUMN last_image   TEXT    NOT NULL DEFAULT '';
 ALTER TABLE services    ADD COLUMN auto_deploy  INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE deployments ADD COLUMN branch       TEXT    NOT NULL DEFAULT '';
 ALTER TABLE databases   ADD COLUMN start_log    TEXT    NOT NULL DEFAULT '';
+ALTER TABLE services    ADD COLUMN cluster_port INTEGER DEFAULT NULL;
+ALTER TABLE databases   ADD COLUMN cluster_port INTEGER DEFAULT NULL;

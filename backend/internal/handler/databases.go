@@ -22,9 +22,10 @@ import (
 
 // DatabaseHandler handles CRUD + lifecycle operations for managed database containers.
 type DatabaseHandler struct {
-	db         *sql.DB
-	jwtSecret  string
-	serverHost string // public hostname/IP used in public connection URLs
+	db          *sql.DB
+	jwtSecret   string
+	serverHost  string // public hostname/IP used in public connection URLs (e.g. panel.intelectio.art)
+	dbSubdomain string // subdomain for public DB URLs (e.g. db.intelectio.art)
 }
 
 var (
@@ -33,7 +34,48 @@ var (
 )
 
 func NewDatabaseHandler(db *sql.DB, jwtSecret, serverHost string) *DatabaseHandler {
-	return &DatabaseHandler{db: db, jwtSecret: jwtSecret, serverHost: serverHost}
+	dbSub := dbSubdomainFromHost(serverHost)
+	return &DatabaseHandler{db: db, jwtSecret: jwtSecret, serverHost: serverHost, dbSubdomain: dbSub}
+}
+
+// dbSubdomainFromHost derives a database subdomain from the panel's public host.
+// panel.intelectio.art → db.intelectio.art
+// localhost             → localhost  (kept as-is for dev)
+// 1.2.3.4              → 1.2.3.4    (IPs kept as-is)
+func dbSubdomainFromHost(host string) string {
+	// Strip port if present (shouldn't be, but be safe)
+	if idx := strings.LastIndex(host, ":"); idx >= 0 {
+		host = host[:idx]
+	}
+	// Is it an IPv4 address?
+	if isIPv4(host) {
+		return host
+	}
+	parts := strings.Split(host, ".")
+	if len(parts) > 2 {
+		// e.g. panel.intelectio.art → db.intelectio.art
+		return "db." + strings.Join(parts[1:], ".")
+	}
+	// bare domain or localhost
+	if host == "localhost" || host == "" {
+		return host
+	}
+	return "db." + host
+}
+
+func isIPv4(s string) bool {
+	parts := strings.Split(s, ".")
+	if len(parts) != 4 {
+		return false
+	}
+	for _, p := range parts {
+		for _, c := range p {
+			if c < '0' || c > '9' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // GET /api/projects/{projectID}/databases
@@ -416,14 +458,17 @@ func (h *DatabaseHandler) TogglePublic(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Fetch current state.
-	var dbType, dbName, dbUser, encPass string
-	var hostPort int
+	// Fetch current state — also fetch `name` so we can resolve the fdnet
+	// cluster port (which gives a more reliable 0.0.0.0 socket than rootlessport).
+	var dbType, dbName, dbUser, encPass, dbContainerName string
+	var hostPort, clusterPort int
 	var npInt int
 	err = h.db.QueryRowContext(r.Context(),
-		`SELECT db_type, db_name, db_user, db_password, COALESCE(host_port, 0), network_public
+		`SELECT name, db_type, db_name, db_user, db_password,
+		        COALESCE(host_port, 0), COALESCE(cluster_port, 0), network_public
 		 FROM databases WHERE id=? AND project_id=?`, dbID, projectID,
-	).Scan(&dbType, &dbName, &dbUser, &encPass, &hostPort, &npInt)
+	).Scan(&dbContainerName, &dbType, &dbName, &dbUser, &encPass,
+		&hostPort, &clusterPort, &npInt)
 	if err == sql.ErrNoRows {
 		writeJSON(w, http.StatusNotFound, errMap("database not found"))
 		return
@@ -458,36 +503,53 @@ func (h *DatabaseHandler) TogglePublic(w http.ResponseWriter, r *http.Request) {
 		return exec.Command(ipt, args...)
 	}
 
-	portStr := strconv.Itoa(hostPort)
-	// Rule spec (without -C/-I/-D) for the specific port ACCEPT.
-	ruleSpec := []string{"-p", "tcp", "--dport", portStr,
-		"-m", "comment", "--comment", fmt.Sprintf("featherdeploy db-%d public", dbID),
-		"-j", "ACCEPT"}
-
-	if req.Public {
-		// Only add if not already present.
-		checkArgs := append([]string{"-C", "INPUT"}, ruleSpec...)
-		if iptCmd(checkArgs...).Run() != nil {
-			// Insert at position 1 — before the ESTABLISHED/RELATED ACCEPT and
-			// the broad DROP rules, so the ACCEPT is hit first for this port.
-			insertArgs := append([]string{"-I", "INPUT", "1"}, ruleSpec...)
-			if out, runErr := iptCmd(insertArgs...).CombinedOutput(); runErr != nil {
-				slog.Error("iptables: add public DB rule", "err", runErr, "out", string(out))
-				writeJSON(w, http.StatusInternalServerError, errMap("failed to add iptables rule: "+strings.TrimSpace(string(out))))
-				return
-			}
+	// If the fdnet cluster port isn't stored in the DB yet, try to resolve it
+	// live from the running daemon.
+	if clusterPort == 0 && deploy.NetDaemon != nil {
+		alias := deploy.DBNetworkAlias(dbContainerName)
+		if cp, ok := deploy.NetDaemon.Resolve(projectID, alias); ok {
+			clusterPort = cp
+			// Persist it so future calls don't need the live lookup.
+			h.db.ExecContext(r.Context(), //nolint
+				`UPDATE databases SET cluster_port=? WHERE id=?`, clusterPort, dbID)
 		}
-	} else {
-		// Remove the rule if present.
-		deleteArgs := append([]string{"-D", "INPUT"}, ruleSpec...)
-		iptCmd(deleteArgs...).Run() //nolint: ignore "not present" errors
 	}
 
-	// Also manage UFW rules so the port stays open across UFW reloads/reboots.
-	// On Ubuntu servers, UFW periodically flushes and rebuilds the iptables
-	// INPUT chain from its own state; without a corresponding UFW rule, our
-	// iptables ACCEPT gets wiped on every 'ufw reload' or system reboot.
-	applyUFWRule(req.Public, portStr)
+	// Open/close iptables + UFW rules for BOTH the rootlessport host port AND
+	// the fdnet cluster port. The fdnet cluster port has a guaranteed
+	// 0.0.0.0 binding (net.Listen in Go) and is unaffected by rootlessport
+	// quirks, making it the primary external-access port. The host port is
+	// opened as a fallback for direct access.
+	openPorts := []int{hostPort}
+	if clusterPort > 0 && clusterPort != hostPort {
+		openPorts = append(openPorts, clusterPort)
+	}
+	for _, p := range openPorts {
+		portStr := strconv.Itoa(p)
+		ruleSpec := []string{"-p", "tcp", "--dport", portStr,
+			"-m", "comment", "--comment", fmt.Sprintf("featherdeploy db-%d public", dbID),
+			"-j", "ACCEPT"}
+		if req.Public {
+			checkArgs := append([]string{"-C", "INPUT"}, ruleSpec...)
+			if iptCmd(checkArgs...).Run() != nil {
+				insertArgs := append([]string{"-I", "INPUT", "1"}, ruleSpec...)
+				if out, runErr := iptCmd(insertArgs...).CombinedOutput(); runErr != nil {
+					slog.Error("iptables: add public DB rule", "port", p, "err", runErr, "out", string(out))
+					// Non-fatal — continue trying other ports.
+				}
+			}
+		} else {
+			deleteArgs := append([]string{"-D", "INPUT"}, ruleSpec...)
+			iptCmd(deleteArgs...).Run() //nolint
+		}
+		// Also manage UFW so rules survive UFW reloads/reboots.
+		applyUFWRule(req.Public, portStr)
+	}
+	if req.Public {
+		// Persist all open-port rules to disk so they survive a reboot even
+		// if iptables-persistent is installed without UFW.
+		persistIPTablesRules()
+	}
 
 	npVal := 0
 	if req.Public {
@@ -505,6 +567,10 @@ func (h *DatabaseHandler) TogglePublic(w http.ResponseWriter, r *http.Request) {
 	persistIPTablesRules()
 
 	// Build the public connection URL for the response.
+	// Prefer the fdnet cluster port (reliable 0.0.0.0 socket) over the
+	// rootlessport host port.  Use the db. subdomain so DBeaver users can
+	// create a DNS A/CNAME record for it that is NOT behind a Cloudflare/CDN
+	// proxy (which would strip non-HTTP ports).
 	clearPass := encPass
 	if strings.HasPrefix(encPass, "fdenc:") {
 		if p, decErr := appCrypto.Decrypt(encPass[len("fdenc:"):], h.jwtSecret); decErr == nil {
@@ -513,14 +579,16 @@ func (h *DatabaseHandler) TogglePublic(w http.ResponseWriter, r *http.Request) {
 	}
 	publicURL := ""
 	if req.Public {
-		publicURL = strings.ReplaceAll(
-			deploy.DBPublicConnectionURL(dbType, dbName, dbUser, clearPass, hostPort),
-			"HOST", h.serverHost,
-		)
+		publicHost := h.dbSubdomain
+		publicPort := hostPort
+		if clusterPort > 0 {
+			publicPort = clusterPort
+		}
+		publicURL = deploy.DBPublicConnectionURL(dbType, dbName, dbUser, clearPass, publicHost, publicPort)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":                 true,
-		"network_public":     req.Public,
+		"ok":                    true,
+		"network_public":        req.Public,
 		"public_connection_url": publicURL,
 	})
 }

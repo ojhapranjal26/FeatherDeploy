@@ -865,7 +865,8 @@ func reconcilePublicDBIPTables(db *sql.DB) {
 	}
 
 	rows, err := db.Query(
-		`SELECT id, COALESCE(host_port, 0) FROM databases WHERE network_public=1 AND host_port IS NOT NULL`)
+		`SELECT id, COALESCE(host_port, 0), COALESCE(cluster_port, 0)
+		 FROM databases WHERE network_public=1 AND host_port IS NOT NULL`)
 	if err != nil {
 		slog.Warn("startup reconcile: query public databases", "err", err)
 		return
@@ -875,32 +876,36 @@ func reconcilePublicDBIPTables(db *sql.DB) {
 	restored := 0
 	for rows.Next() {
 		var dbID int64
-		var hostPort int
-		if rows.Scan(&dbID, &hostPort) != nil || hostPort == 0 {
+		var hostPort, clusterPort int
+		if rows.Scan(&dbID, &hostPort, &clusterPort) != nil || hostPort == 0 {
 			continue
 		}
-		portStr := strconv.Itoa(hostPort)
-		ruleSpec := []string{"-p", "tcp", "--dport", portStr,
-			"-m", "comment", "--comment", fmt.Sprintf("featherdeploy db-%d public", dbID),
-			"-j", "ACCEPT"}
-		checkArgs := append([]string{"-C", "INPUT"}, ruleSpec...)
-		if iptCmd(checkArgs...).Run() == nil {
-			continue // already present
+		// Open both the rootlessport host port and the fdnet cluster port.
+		// The cluster port has the most reliable 0.0.0.0 socket (Go net.Listen).
+		openPorts := []int{hostPort}
+		if clusterPort > 0 && clusterPort != hostPort {
+			openPorts = append(openPorts, clusterPort)
 		}
-		insertArgs := append([]string{"-I", "INPUT", "1"}, ruleSpec...)
-		if out, runErr := iptCmd(insertArgs...).CombinedOutput(); runErr != nil {
-			slog.Warn("startup reconcile: could not restore iptables rule for public DB",
-				"db_id", dbID, "port", hostPort, "err", runErr, "out", strings.TrimSpace(string(out)))
-		} else {
-			slog.Info("startup reconcile: restored iptables ACCEPT for public DB",
-				"db_id", dbID, "port", hostPort)
-			restored++
+		for _, p := range openPorts {
+			portStr := strconv.Itoa(p)
+			ruleSpec := []string{"-p", "tcp", "--dport", portStr,
+				"-m", "comment", "--comment", fmt.Sprintf("featherdeploy db-%d public", dbID),
+				"-j", "ACCEPT"}
+			checkArgs := append([]string{"-C", "INPUT"}, ruleSpec...)
+			if iptCmd(checkArgs...).Run() != nil {
+				insertArgs := append([]string{"-I", "INPUT", "1"}, ruleSpec...)
+				if out, runErr := iptCmd(insertArgs...).CombinedOutput(); runErr != nil {
+					slog.Warn("startup reconcile: could not restore iptables rule for public DB",
+						"db_id", dbID, "port", p, "err", runErr, "out", strings.TrimSpace(string(out)))
+				} else {
+					slog.Info("startup reconcile: restored iptables ACCEPT for public DB",
+						"db_id", dbID, "port", p)
+					restored++
+				}
+			}
+			// Also ensure UFW allows the port if UFW is active.
+			reconcileUFWRule(true, portStr)
 		}
-
-		// Also ensure UFW allows the port if UFW is active.
-		// UFW rules are persistent and survive reboots; without this, a
-		// 'ufw reload' by the OS would wipe our iptables rule permanently.
-		reconcileUFWRule(true, portStr)
 	}
 	if restored > 0 {
 		slog.Info("startup reconcile: iptables rules for public DBs restored", "count", restored)

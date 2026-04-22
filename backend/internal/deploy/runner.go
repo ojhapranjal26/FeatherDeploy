@@ -1500,17 +1500,18 @@ func dbConnectionURLFDNet(dbType, dbName, dbUser, clearPassword, host string, po
 	return ""
 }
 
-// DBPublicConnectionURL builds the external connection URL using the host's
-// port binding (valid from outside the project network).
-func DBPublicConnectionURL(dbType, dbName, dbUser, clearPassword string, hostPort int) string {
+// DBPublicConnectionURL builds the external connection URL for a database that
+// has been made publicly accessible. host is the server's public hostname or
+// IP address; port is the externally-reachable port (fdnet cluster port preferred).
+func DBPublicConnectionURL(dbType, dbName, dbUser, clearPassword, host string, port int) string {
 	esc := urlEscapeCredential
 	switch dbType {
 	case "postgres":
-		return fmt.Sprintf("postgresql://%s:%s@HOST:%d/%s",
-			esc(dbUser), esc(clearPassword), hostPort, dbName)
+		return fmt.Sprintf("postgresql://%s:%s@%s:%d/%s",
+			esc(dbUser), esc(clearPassword), host, port, dbName)
 	case "mysql":
-		return fmt.Sprintf("mysql://%s:%s@HOST:%d/%s",
-			esc(dbUser), esc(clearPassword), hostPort, dbName)
+		return fmt.Sprintf("mysql://%s:%s@%s:%d/%s",
+			esc(dbUser), esc(clearPassword), host, port, dbName)
 	}
 	return ""
 }
@@ -1927,12 +1928,15 @@ func startDatabaseRetrying(db *sql.DB, jwtSecret string, dbID int64, attempt int
 
 	// Register with fdnet so sibling services can reach this database.
 	if NetDaemon != nil {
-		if _, regErr := NetDaemon.Register(projectID, alias, "127.0.0.1", containerID, hostPort, internalPort); regErr != nil {
+		if cp, regErr := NetDaemon.Register(projectID, alias, "127.0.0.1", containerID, hostPort, internalPort); regErr != nil {
 			log.add("[fdnet] WARNING: could not register alias %q: %v", alias, regErr)
 			slog.Warn("fdnet: could not register database", "db_id", dbID, "alias", alias, "err", regErr)
 		} else {
-			log.add("[fdnet] registered alias %q → 127.0.0.1:%d", alias, hostPort)
-			slog.Info("fdnet: database registered", "db_id", dbID, "alias", alias)
+			log.add("[fdnet] registered alias %q → 127.0.0.1:%d (clusterPort=%d)", alias, hostPort, cp)
+			slog.Info("fdnet: database registered", "db_id", dbID, "alias", alias, "clusterPort", cp)
+			// Persist the cluster port so TogglePublic and startup reconciliation
+			// can use it to open iptables/UFW for the fdnet proxy port.
+			db.Exec(`UPDATE databases SET cluster_port=? WHERE id=?`, cp, dbID) //nolint
 		}
 	}
 

@@ -325,3 +325,7 @@ ALTER TABLE databases ADD COLUMN start_log TEXT NOT NULL DEFAULT '';
 -- This eliminates 502 errors for services after the first when slirp4netns
 -- port-forwarding helper fails to bind the published host port.
 ALTER TABLE services ADD COLUMN cluster_port INTEGER DEFAULT NULL;
+
+-- 022: add cluster_port to databases so the fdnet proxy port (0.0.0.0 binding)
+-- is persisted and used in public connection URLs, surviving process restarts.
+ALTER TABLE databases ADD COLUMN cluster_port INTEGER DEFAULT NULL;
