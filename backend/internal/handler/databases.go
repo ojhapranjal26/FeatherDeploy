@@ -528,21 +528,39 @@ func (h *DatabaseHandler) TogglePublic(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, p := range openPorts {
 		portStr := strconv.Itoa(p)
-		ruleSpec := []string{"-p", "tcp", "--dport", portStr,
+		acceptSpec := []string{"-p", "tcp", "--dport", portStr,
 			"-m", "comment", "--comment", fmt.Sprintf("featherdeploy db-%d public", dbID),
 			"-j", "ACCEPT"}
+		// Explicit DROP rule used when public access is disabled. This is
+		// necessary because many VPS kernels have a default INPUT policy of
+		// ACCEPT, meaning removing the ACCEPT rule alone would not block
+		// traffic — we need a specific DROP to override the default.
+		dropSpec := []string{"-p", "tcp", "--dport", portStr,
+			"-m", "comment", "--comment", fmt.Sprintf("featherdeploy db-%d block", dbID),
+			"-j", "DROP"}
 		if req.Public {
-			checkArgs := append([]string{"-C", "INPUT"}, ruleSpec...)
+			// Remove any stale DROP rule for this port before adding ACCEPT.
+			iptCmd(append([]string{"-D", "INPUT"}, dropSpec...)...).Run() //nolint
+			// Add ACCEPT if not already present.
+			checkArgs := append([]string{"-C", "INPUT"}, acceptSpec...)
 			if iptCmd(checkArgs...).Run() != nil {
-				insertArgs := append([]string{"-I", "INPUT", "1"}, ruleSpec...)
+				insertArgs := append([]string{"-I", "INPUT", "1"}, acceptSpec...)
 				if out, runErr := iptCmd(insertArgs...).CombinedOutput(); runErr != nil {
 					slog.Error("iptables: add public DB rule", "port", p, "err", runErr, "out", string(out))
 					// Non-fatal — continue trying other ports.
 				}
 			}
 		} else {
-			deleteArgs := append([]string{"-D", "INPUT"}, ruleSpec...)
-			iptCmd(deleteArgs...).Run() //nolint
+			// Remove ACCEPT rule.
+			iptCmd(append([]string{"-D", "INPUT"}, acceptSpec...)...).Run() //nolint
+			// Add DROP so the port is explicitly blocked on default-ACCEPT chains.
+			checkDropArgs := append([]string{"-C", "INPUT"}, dropSpec...)
+			if iptCmd(checkDropArgs...).Run() != nil {
+				appendArgs := append([]string{"-A", "INPUT"}, dropSpec...)
+				if out, runErr := iptCmd(appendArgs...).CombinedOutput(); runErr != nil {
+					slog.Error("iptables: add block DB rule", "port", p, "err", runErr, "out", string(out))
+				}
+			}
 		}
 		// Also manage UFW so rules survive UFW reloads/reboots.
 		applyUFWRule(req.Public, portStr)
@@ -630,12 +648,18 @@ func applyUFWRule(allow bool, port string) {
 	if err != nil {
 		return // UFW not installed
 	}
-	// Check if UFW is active.
-	out, err := exec.Command(ufw, "status").Output()
-	if err != nil || !strings.Contains(string(out), "Status: active") {
-		return // UFW not active
-	}
 	sudo, _ := exec.LookPath("sudo")
+	// 'ufw status' requires root — run via sudo so the featherdeploy service
+	// user (non-root) gets the real status instead of always "inactive".
+	var statusOut []byte
+	if sudo != "" {
+		statusOut, _ = exec.Command(sudo, ufw, "status").Output()
+	} else {
+		statusOut, _ = exec.Command(ufw, "status").Output()
+	}
+	if !strings.Contains(string(statusOut), "Status: active") {
+		return // UFW not active on this host
+	}
 	run := func(args ...string) {
 		if sudo != "" {
 			exec.Command(sudo, append([]string{ufw}, args...)...).Run() //nolint
@@ -647,8 +671,12 @@ func applyUFWRule(allow bool, port string) {
 		run("allow", port+"/tcp")
 		slog.Info("ufw: allowed public DB port", "port", port)
 	} else {
-		run("delete", "allow", port+"/tcp")
-		slog.Info("ufw: removed public DB port rule", "port", port)
+		// 'ufw deny' blocks even if the rule is not present, whereas
+		// 'ufw delete allow' would error if the allow rule doesn't exist.
+		// We delete the allow rule first, then deny for safety.
+		run("delete", "allow", port+"/tcp") // ignore error if not present
+		run("deny", port+"/tcp")
+		slog.Info("ufw: blocked public DB port", "port", port)
 	}
 }
 

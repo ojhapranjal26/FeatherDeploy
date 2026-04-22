@@ -921,11 +921,17 @@ func reconcileUFWRule(allow bool, port string) {
 	if err != nil {
 		return
 	}
-	out, err := exec.Command(ufw, "status").Output()
-	if err != nil || !strings.Contains(string(out), "Status: active") {
+	sudo, _ := exec.LookPath("sudo")
+	// ufw status requires root — use sudo so the service user gets the real status.
+	var statusOut []byte
+	if sudo != "" {
+		statusOut, _ = exec.Command(sudo, ufw, "status").Output()
+	} else {
+		statusOut, _ = exec.Command(ufw, "status").Output()
+	}
+	if !strings.Contains(string(statusOut), "Status: active") {
 		return
 	}
-	sudo, _ := exec.LookPath("sudo")
 	run := func(args ...string) {
 		if sudo != "" {
 			exec.Command(sudo, append([]string{ufw}, args...)...).Run() //nolint
@@ -937,6 +943,7 @@ func reconcileUFWRule(allow bool, port string) {
 		run("allow", port+"/tcp")
 	} else {
 		run("delete", "allow", port+"/tcp")
+		run("deny", port+"/tcp")
 	}
 }
 
