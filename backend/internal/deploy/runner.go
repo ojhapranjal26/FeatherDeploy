@@ -1703,7 +1703,7 @@ func (l *dbLog) add(format string, args ...any) {
 	l.lines = append(l.lines, line)
 	text := strings.Join(l.lines, "\n")
 	l.mu.Unlock()
-	slog.Info("[db-start] " + line)
+	slog.Info(line)
 	// Write to start_log immediately so the SSE stream can tail it.
 	l.db.Exec( //nolint
 		`UPDATE databases SET start_log=?, updated_at=datetime('now') WHERE id=?`, text, l.id)

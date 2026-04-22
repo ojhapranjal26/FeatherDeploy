@@ -433,7 +433,11 @@ func (h *DatabaseHandler) TogglePublic(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if hostPort == 0 {
-		writeJSON(w, http.StatusBadRequest, errMap("database has no host port assigned; start it first"))
+		if dbType == "sqlite" {
+			writeJSON(w, http.StatusBadRequest, errMap("SQLite databases are file-based and cannot be exposed publicly"))
+		} else {
+			writeJSON(w, http.StatusBadRequest, errMap("database has no host port assigned; start it first"))
+		}
 		return
 	}
 
@@ -478,6 +482,12 @@ func (h *DatabaseHandler) TogglePublic(w http.ResponseWriter, r *http.Request) {
 		deleteArgs := append([]string{"-D", "INPUT"}, ruleSpec...)
 		iptCmd(deleteArgs...).Run() //nolint: ignore "not present" errors
 	}
+
+	// Also manage UFW rules so the port stays open across UFW reloads/reboots.
+	// On Ubuntu servers, UFW periodically flushes and rebuilds the iptables
+	// INPUT chain from its own state; without a corresponding UFW rule, our
+	// iptables ACCEPT gets wiped on every 'ufw reload' or system reboot.
+	applyUFWRule(req.Public, portStr)
 
 	npVal := 0
 	if req.Public {
@@ -536,6 +546,39 @@ func persistIPTablesRules() {
 		if out, err := saveCmd().Output(); err == nil {
 			os.WriteFile("/etc/sysconfig/iptables", out, 0640) //nolint
 		}
+	}
+}
+
+// applyUFWRule adds or removes a UFW allow rule for the given TCP port.
+// UFW is active on many Ubuntu/Debian servers and periodically rewrites the
+// iptables INPUT chain; without a matching UFW rule the raw iptables ACCEPT
+// we insert is wiped on every 'ufw reload' or reboot.  UFW rules persist
+// across reboots on their own, so this complements (not replaces) the
+// iptables INSERT we do for the current session.
+func applyUFWRule(allow bool, port string) {
+	ufw, err := exec.LookPath("ufw")
+	if err != nil {
+		return // UFW not installed
+	}
+	// Check if UFW is active.
+	out, err := exec.Command(ufw, "status").Output()
+	if err != nil || !strings.Contains(string(out), "Status: active") {
+		return // UFW not active
+	}
+	sudo, _ := exec.LookPath("sudo")
+	run := func(args ...string) {
+		if sudo != "" {
+			exec.Command(sudo, append([]string{ufw}, args...)...).Run() //nolint
+		} else {
+			exec.Command(ufw, args...).Run() //nolint
+		}
+	}
+	if allow {
+		run("allow", port+"/tcp")
+		slog.Info("ufw: allowed public DB port", "port", port)
+	} else {
+		run("delete", "allow", port+"/tcp")
+		slog.Info("ufw: removed public DB port rule", "port", port)
 	}
 }
 

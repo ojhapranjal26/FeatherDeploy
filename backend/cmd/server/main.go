@@ -896,9 +896,42 @@ func reconcilePublicDBIPTables(db *sql.DB) {
 				"db_id", dbID, "port", hostPort)
 			restored++
 		}
+
+		// Also ensure UFW allows the port if UFW is active.
+		// UFW rules are persistent and survive reboots; without this, a
+		// 'ufw reload' by the OS would wipe our iptables rule permanently.
+		reconcileUFWRule(true, portStr)
 	}
 	if restored > 0 {
 		slog.Info("startup reconcile: iptables rules for public DBs restored", "count", restored)
+	}
+}
+
+// reconcileUFWRule adds or removes a UFW allow rule for a TCP port when UFW
+// is active.  Unlike raw iptables rules, UFW rules are persistent across
+// reboots so we only need to add them once, but checking idempotently on
+// every startup is harmless.
+func reconcileUFWRule(allow bool, port string) {
+	ufw, err := exec.LookPath("ufw")
+	if err != nil {
+		return
+	}
+	out, err := exec.Command(ufw, "status").Output()
+	if err != nil || !strings.Contains(string(out), "Status: active") {
+		return
+	}
+	sudo, _ := exec.LookPath("sudo")
+	run := func(args ...string) {
+		if sudo != "" {
+			exec.Command(sudo, append([]string{ufw}, args...)...).Run() //nolint
+		} else {
+			exec.Command(ufw, args...).Run() //nolint
+		}
+	}
+	if allow {
+		run("allow", port+"/tcp")
+	} else {
+		run("delete", "allow", port+"/tcp")
 	}
 }
 

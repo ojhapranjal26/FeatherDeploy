@@ -711,6 +711,7 @@ featherdeploy ALL=(root) NOPASSWD: /sbin/iptables
 featherdeploy ALL=(root) NOPASSWD: /usr/sbin/iptables
 featherdeploy ALL=(root) NOPASSWD: /sbin/iptables-save
 featherdeploy ALL=(root) NOPASSWD: /usr/sbin/iptables-save
+featherdeploy ALL=(root) NOPASSWD: /usr/sbin/ufw
 SUDOEOF
 chmod 440 /etc/sudoers.d/featherdeploy-podman
 echo "  /etc/sudoers.d/featherdeploy-podman installed"
