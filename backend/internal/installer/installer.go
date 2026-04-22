@@ -899,10 +899,23 @@ func writeFile(path, content string, perm os.FileMode) {
 // reachable from the internet while still being accessible via localhost
 // (Caddy → fdnet → rootlessport → container).
 //
+// IMPORTANT: rules use -m conntrack --ctstate NEW so that only brand-new
+// inbound connections are dropped.  Response packets for connections this
+// server or its containers initiated (git clone, npm install, podman pull,
+// etc.) carry ctstate ESTABLISHED or RELATED and are therefore never
+// affected.  A belt-and-suspenders ESTABLISHED,RELATED ACCEPT rule is also
+// inserted at position 1.
+//
 // Rules are written to /etc/iptables/rules.v4 (Debian/Ubuntu) and
 // /etc/sysconfig/iptables (RHEL/Fedora) for persistence across reboots.
 func setupIPTablesProtection() {
 	fmt.Println("\n── Protecting internal port ranges with iptables ───────────────")
+
+	// Shift the kernel ephemeral port range above our internal port ranges
+	// (10000–59999). This is a belt-and-suspenders measure: even on kernels
+	// without conntrack, outbound connections use source ports ≥ 61000 so
+	// their response packets never hit the DROP rules below.
+	setEphemeralPortRange()
 
 	// Check if iptables is available.
 	iptablesPath, err := exec.LookPath("iptables")
@@ -913,7 +926,7 @@ func setupIPTablesProtection() {
 	}
 
 	type rule struct {
-		comment string
+		comment            string
 		startPort, endPort int
 	}
 	rules := []rule{
@@ -922,35 +935,106 @@ func setupIPTablesProtection() {
 		{"featherdeploy fdnet cluster ports", 30000, 59999},
 	}
 
+	// ── Remove legacy bare DROP rules (without --ctstate NEW) ─────────────────
+	// Earlier versions inserted DROP rules without state-matching, which caused
+	// them to also drop ESTABLISHED/RELATED response packets and break all
+	// outbound TCP connections (git clone, npm install, podman pull, etc.).
+	for _, r := range rules {
+		portRange := fmt.Sprintf("%d:%d", r.startPort, r.endPort)
+		legacySpec := []string{"!", "-i", "lo", "-p", "tcp",
+			"--dport", portRange, "-m", "comment", "--comment", r.comment,
+			"-j", "DROP"}
+		// -D removes the first matching rule; loop until none remain.
+		for exec.Command(iptablesPath, append([]string{"-C", "INPUT"}, legacySpec...)...).Run() == nil {
+			exec.Command(iptablesPath, append([]string{"-D", "INPUT"}, legacySpec...)...).Run() //nolint:errcheck
+		}
+	}
+
+	// ── Ensure ESTABLISHED/RELATED ACCEPT is at the top of INPUT ──────────────
+	// This guarantees response packets for connections this server initiated are
+	// accepted regardless of what DROP rules follow.
+	estCheck := []string{"-C", "INPUT", "-m", "conntrack",
+		"--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"}
+	if exec.Command(iptablesPath, estCheck...).Run() != nil {
+		insEst := []string{"-I", "INPUT", "1", "-m", "conntrack",
+			"--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"}
+		if out, err2 := exec.Command(iptablesPath, insEst...).CombinedOutput(); err2 != nil {
+			fmt.Printf("  WARNING: could not add ESTABLISHED/RELATED ACCEPT rule: %v — %s\n",
+				err2, strings.TrimSpace(string(out)))
+		} else {
+			fmt.Println("  ✓ iptables INPUT ACCEPT ESTABLISHED,RELATED (position 1)")
+		}
+	} else {
+		fmt.Println("  ✓ iptables ESTABLISHED/RELATED ACCEPT already present")
+	}
+
+	// ── Add NEW-only DROP rules for internal port ranges ──────────────────────
 	added := 0
 	for _, r := range rules {
 		portRange := fmt.Sprintf("%d:%d", r.startPort, r.endPort)
-		// Check if rule already exists.
+		// Check if the correct rule (with --ctstate NEW) already exists.
 		checkArgs := []string{"-C", "INPUT", "!", "-i", "lo", "-p", "tcp",
-			"--dport", portRange, "-m", "comment", "--comment", r.comment,
-			"-j", "DROP"}
+			"--dport", portRange, "-m", "conntrack", "--ctstate", "NEW",
+			"-m", "comment", "--comment", r.comment, "-j", "DROP"}
 		if exec.Command(iptablesPath, checkArgs...).Run() == nil {
-			// Rule already exists.
-			continue
+			continue // already present
 		}
-		// Insert at position 1 so it takes priority (before ACCEPT rules).
-		addArgs := []string{"-I", "INPUT", "1", "!", "-i", "lo", "-p", "tcp",
-			"--dport", portRange, "-m", "comment", "--comment", r.comment,
-			"-j", "DROP"}
+		// Append after the ESTABLISHED/RELATED ACCEPT at position 1.
+		// --ctstate NEW ensures only unsolicited inbound connections are dropped.
+		addArgs := []string{"-A", "INPUT", "!", "-i", "lo", "-p", "tcp",
+			"--dport", portRange, "-m", "conntrack", "--ctstate", "NEW",
+			"-m", "comment", "--comment", r.comment, "-j", "DROP"}
 		if out, err2 := exec.Command(iptablesPath, addArgs...).CombinedOutput(); err2 != nil {
 			fmt.Printf("  WARNING: could not add iptables rule for %s: %v — %s\n",
 				r.comment, err2, strings.TrimSpace(string(out)))
 		} else {
-			fmt.Printf("  ✓ iptables INPUT DROP for ports %s (%s)\n", portRange, r.comment)
+			fmt.Printf("  ✓ iptables INPUT DROP NEW tcp %s (%s)\n", portRange, r.comment)
 			added++
 		}
 	}
 	if added == 0 {
-		fmt.Println("  ✓ iptables rules already present — no changes needed")
+		fmt.Println("  ✓ iptables DROP rules already present — no changes needed")
 	}
 
 	// Persist rules so they survive reboots.
 	persistIPTables()
+}
+
+// setEphemeralPortRange shifts the kernel's local (ephemeral) port range to
+// 61000–65535, placing it above FeatherDeploy's internal port ranges
+// (10000–59999).  This is a belt-and-suspenders complement to conntrack state
+// matching: outbound connections from this server (and from containers via
+// slirp4netns) will use source ports ≥ 61000, so their response packets can
+// never be confused with unsolicited inbound traffic on our internal ports.
+func setEphemeralPortRange() {
+	const (
+		procPath    = "/proc/sys/net/ipv4/ip_local_port_range"
+		sysctlFile  = "/etc/sysctl.d/99-featherdeploy.conf"
+		wantProc    = "61000\t65535"
+		wantSetting = "net.ipv4.ip_local_port_range = 61000 65535"
+	)
+
+	// Apply immediately to the running kernel.
+	current, _ := os.ReadFile(procPath)
+	if strings.TrimSpace(string(current)) != wantProc {
+		if err := os.WriteFile(procPath, []byte(wantProc+"\n"), 0644); err != nil {
+			fmt.Printf("  WARNING: could not set ephemeral port range: %v\n", err)
+		} else {
+			fmt.Println("  ✓ ephemeral port range set to 61000-65535 (avoids internal port overlap)")
+		}
+	} else {
+		fmt.Println("  ✓ ephemeral port range already 61000-65535")
+	}
+
+	// Persist across reboots via sysctl.d (append if not already present).
+	existing, _ := os.ReadFile(sysctlFile)
+	if !strings.Contains(string(existing), "ip_local_port_range") {
+		f, err := os.OpenFile(sysctlFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+		if err == nil {
+			fmt.Fprintf(f, "%s\n", wantSetting)
+			f.Close()
+		}
+	}
 }
 
 // persistIPTables saves the current iptables ruleset for persistence.
