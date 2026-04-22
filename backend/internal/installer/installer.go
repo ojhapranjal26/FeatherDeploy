@@ -851,7 +851,12 @@ func writeSudoersFile(svcUser string) {
 		svcUser + " ALL=(root) NOPASSWD: /usr/bin/tee /etc/caddy/featherdeploy-services.caddy\n" +
 		// Allow tee-based append for the main Caddyfile (used by ensureImport fallback).
 		svcUser + " ALL=(root) NOPASSWD: /usr/bin/tee /etc/caddy/Caddyfile\n" +
-		svcUser + " ALL=(root) NOPASSWD: /usr/local/bin/featherdeploy-update\n"
+		svcUser + " ALL=(root) NOPASSWD: /usr/local/bin/featherdeploy-update\n" +
+		// Allow iptables for public database access toggle.
+		svcUser + " ALL=(root) NOPASSWD: /sbin/iptables\n" +
+		svcUser + " ALL=(root) NOPASSWD: /usr/sbin/iptables\n" +
+		svcUser + " ALL=(root) NOPASSWD: /sbin/iptables-save\n" +
+		svcUser + " ALL=(root) NOPASSWD: /usr/sbin/iptables-save\n"
 	if err := os.WriteFile(sudoersFile, []byte(content), 0440); err != nil {
 		slog.Warn("installer: could not write sudoers file", "path", sudoersFile, "err", err)
 		return

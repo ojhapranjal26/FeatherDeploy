@@ -443,6 +443,17 @@ func (h *DatabaseHandler) TogglePublic(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Run iptables via sudo so the featherdeploy service user (non-root) has
+	// the required privileges.  sudo must be available and have a NOPASSWD rule
+	// for the iptables binary (written by the installer).
+	sudoPath, _ := exec.LookPath("sudo")
+	iptCmd := func(args ...string) *exec.Cmd {
+		if sudoPath != "" {
+			return exec.Command(sudoPath, append([]string{ipt}, args...)...)
+		}
+		return exec.Command(ipt, args...)
+	}
+
 	portStr := strconv.Itoa(hostPort)
 	// Rule spec (without -C/-I/-D) for the specific port ACCEPT.
 	ruleSpec := []string{"-p", "tcp", "--dport", portStr,
@@ -452,11 +463,11 @@ func (h *DatabaseHandler) TogglePublic(w http.ResponseWriter, r *http.Request) {
 	if req.Public {
 		// Only add if not already present.
 		checkArgs := append([]string{"-C", "INPUT"}, ruleSpec...)
-		if exec.Command(ipt, checkArgs...).Run() != nil {
+		if iptCmd(checkArgs...).Run() != nil {
 			// Insert at position 1 — before the ESTABLISHED/RELATED ACCEPT and
 			// the broad DROP rules, so the ACCEPT is hit first for this port.
 			insertArgs := append([]string{"-I", "INPUT", "1"}, ruleSpec...)
-			if out, runErr := exec.Command(ipt, insertArgs...).CombinedOutput(); runErr != nil {
+			if out, runErr := iptCmd(insertArgs...).CombinedOutput(); runErr != nil {
 				slog.Error("iptables: add public DB rule", "err", runErr, "out", string(out))
 				writeJSON(w, http.StatusInternalServerError, errMap("failed to add iptables rule: "+strings.TrimSpace(string(out))))
 				return
@@ -465,7 +476,7 @@ func (h *DatabaseHandler) TogglePublic(w http.ResponseWriter, r *http.Request) {
 	} else {
 		// Remove the rule if present.
 		deleteArgs := append([]string{"-D", "INPUT"}, ruleSpec...)
-		exec.Command(ipt, deleteArgs...).Run() //nolint: ignore "not present" errors
+		iptCmd(deleteArgs...).Run() //nolint: ignore "not present" errors
 	}
 
 	npVal := 0
@@ -506,16 +517,23 @@ func (h *DatabaseHandler) TogglePublic(w http.ResponseWriter, r *http.Request) {
 
 // persistIPTablesRules saves the current iptables ruleset to disk.
 func persistIPTablesRules() {
+	sudo, _ := exec.LookPath("sudo")
+	saveCmd := func() *exec.Cmd {
+		if sudo != "" {
+			return exec.Command(sudo, "iptables-save")
+		}
+		return exec.Command("iptables-save")
+	}
 	// Debian/Ubuntu
 	if err := os.MkdirAll("/etc/iptables", 0755); err == nil {
-		if out, err := exec.Command("iptables-save").Output(); err == nil {
+		if out, err := saveCmd().Output(); err == nil {
 			os.WriteFile("/etc/iptables/rules.v4", out, 0640) //nolint
 			return
 		}
 	}
 	// RHEL/Fedora
 	if err := os.MkdirAll("/etc/sysconfig", 0755); err == nil {
-		if out, err := exec.Command("iptables-save").Output(); err == nil {
+		if out, err := saveCmd().Output(); err == nil {
 			os.WriteFile("/etc/sysconfig/iptables", out, 0640) //nolint
 		}
 	}

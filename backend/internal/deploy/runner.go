@@ -2631,7 +2631,7 @@ func podmanCmdCtx(ctx context.Context, args ...string) *exec.Cmd {
 // This avoids re-pulling node:20-alpine / python:3.12-slim on every build,
 // which saves bandwidth and minutes per deployment.
 func podmanBuild(dir string, log *logBuf, imageName string) error {
-	cmd := podmanCmd("build", "--pull=missing", "-t", imageName, ".")
+	cmd := podmanCmd("build", "--pull=missing", "--network=slirp4netns:allow_host_loopback=true", "-t", imageName, ".")
 	cmd.Dir = dir
 	var buf bytes.Buffer
 	cmd.Stdout = &buf

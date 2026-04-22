@@ -707,6 +707,10 @@ featherdeploy ALL=(root) NOPASSWD: /usr/bin/systemctl reload caddy
 featherdeploy ALL=(root) NOPASSWD: /usr/bin/tee /etc/caddy/featherdeploy-services.caddy
 featherdeploy ALL=(root) NOPASSWD: /usr/bin/tee /etc/caddy/Caddyfile
 featherdeploy ALL=(root) NOPASSWD: /usr/local/bin/featherdeploy-update
+featherdeploy ALL=(root) NOPASSWD: /sbin/iptables
+featherdeploy ALL=(root) NOPASSWD: /usr/sbin/iptables
+featherdeploy ALL=(root) NOPASSWD: /sbin/iptables-save
+featherdeploy ALL=(root) NOPASSWD: /usr/sbin/iptables-save
 SUDOEOF
 chmod 440 /etc/sudoers.d/featherdeploy-podman
 echo "  /etc/sudoers.d/featherdeploy-podman installed"
