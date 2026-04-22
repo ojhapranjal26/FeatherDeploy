@@ -129,28 +129,28 @@ func detectNode(root string) *Result {
 		r.Framework = "svelte"
 		r.Type = "frontend"
 		r.BuildCommand = "npm ci && npm run build"
-		r.StartCommand = "npx serve -s build -l 3000"
+		r.StartCommand = "npx serve -s build -l ${PORT:-3000}"
 	case deps["@angular/core"]:
 		r.Framework = "angular"
 		r.Type = "frontend"
 		r.BuildCommand = "npm ci && npx ng build --configuration=production"
-		r.StartCommand = "npx serve -s dist -l 3000"
+		r.StartCommand = "npx serve -s dist -l ${PORT:-3000}"
 	case deps["react-scripts"]:
 		// Create React App
 		r.Framework = "react"
 		r.Type = "frontend"
 		r.BuildCommand = "npm ci && npm run build"
-		r.StartCommand = "npx serve -s build -l 3000"
+		r.StartCommand = "npx serve -s build -l ${PORT:-3000}"
 	case deps["vue"]:
 		r.Framework = "vue"
 		r.Type = "frontend"
 		r.BuildCommand = "npm ci && npm run build"
-		r.StartCommand = "npx serve -s dist -l 3000"
+		r.StartCommand = "npx serve -s dist -l ${PORT:-3000}"
 	case deps["react"]:
 		r.Framework = "react"
 		r.Type = "frontend"
 		r.BuildCommand = "npm ci && npm run build"
-		r.StartCommand = "npx serve -s build -l 3000"
+		r.StartCommand = "npx serve -s build -l ${PORT:-3000}"
 	case deps["@nestjs/core"]:
 		r.Framework = "nestjs"
 		r.Type = "backend"
@@ -539,7 +539,7 @@ func detectPHP(root string) *Result {
 				Framework:    "php",
 				Version:      "8.2",
 				BuildCommand: "",
-				StartCommand: "php -S 0.0.0.0:8080 -t .",
+				StartCommand: "php -S 0.0.0.0:${PORT:-8080} -t .",
 				AppPort:      8080,
 				BaseImage:    "php:8.2-cli-alpine",
 			}
@@ -557,27 +557,27 @@ func detectPHP(root string) *Result {
 	case comp.Require["laravel/framework"] != "":
 		r.Framework = "laravel"
 		r.BuildCommand = "composer install --no-dev --optimize-autoloader && php artisan config:cache && php artisan route:cache"
-		r.StartCommand = "php artisan serve --host=0.0.0.0 --port=8080"
+		r.StartCommand = "php artisan serve --host=0.0.0.0 --port=${PORT:-8080}"
 	case comp.Require["symfony/http-kernel"] != "" || comp.Require["symfony/framework-bundle"] != "":
 		r.Framework = "symfony"
 		r.BuildCommand = "composer install --no-dev --optimize-autoloader"
-		r.StartCommand = "php -S 0.0.0.0:8080 -t public"
+		r.StartCommand = "php -S 0.0.0.0:${PORT:-8080} -t public"
 	case comp.Require["codeigniter4/framework"] != "":
 		r.Framework = "codeigniter"
 		r.BuildCommand = "composer install --no-dev --optimize-autoloader"
-		r.StartCommand = "php spark serve --host=0.0.0.0 --port=8080"
+		r.StartCommand = "php spark serve --host=0.0.0.0 --port=${PORT:-8080}"
 	case comp.Require["cakephp/cakephp"] != "":
 		r.Framework = "cakephp"
 		r.BuildCommand = "composer install --no-dev"
-		r.StartCommand = "php -S 0.0.0.0:8080 -t webroot"
+		r.StartCommand = "php -S 0.0.0.0:${PORT:-8080} -t webroot"
 	case comp.Require["slim/slim"] != "":
 		r.Framework = "slim"
 		r.BuildCommand = "composer install --no-dev"
-		r.StartCommand = "php -S 0.0.0.0:8080 -t public"
+		r.StartCommand = "php -S 0.0.0.0:${PORT:-8080} -t public"
 	default:
 		r.Framework = "php"
 		r.BuildCommand = "composer install --no-dev"
-		r.StartCommand = "php -S 0.0.0.0:8080 -t public"
+		r.StartCommand = "php -S 0.0.0.0:${PORT:-8080} -t public"
 	}
 
 	return r

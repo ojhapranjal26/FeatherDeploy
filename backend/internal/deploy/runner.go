@@ -2756,8 +2756,10 @@ func pickBaseImage(framework string) string {
 	case fw == "django" || fw == "flask" || fw == "fastapi" || fw == "python" ||
 		fw == "tornado" || fw == "aiohttp" || fw == "starlette" || fw == "sanic" || fw == "bottle":
 		return "python:3.12-slim"
-	case fw == "laravel" || fw == "symfony" || fw == "php":
+	case fw == "laravel" || fw == "symfony":
 		return "php:8.2-fpm-alpine"
+	case fw == "php" || fw == "slim" || fw == "cakephp" || fw == "codeigniter":
+		return "php:8.2-cli-alpine"
 	case fw == "rails" || fw == "ruby":
 		return "ruby:3.3-alpine"
 	case fw == "spring" || fw == "java":
