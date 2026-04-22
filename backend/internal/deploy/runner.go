@@ -485,6 +485,14 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 
 	// ── 8. Collect env vars ───────────────────────────────────────────────────
 	envArgs := collectEnvArgs(db, svcID, jwtSecret)
+	// Rewrite database alias URLs in user-supplied env vars so they resolve
+	// inside slirp4netns (e.g. @ssc:5432/ → @10.0.2.2:clusterPort/).
+	var firstDBConnURL string
+	envArgs, firstDBConnURL = rewriteAndInjectDBEnvArgs(db, projectID, jwtSecret, envArgs)
+	// Auto-inject DATABASE_URL if the user hasn't set one.
+	if firstDBConnURL != "" && !sliceContainsKeyPrefix(envArgs, "DATABASE_URL=") {
+		envArgs = append(envArgs, "-e", "DATABASE_URL="+firstDBConnURL)
+	}
 	// Auto-inject connection URLs for running databases in the same project.
 	envArgs = append(envArgs, collectProjectDBEnvArgs(db, projectID, jwtSecret)...)
 	mountArgs := collectProjectDBMountArgs(db, projectID)
@@ -958,6 +966,17 @@ func collectEnvArgs(db *sql.DB, svcID int64, jwtSecret string) []string {
 		}
 	}
 	return args
+}
+
+// sliceContainsKeyPrefix returns true if any element in s has the given prefix.
+// Used to check whether a specific env key is already present in a "-e KEY=VAL" slice.
+func sliceContainsKeyPrefix(s []string, prefix string) bool {
+	for _, v := range s {
+		if strings.HasPrefix(v, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func maskURL(u string) string {
@@ -1517,6 +1536,83 @@ func urlEscapeCredential(s string) string {
 		":", "%3A", "@", "%40", "/", "%2F",
 		"?", "%3F", "#", "%23",
 	).Replace(s)
+}
+
+// rewriteAndInjectDBEnvArgs rewrites database alias hostnames in env args to
+// the slirp4netns gateway address so connections resolve inside runtime
+// containers (e.g. @ssc:5432/ → @10.0.2.2:clusterPort/).
+// It also returns the first reachable DB connection URL for auto-injecting
+// DATABASE_URL when the user hasn't set one.
+// envArgs is the ["-e", "KEY=VALUE", ...] slice from collectEnvArgs.
+func rewriteAndInjectDBEnvArgs(db *sql.DB, projectID int64, jwtSecret string, envArgs []string) ([]string, string) {
+	type dbInfo struct {
+		alias        string
+		internalPort int
+		reachablePort int
+		connURL       string
+	}
+	rows, err := db.Query(
+		`SELECT id, name, db_type, db_name, db_user, db_password, COALESCE(host_port, 0)
+		 FROM databases WHERE project_id=? AND status='running'`, projectID)
+	if err != nil {
+		return envArgs, ""
+	}
+	defer rows.Close()
+
+	var dbs []dbInfo
+	for rows.Next() {
+		var dbID int64
+		var name, dbType, dbName, dbUser, encPass string
+		var hp int
+		if rows.Scan(&dbID, &name, &dbType, &dbName, &dbUser, &encPass, &hp) != nil || hp == 0 {
+			continue
+		}
+		clearPass := encPass
+		if strings.HasPrefix(encPass, "fdenc:") {
+			if p, decErr := appCrypto.Decrypt(encPass[len("fdenc:"):], jwtSecret); decErr == nil {
+				clearPass = p
+			}
+		}
+		alias := DBNetworkAlias(name)
+		iport := dbTypeInternalPort(dbType)
+		reachablePort := hp
+		if NetDaemon != nil {
+			if cp, ok := NetDaemon.Resolve(projectID, alias); ok {
+				reachablePort = cp
+			}
+		}
+		connURL := dbConnectionURLFDNet(dbType, dbName, dbUser, clearPass, netdaemon.SlirpGateway, reachablePort)
+		dbs = append(dbs, dbInfo{alias: alias, internalPort: iport, reachablePort: reachablePort, connURL: connURL})
+	}
+	if len(dbs) == 0 {
+		return envArgs, ""
+	}
+
+	// Rewrite alias:internalPort → 10.0.2.2:reachablePort in env var values.
+	result := make([]string, len(envArgs))
+	copy(result, envArgs)
+	for i := 0; i < len(result)-1; i++ {
+		if result[i] != "-e" {
+			continue
+		}
+		kv := result[i+1]
+		eqIdx := strings.IndexByte(kv, '=')
+		if eqIdx < 0 {
+			i++
+			continue
+		}
+		v := kv[eqIdx+1:]
+		for _, d := range dbs {
+			if d.internalPort > 0 {
+				old := fmt.Sprintf("@%s:%d/", d.alias, d.internalPort)
+				repl := fmt.Sprintf("@%s:%d/", netdaemon.SlirpGateway, d.reachablePort)
+				v = strings.ReplaceAll(v, old, repl)
+			}
+		}
+		result[i+1] = kv[:eqIdx+1] + v
+		i++
+	}
+	return result, dbs[0].connURL
 }
 
 // collectProjectDBEnvArgs queries all running databases in the same project
