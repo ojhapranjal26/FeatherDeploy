@@ -19,7 +19,8 @@ type Database struct {
 	DBVersion   string    `json:"db_version"`   // image tag e.g. "16", "8.4", "latest"
 	DBName      string    `json:"db_name"`      // database/schema name inside the engine
 	DBUser      string    `json:"db_user"`      // database user
-	HostPort    int       `json:"host_port,omitempty"`  // internal fdnet proxy port (always 127.0.0.1)
+	HostPort    int       `json:"host_port,omitempty"`    // rootlessport-allocated host port (127.0.0.1 only)
+	ClusterPort int       `json:"cluster_port,omitempty"` // fdnet proxy port bound on 0.0.0.0 — use for public access
 	Status      string    `json:"status"`               // stopped|starting|running|error
 	ContainerID string    `json:"container_id,omitempty"`
 	NetworkPublic bool    `json:"network_public"` // always false — databases are internal-only

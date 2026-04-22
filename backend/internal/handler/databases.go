@@ -87,7 +87,7 @@ func (h *DatabaseHandler) List(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, err := h.db.QueryContext(r.Context(),
 		`SELECT id, project_id, name, db_type, db_version, db_name, db_user, db_password,
-		        COALESCE(host_port, 0), status, container_id, network_public, last_error, created_at, updated_at
+		        COALESCE(host_port, 0), COALESCE(cluster_port, 0), status, container_id, network_public, last_error, created_at, updated_at
 		 FROM databases WHERE project_id=? ORDER BY created_at DESC`, projectID)
 	if err != nil {
 		slog.Error("list databases", "err", err)
@@ -102,7 +102,7 @@ func (h *DatabaseHandler) List(w http.ResponseWriter, r *http.Request) {
 		var encPass string
 		if err := rows.Scan(
 			&d.ID, &d.ProjectID, &d.Name, &d.DBType, &d.DBVersion,
-			&d.DBName, &d.DBUser, &encPass, &d.HostPort, &d.Status, &d.ContainerID,
+			&d.DBName, &d.DBUser, &encPass, &d.HostPort, &d.ClusterPort, &d.Status, &d.ContainerID,
 			&npInt, &d.LastError, &d.CreatedAt, &d.UpdatedAt,
 		); err == nil {
 			d.NetworkPublic = npInt == 1
@@ -118,10 +118,12 @@ func (h *DatabaseHandler) List(w http.ResponseWriter, r *http.Request) {
 			alias := deploy.DBNetworkAlias(d.Name)
 			d.ConnectionURL = deploy.DBConnectionURL(d.DBType, d.DBName, d.DBUser, clearPass, alias)
 			if d.NetworkPublic && d.HostPort > 0 {
-				d.PublicConnectionURL = strings.ReplaceAll(
-					deploy.DBPublicConnectionURL(d.DBType, d.DBName, d.DBUser, clearPass, d.HostPort),
-					"HOST", h.serverHost,
-				)
+				publicHost := h.dbSubdomain
+				publicPort := d.HostPort
+				if d.ClusterPort > 0 {
+					publicPort = d.ClusterPort
+				}
+				d.PublicConnectionURL = deploy.DBPublicConnectionURL(d.DBType, d.DBName, d.DBUser, clearPass, publicHost, publicPort)
 			}
 			dbs = append(dbs, d)
 		}
@@ -833,11 +835,11 @@ func (h *DatabaseHandler) getByID(w http.ResponseWriter, r *http.Request, projec
 	var encPass string
 	err := h.db.QueryRowContext(r.Context(),
 		`SELECT id, project_id, name, db_type, db_version, db_name, db_user, db_password,
-		        COALESCE(host_port, 0), status, container_id, network_public, last_error, created_at, updated_at
+		        COALESCE(host_port, 0), COALESCE(cluster_port, 0), status, container_id, network_public, last_error, created_at, updated_at
 		 FROM databases WHERE id=? AND project_id=?`, dbID, projectID,
 	).Scan(
 		&d.ID, &d.ProjectID, &d.Name, &d.DBType, &d.DBVersion, &d.DBName, &d.DBUser, &encPass,
-		&d.HostPort, &d.Status, &d.ContainerID, &npInt, &d.LastError, &d.CreatedAt, &d.UpdatedAt,
+		&d.HostPort, &d.ClusterPort, &d.Status, &d.ContainerID, &npInt, &d.LastError, &d.CreatedAt, &d.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
 		writeJSON(w, http.StatusNotFound, errMap("database not found"))
@@ -860,10 +862,12 @@ func (h *DatabaseHandler) getByID(w http.ResponseWriter, r *http.Request, projec
 	alias := deploy.DBNetworkAlias(d.Name)
 	d.ConnectionURL = deploy.DBConnectionURL(d.DBType, d.DBName, d.DBUser, clearPass, alias)
 	if d.NetworkPublic && d.HostPort > 0 {
-		d.PublicConnectionURL = strings.ReplaceAll(
-			deploy.DBPublicConnectionURL(d.DBType, d.DBName, d.DBUser, clearPass, d.HostPort),
-			"HOST", h.serverHost,
-		)
+		publicHost := h.dbSubdomain
+		publicPort := d.HostPort
+		if d.ClusterPort > 0 {
+			publicPort = d.ClusterPort
+		}
+		d.PublicConnectionURL = deploy.DBPublicConnectionURL(d.DBType, d.DBName, d.DBUser, clearPass, publicHost, publicPort)
 	}
 	d.EnvVarName = deploy.DBEnvKey(d.Name) + "_URL"
 
