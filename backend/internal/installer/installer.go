@@ -1552,6 +1552,7 @@ Restart=always
 RestartSec=5s
 StandardOutput=journal
 StandardError=journal
+SyslogIdentifier=featherdeploy
 # Delegate=yes hands off cgroup subtree management to featherdeploy/podman.
 # Without this systemd retains cgroup ownership and rootless podman cannot
 # create child cgroups for resource limits (--cpus / --memory), causing every

@@ -171,6 +171,16 @@ func main() {
 }
 
 func serve() {
+	// ─── Logging ──────────────────────────────────────────────────────────────
+	// Explicitly configure slog to write to stderr so systemd's
+	// StandardError=journal reliably captures all log output in the journal.
+	// Without this, the default handler routes through Go's log package whose
+	// writer can differ across Go versions; writing directly to stderr is
+	// unambiguous and always line-flushed by the OS.
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+	})))
+
 	// ─── Config via flags / env ───────────────────────────────────────────────
 	rqliteURL := envOrFlag("RQLITE_URL", "rqlite-url", "http://127.0.0.1:4001", "rqlite HTTP URL")
 	envFilePath := envOrFlag("ENV_FILE", "env-file", "/etc/featherdeploy/featherdeploy.env", "Path to the env file shared with nodes")
@@ -266,6 +276,11 @@ func serve() {
 	// ReconcileRegistered().  Databases whose container stopped while we were
 	// down are attempted a re-start here so services don't see a dead proxy.
 	go reconcileDatabaseStates(db)
+
+	// Re-apply iptables ACCEPT rules for databases marked as public.
+	// iptables rules are in-memory and lost on every server restart/update,
+	// so we need to restore them from the database state each time we start.
+	go reconcilePublicDBIPTables(db)
 
 	// Reload Caddy after every process restart so the domain→port mapping in
 	// /etc/caddy/featherdeploy-services.caddy is always current with the DB.
@@ -829,6 +844,61 @@ func reconcileDatabaseStates(db *sql.DB) {
 			`UPDATE databases SET status=?, updated_at=datetime('now') WHERE id=?`,
 			wantedStatus, e.id)
 		slog.Info("startup reconcile: synced database", "db_id", e.id, "container_state", state, "db_status", wantedStatus)
+	}
+}
+
+// reconcilePublicDBIPTables re-applies iptables ACCEPT rules for all databases
+// that have network_public=1. iptables rules live only in kernel memory and are
+// wiped on every server restart or update, so we must restore them from the DB
+// state each time the process starts.
+func reconcilePublicDBIPTables(db *sql.DB) {
+	ipt, err := exec.LookPath("iptables")
+	if err != nil {
+		return // iptables not available on this host
+	}
+	sudo, _ := exec.LookPath("sudo")
+	iptCmd := func(args ...string) *exec.Cmd {
+		if sudo != "" {
+			return exec.Command(sudo, append([]string{ipt}, args...)...)
+		}
+		return exec.Command(ipt, args...)
+	}
+
+	rows, err := db.Query(
+		`SELECT id, COALESCE(host_port, 0) FROM databases WHERE network_public=1 AND host_port IS NOT NULL`)
+	if err != nil {
+		slog.Warn("startup reconcile: query public databases", "err", err)
+		return
+	}
+	defer rows.Close()
+
+	restored := 0
+	for rows.Next() {
+		var dbID int64
+		var hostPort int
+		if rows.Scan(&dbID, &hostPort) != nil || hostPort == 0 {
+			continue
+		}
+		portStr := strconv.Itoa(hostPort)
+		ruleSpec := []string{"-p", "tcp", "--dport", portStr,
+			"-m", "comment", "--comment", fmt.Sprintf("featherdeploy db-%d public", dbID),
+			"-j", "ACCEPT"}
+		checkArgs := append([]string{"-C", "INPUT"}, ruleSpec...)
+		if iptCmd(checkArgs...).Run() == nil {
+			continue // already present
+		}
+		insertArgs := append([]string{"-I", "INPUT", "1"}, ruleSpec...)
+		if out, runErr := iptCmd(insertArgs...).CombinedOutput(); runErr != nil {
+			slog.Warn("startup reconcile: could not restore iptables rule for public DB",
+				"db_id", dbID, "port", hostPort, "err", runErr, "out", strings.TrimSpace(string(out)))
+		} else {
+			slog.Info("startup reconcile: restored iptables ACCEPT for public DB",
+				"db_id", dbID, "port", hostPort)
+			restored++
+		}
+	}
+	if restored > 0 {
+		slog.Info("startup reconcile: iptables rules for public DBs restored", "count", restored)
 	}
 }
 
