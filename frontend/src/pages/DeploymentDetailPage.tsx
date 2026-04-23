@@ -312,7 +312,7 @@ export function DeploymentDetailPage() {
                 <div className="text-right font-mono">
                   {isActive
                     ? formatDuration(deployment?.started_at ?? deployment?.created_at, undefined, now)
-                    : formatDuration(deployment?.started_at, deployment?.finished_at)}
+                    : formatDuration(deployment?.started_at ?? deployment?.created_at, deployment?.finished_at)}
                   {isActive && (
                     <span className="ml-1 inline-block w-1 bg-primary animate-pulse rounded-sm align-middle" style={{ height: '8px' }} />
                   )}

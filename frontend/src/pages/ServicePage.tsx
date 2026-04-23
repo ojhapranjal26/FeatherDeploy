@@ -840,7 +840,10 @@ export function ServicePage() {
             )}
             <div className="rounded-xl border divide-y overflow-hidden">
               {[...(deploymentsData?.deployments ?? [])]
-                .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+                .sort((a, b) => {
+                  const tDiff = new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+                  return tDiff !== 0 ? tDiff : b.id - a.id
+                })
                 .slice(0, 5)
                 .map((d, idx) => (
                   <div
@@ -874,7 +877,7 @@ export function ServicePage() {
                       <span className="flex items-center gap-1 font-mono tabular-nums">
                         <Clock className="h-3 w-3" />
                         {formatDuration(
-                          d.started_at ?? ((d.status === 'running' || d.status === 'pending') ? d.created_at : undefined),
+                          d.started_at ?? d.created_at,
                           d.finished_at,
                           (d.status === 'running' || d.status === 'pending') ? depNow : undefined,
                         )}
@@ -909,7 +912,10 @@ export function ServicePage() {
           ) : (
             <div className="rounded-xl border divide-y overflow-hidden">
               {[...(deploymentsData?.deployments ?? [])]
-                .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+                .sort((a, b) => {
+                  const tDiff = new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+                  return tDiff !== 0 ? tDiff : b.id - a.id
+                })
                 .map((d, idx) => {
                   const isLatest = idx === 0
                   return (
@@ -970,7 +976,7 @@ export function ServicePage() {
                         <span className="flex items-center gap-1 font-mono tabular-nums">
                           <Clock className="h-3 w-3" />
                           {formatDuration(
-                            d.started_at ?? ((d.status === 'running' || d.status === 'pending') ? d.created_at : undefined),
+                            d.started_at ?? d.created_at,
                             d.finished_at,
                             (d.status === 'running' || d.status === 'pending') ? depNow : undefined,
                           )}
@@ -1483,10 +1489,26 @@ const fmtBytes = (b: number) => {
   return `${b} B`
 }
 
-const fmtHour = (h: number) => {
-  const suffix = h < 12 ? 'AM' : 'PM'
-  const display = h % 12 === 0 ? 12 : h % 12
-  return `${display}${suffix}`
+// Convert a UTC hour (0–23) into a display label adjusted for the given IANA timezone.
+// e.g. UTC hour 8 → "2PM" for Asia/Kolkata (UTC+5:30)
+function utcHourToTzLabel(utcHour: number, tz: string): string {
+  // Build a fake Date at that UTC hour on a reference day and convert to timezone
+  const ref = new Date(Date.UTC(2000, 0, 1, utcHour, 0, 0))
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: tz,
+      hour: 'numeric',
+      hour12: true,
+    }).formatToParts(ref)
+    const h = parts.find(p => p.type === 'hour')?.value ?? String(utcHour)
+    const period = parts.find(p => p.type === 'dayPeriod')?.value?.toUpperCase() ?? ''
+    return `${h}${period}`
+  } catch {
+    // fallback: plain UTC
+    const suffix = utcHour < 12 ? 'AM' : 'PM'
+    const display = utcHour % 12 === 0 ? 12 : utcHour % 12
+    return `${display}${suffix}`
+  }
 }
 
 function ContainerStatsPanel({
@@ -1528,7 +1550,7 @@ function ContainerStatsPanel({
   const hNetData  = (histData?.points ?? []).map(p => ({ t: p.ts, vIn: p.net_in, vOut: p.net_out }))
   const hBlkData  = (histData?.points ?? []).map(p => ({ t: p.ts, vIn: p.blk_in, vOut: p.blk_out }))
   const hourlyData = (histData?.hourly_avg ?? []).map(h => ({
-    hour: fmtHour(h.hour),
+    hour: utcHourToTzLabel(h.hour, timezone),
     rawHour: h.hour,
     cpu: h.cpu_avg,
     mem: h.mem_avg,
@@ -1929,14 +1951,14 @@ function ContainerStatsPanel({
                   {peakH && (
                     <p className="text-xs text-muted-foreground">
                       Peak hour{' '}
-                      <span className="font-medium text-foreground">{fmtHour(peakH.hour)}</span>
+                      <span className="font-medium text-foreground">{utcHourToTzLabel(peakH.hour, timezone)}</span>
                       {' '}— {peakH.cpu_avg.toFixed(1)}% CPU avg
                     </p>
                   )}
                 </div>
                 <ResponsiveContainer width="100%" height={160}>
                   <BarChart
-                    data={m.hourly.map(h => ({ hour: fmtHour(h.hour), cpu: h.cpu_avg, mem: h.mem_avg, samples: h.samples }))}
+                    data={m.hourly.map(h => ({ hour: utcHourToTzLabel(h.hour, timezone), cpu: h.cpu_avg, mem: h.mem_avg, samples: h.samples }))}
                     margin={{ top: 4, right: 8, bottom: 0, left: 0 }}
                     barGap={2}
                   >

@@ -96,13 +96,15 @@ func (h *StatsHistoryHandler) History(w http.ResponseWriter, r *http.Request) {
 	var all []statPoint
 	for rows.Next() {
 		var p statPoint
-		var recAt string
+		var recAt flexTime
 		if err := rows.Scan(&recAt, &p.CPUPct, &p.MemPct, &p.MemUsed, &p.MemTotal,
 			&p.NetIn, &p.NetOut, &p.BlkIn, &p.BlkOut, &p.PIDs); err != nil {
 			continue
 		}
-		t, _ := time.ParseInLocation("2006-01-02 15:04:05", recAt, time.UTC)
-		p.Ts = t.UnixMilli()
+		if !recAt.Valid {
+			continue
+		}
+		p.Ts = recAt.Time.UnixMilli()
 		all = append(all, p)
 	}
 	if all == nil {

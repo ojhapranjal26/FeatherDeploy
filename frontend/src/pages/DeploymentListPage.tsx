@@ -49,10 +49,12 @@ export function DeploymentListPage() {
     refetchInterval: 5000,
   })
 
-  // Sort newest first on the client side — the API may not guarantee order.
-  const deployments = [...(data?.deployments ?? [])].sort(
-    (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
-  )
+  // Sort newest first — backend already orders by created_at DESC, id DESC;
+  // the client re-sorts as a safety net using id as the authoritative tiebreaker.
+  const deployments = [...(data?.deployments ?? [])].sort((a, b) => {
+    const tDiff = new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+    return tDiff !== 0 ? tDiff : b.id - a.id
+  })
 
   // Live ticker — ticks every second while any deployment is active so the
   // elapsed-time counter updates smoothly without waiting for the next refetch.
@@ -155,7 +157,7 @@ export function DeploymentListPage() {
                     <span className="flex items-center gap-1 shrink-0 tabular-nums font-mono">
                       <Clock className="h-3 w-3" />
                       {formatDuration(
-                        d.started_at ?? ((d.status === 'running' || d.status === 'pending') ? d.created_at : undefined),
+                        d.started_at ?? d.created_at,
                         d.finished_at,
                         (d.status === 'running' || d.status === 'pending') ? now : undefined,
                       )}

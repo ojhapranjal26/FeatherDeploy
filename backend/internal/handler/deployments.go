@@ -45,7 +45,7 @@ func (h *DeploymentHandler) List(w http.ResponseWriter, r *http.Request) {
 	rows, err := h.db.QueryContext(r.Context(),
 		`SELECT id, service_id, triggered_by, deploy_type, repo_url, commit_sha, branch,
 		        artifact_path, status, error_message, started_at, finished_at, created_at
-		 FROM deployments WHERE service_id=? ORDER BY created_at DESC LIMIT ?`,
+		 FROM deployments WHERE service_id=? ORDER BY created_at DESC, id DESC LIMIT ?`,
 		svcID, limit)
 	if err != nil {
 		slog.Error("list deployments", "err", err)
@@ -375,41 +375,49 @@ func (h *DeploymentHandler) ContainerLogs(w http.ResponseWriter, r *http.Request
 }
 
 func scanDeployment(row scanner, d *model.Deployment) error {
-	var startedAt sql.NullTime
-	var finishedAt sql.NullTime
+	var startedAt flexTime
+	var finishedAt flexTime
+	var createdAt flexTime
 	err := row.Scan(&d.ID, &d.ServiceID, &d.TriggeredBy, &d.DeployType,
 		&d.RepoURL, &d.CommitSHA, &d.Branch, &d.ArtifactPath, &d.Status,
-		&d.ErrorMessage, &startedAt, &finishedAt, &d.CreatedAt)
+		&d.ErrorMessage, &startedAt, &finishedAt, &createdAt)
 	if err != nil {
 		return err
 	}
 	if startedAt.Valid {
-		t := startedAt.Time.UTC()
+		t := startedAt.Time
 		d.StartedAt = &t
 	}
 	if finishedAt.Valid {
-		t := finishedAt.Time.UTC()
+		t := finishedAt.Time
 		d.FinishedAt = &t
+	}
+	if createdAt.Valid {
+		d.CreatedAt = createdAt.Time
 	}
 	return nil
 }
 
 func scanDeploymentRow(row *sql.Row, d *model.Deployment) error {
-	var startedAt sql.NullTime
-	var finishedAt sql.NullTime
+	var startedAt flexTime
+	var finishedAt flexTime
+	var createdAt flexTime
 	err := row.Scan(&d.ID, &d.ServiceID, &d.TriggeredBy, &d.DeployType,
 		&d.RepoURL, &d.CommitSHA, &d.Branch, &d.ArtifactPath, &d.Status,
-		&d.ErrorMessage, &startedAt, &finishedAt, &d.CreatedAt)
+		&d.ErrorMessage, &startedAt, &finishedAt, &createdAt)
 	if err != nil {
 		return err
 	}
 	if startedAt.Valid {
-		t := startedAt.Time.UTC()
+		t := startedAt.Time
 		d.StartedAt = &t
 	}
 	if finishedAt.Valid {
-		t := finishedAt.Time.UTC()
+		t := finishedAt.Time
 		d.FinishedAt = &t
+	}
+	if createdAt.Valid {
+		d.CreatedAt = createdAt.Time
 	}
 	return nil
 }
