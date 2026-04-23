@@ -5,7 +5,7 @@ import {
   Plus, ChevronLeft, Rocket, Settings2, Trash2,
   ExternalLink, GitBranch, Terminal, Database,
   Globe, AlertTriangle, Users, UserMinus, Loader2,
-  Play, Square, Download, Copy, BarChart2, RotateCcw, Lock, Unlock,
+  Play, Square, Download, Copy, BarChart2, RotateCcw, Lock, Unlock, Eye, EyeOff, Upload,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { projectsApi, usersApi, type ProjectMember } from '@/api/projects'
@@ -276,7 +276,11 @@ function DatabaseCard({ database, projectId, canEdit }: { database: DatabaseReco
   const [logsOpen, setLogsOpen] = useState(false)
   const [statsOpen, setStatsOpen] = useState(false)
   const [editOpen, setEditOpen] = useState(false)
+  const [restoreOpen, setRestoreOpen] = useState(false)
   const [editVersion, setEditVersion] = useState(database.db_version)
+  const [showPrivateUrl, setShowPrivateUrl] = useState(false)
+  const [showPublicUrl, setShowPublicUrl] = useState(false)
+  const [restoreFile, setRestoreFile] = useState<File | null>(null)
 
 
   const copyToClipboard = (text: string, label: string) => {
@@ -367,6 +371,17 @@ function DatabaseCard({ database, projectId, canEdit }: { database: DatabaseReco
     onError: (err: unknown) => toast.error((err as any)?.response?.data?.error ?? 'Failed to update database.'),
   })
 
+  const restoreMutation = useMutation({
+    mutationFn: (file: File) => databasesApi.restoreBackup(projectId, database.id, file),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['databases', projectId] })
+      setRestoreOpen(false)
+      setRestoreFile(null)
+      toast.success('Backup restored. Database is restarting.')
+    },
+    onError: (err: unknown) => toast.error((err as any)?.response?.data?.error ?? 'Failed to restore backup.'),
+  })
+
   const logsQuery = useQuery({
     queryKey: ['database-logs', database.id],
     queryFn: () => databasesApi.getLogs(projectId, database.id),
@@ -375,7 +390,7 @@ function DatabaseCard({ database, projectId, canEdit }: { database: DatabaseReco
   })
 
   const isSQLite = database.db_type === 'sqlite'
-  const isBusy = startMutation.isPending || stopMutation.isPending || restartMutation.isPending || deleteMutation.isPending || backupMutation.isPending || backupAndDeleteMutation.isPending
+  const isBusy = startMutation.isPending || stopMutation.isPending || restartMutation.isPending || deleteMutation.isPending || backupMutation.isPending || backupAndDeleteMutation.isPending || restoreMutation.isPending
 
   return (
     <>
@@ -427,6 +442,11 @@ function DatabaseCard({ database, projectId, canEdit }: { database: DatabaseReco
                 <DropdownMenuItem onClick={() => backupMutation.mutate()} disabled={backupMutation.isPending || backupAndDeleteMutation.isPending}>
                   <Download className="mr-2 h-3.5 w-3.5" /> Download backup
                 </DropdownMenuItem>
+                {!isSQLite && (
+                  <DropdownMenuItem onClick={() => { setRestoreFile(null); setRestoreOpen(true) }} disabled={isBusy}>
+                    <Upload className="mr-2 h-3.5 w-3.5" /> Restore from backup
+                  </DropdownMenuItem>
+                )}
                 {!isSQLite && (
                   <DropdownMenuItem
                     onClick={() => togglePublicMutation.mutate(!database.network_public)}
@@ -493,15 +513,27 @@ function DatabaseCard({ database, projectId, canEdit }: { database: DatabaseReco
             <div className="rounded-md border bg-muted/50 px-2 py-1.5">
               <div className="flex items-center justify-between gap-1">
                 <p className="text-[10px] uppercase tracking-wide text-muted-foreground">Connection (private)</p>
-                <button
-                  className="shrink-0 text-muted-foreground hover:text-foreground transition-colors"
-                  title="Copy connection URL"
-                  onClick={() => copyToClipboard(database.connection_url!, 'Private URL')}
-                >
-                  <Copy className="h-3 w-3" />
-                </button>
+                <div className="flex items-center gap-1">
+                  <button
+                    className="shrink-0 text-muted-foreground hover:text-foreground transition-colors"
+                    title={showPrivateUrl ? 'Hide URL' : 'Reveal URL'}
+                    onClick={() => setShowPrivateUrl(v => !v)}
+                  >
+                    {showPrivateUrl ? <EyeOff className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
+                  </button>
+                  <button
+                    className="shrink-0 text-muted-foreground hover:text-foreground transition-colors"
+                    title="Copy connection URL"
+                    onClick={() => copyToClipboard(database.connection_url!, 'Private URL')}
+                  >
+                    <Copy className="h-3 w-3" />
+                  </button>
+                </div>
               </div>
-              <p className="mt-1 break-all font-mono text-[11px] text-foreground">{database.connection_url}</p>
+              {showPrivateUrl
+                ? <p className="mt-1 break-all font-mono text-[11px] text-foreground">{database.connection_url}</p>
+                : <p className="mt-1 font-mono text-[11px] text-muted-foreground select-none tracking-widest">{'•'.repeat(28)}</p>
+              }
             </div>
           )}
 
@@ -509,15 +541,27 @@ function DatabaseCard({ database, projectId, canEdit }: { database: DatabaseReco
             <div className="rounded-md border border-amber-200 bg-amber-50/80 px-2 py-1.5 text-amber-950">
               <div className="flex items-center justify-between gap-1">
                 <p className="text-[10px] uppercase tracking-wide text-amber-800">Public access</p>
-                <button
-                  className="shrink-0 text-amber-700 hover:text-amber-900 transition-colors"
-                  title="Copy public connection URL"
-                  onClick={() => copyToClipboard(database.public_connection_url!, 'Public URL')}
-                >
-                  <Copy className="h-3 w-3" />
-                </button>
+                <div className="flex items-center gap-1">
+                  <button
+                    className="shrink-0 text-amber-700 hover:text-amber-900 transition-colors"
+                    title={showPublicUrl ? 'Hide URL' : 'Reveal URL'}
+                    onClick={() => setShowPublicUrl(v => !v)}
+                  >
+                    {showPublicUrl ? <EyeOff className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
+                  </button>
+                  <button
+                    className="shrink-0 text-amber-700 hover:text-amber-900 transition-colors"
+                    title="Copy public connection URL"
+                    onClick={() => copyToClipboard(database.public_connection_url!, 'Public URL')}
+                  >
+                    <Copy className="h-3 w-3" />
+                  </button>
+                </div>
               </div>
-              <p className="mt-1 break-all font-mono text-[11px]">{database.public_connection_url}</p>
+              {showPublicUrl
+                ? <p className="mt-1 break-all font-mono text-[11px]">{database.public_connection_url}</p>
+                : <p className="mt-1 font-mono text-[11px] text-amber-700/50 select-none tracking-widest">{'•'.repeat(28)}</p>
+              }
             </div>
           )}
 
@@ -664,6 +708,53 @@ function DatabaseCard({ database, projectId, canEdit }: { database: DatabaseReco
           />
           <DialogFooter>
             <Button variant="outline" size="sm" onClick={() => setStatsOpen(false)}>Close</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Restore from backup dialog */}
+      <Dialog open={restoreOpen} onOpenChange={open => { if (!restoreMutation.isPending) { setRestoreOpen(open); if (!open) setRestoreFile(null) } }}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Upload className="h-4 w-4" />
+              Restore from backup
+            </DialogTitle>
+            <DialogDescription>
+              Upload a <span className="font-mono">.tar</span> backup file exported from FeatherDeploy.
+              The database will be stopped, data replaced, then restarted.
+              <span className="block mt-1 text-destructive font-medium">This overwrites all existing data in <strong>{database.name}</strong>.</span>
+            </DialogDescription>
+          </DialogHeader>
+          <div className="py-2 space-y-3">
+            <label className="flex flex-col gap-1.5">
+              <span className="text-sm font-medium">Backup file (.tar)</span>
+              <input
+                type="file"
+                accept=".tar,application/x-tar"
+                className="block w-full text-sm text-muted-foreground file:mr-3 file:py-1 file:px-3 file:rounded-md file:border file:border-input file:text-sm file:font-medium file:bg-background file:text-foreground hover:file:bg-accent cursor-pointer"
+                onChange={e => setRestoreFile(e.target.files?.[0] ?? null)}
+              />
+            </label>
+            {restoreFile && (
+              <p className="text-xs text-muted-foreground font-mono truncate">
+                {restoreFile.name} ({(restoreFile.size / 1024 / 1024).toFixed(1)} MB)
+              </p>
+            )}
+          </div>
+          <DialogFooter className="gap-2">
+            <Button variant="ghost" size="sm" onClick={() => setRestoreOpen(false)} disabled={restoreMutation.isPending}>Cancel</Button>
+            <Button
+              variant="destructive"
+              size="sm"
+              disabled={!restoreFile || restoreMutation.isPending}
+              onClick={() => restoreFile && restoreMutation.mutate(restoreFile)}
+            >
+              {restoreMutation.isPending
+                ? <><Loader2 className="mr-1.5 h-3 w-3 animate-spin" />Restoring…</>
+                : 'Restore backup'
+              }
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

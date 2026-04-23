@@ -2227,6 +2227,51 @@ func CreateDatabaseBackup(db *sql.DB, jwtSecret string, dbID int64) (string, str
 	return tmpFile.Name(), downloadName, nil
 }
 
+// RestoreDatabaseBackup replaces the database volume's contents with the
+// supplied .tar backup file (as produced by CreateDatabaseBackup /
+// "podman volume export"). The database is stopped before the import and
+// restarted afterwards.
+//
+// backupPath must be the path to a local .tar file that is readable by the
+// featherdeploy process. The handler that calls this function is responsible
+// for writing the uploaded bytes to a temp file and cleaning it up.
+func RestoreDatabaseBackup(db *sql.DB, jwtSecret string, dbID int64, backupPath string) error {
+	var name, dbType, status string
+	err := db.QueryRow(
+		`SELECT name, db_type, status FROM databases WHERE id=?`, dbID,
+	).Scan(&name, &dbType, &status)
+	if err != nil {
+		return fmt.Errorf("load database metadata: %w", err)
+	}
+	if dbType == "sqlite" {
+		return fmt.Errorf("restore is not supported for SQLite databases; replace the volume file directly")
+	}
+
+	wasRunning := status == "running"
+	if wasRunning {
+		if err := StopDatabase(db, dbID); err != nil {
+			return fmt.Errorf("stop database before restore: %w", err)
+		}
+	}
+
+	cmd := podmanCmd("volume", "import", dbVolumeName(dbID), backupPath)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if wasRunning {
+			_ = StartDatabase(db, jwtSecret, dbID)
+		}
+		return fmt.Errorf("import database volume: %v — %s", err, strings.TrimSpace(stderr.String()))
+	}
+
+	if wasRunning {
+		if err := StartDatabase(db, jwtSecret, dbID); err != nil {
+			return fmt.Errorf("restart database after restore: %w", err)
+		}
+	}
+	return nil
+}
+
 // GetDatabaseLogs returns the last 200 lines of stdout+stderr from the
 // database container. Returns an error when the container doesn't exist
 // (e.g. start failed before the container was created).

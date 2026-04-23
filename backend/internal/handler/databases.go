@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -312,6 +313,62 @@ func (h *DatabaseHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	}
 	deploy.CleanupProjectRuntimeIfUnused(h.db, projectID)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// POST /api/projects/{projectID}/databases/{databaseID}/restore
+// Accepts a multipart/form-data upload with a single "file" field containing
+// a .tar volume backup (as produced by the Backup endpoint). The database is
+// stopped, the volume is replaced with the backup content, then the database
+// is restarted.
+func (h *DatabaseHandler) Restore(w http.ResponseWriter, r *http.Request) {
+	projectID, err := strconv.ParseInt(r.PathValue("projectID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errMap("invalid projectID"))
+		return
+	}
+	dbID, err := strconv.ParseInt(r.PathValue("databaseID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errMap("invalid databaseID"))
+		return
+	}
+	if !h.databaseExists(r, projectID, dbID) {
+		writeJSON(w, http.StatusNotFound, errMap("database not found"))
+		return
+	}
+
+	// Limit the multipart parse to 32 MB in-memory; the rest spills to disk
+	// automatically, so large backups are handled without OOM risk.
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		writeJSON(w, http.StatusBadRequest, errMap("failed to parse multipart form"))
+		return
+	}
+	uploadFile, _, err := r.FormFile("file")
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errMap("missing 'file' field in form"))
+		return
+	}
+	defer uploadFile.Close()
+
+	// Stream the upload to a temp file so we can pass a path to podman.
+	tmp, err := os.CreateTemp("", fmt.Sprintf("fd-db-%d-restore-*.tar", dbID))
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errMap("failed to create temp file"))
+		return
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := io.Copy(tmp, uploadFile); err != nil {
+		tmp.Close()
+		writeJSON(w, http.StatusInternalServerError, errMap("failed to write backup data"))
+		return
+	}
+	tmp.Close()
+
+	if err := deploy.RestoreDatabaseBackup(h.db, h.jwtSecret, dbID, tmp.Name()); err != nil {
+		slog.Error("restore database", "db_id", dbID, "err", err)
+		writeJSON(w, http.StatusInternalServerError, errMap("failed to restore database: "+err.Error()))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "restored"})
 }
 
 // POST /api/projects/{projectID}/databases/{databaseID}/start

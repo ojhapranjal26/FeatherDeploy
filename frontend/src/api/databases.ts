@@ -113,4 +113,18 @@ export const databasesApi = {
         { public: enable },
       )
       .then((r) => r.data),
+
+  restoreBackup: (
+    projectId: string | number,
+    databaseId: string | number,
+    file: File,
+  ): Promise<{ status: string }> => {
+    const form = new FormData()
+    form.append('file', file)
+    return client
+      .post<{ status: string }>(`/projects/${projectId}/databases/${databaseId}/restore`, form, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      })
+      .then((r) => r.data)
+  },
 }
