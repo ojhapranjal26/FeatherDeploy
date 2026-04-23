@@ -477,10 +477,12 @@ install_deps_apt() {
   else
     echo "  Caddy already installed -- skipping"
   fi
-  if ! command -v node >/dev/null 2>&1 || [ "$(node --version | cut -d. -f1 | tr -d v)" -lt 18 ]; then
-    echo "==> Installing Node.js 20..."
-    curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+  if ! command -v node >/dev/null 2>&1 || [ "$(node --version | cut -d. -f1 | tr -d v)" -lt 22 ]; then
+    echo "==> Installing Node.js 22 LTS..."
+    curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
     apt-get install -y nodejs
+    # Upgrade npm to latest stable bundled with Node 22
+    npm install -g npm@latest 2>/dev/null || true
   fi
   install_go_tarball
   configure_crun
@@ -494,7 +496,11 @@ install_deps_dnf() {
   command -v crun   >/dev/null 2>&1 || dnf install -y crun 2>/dev/null || echo '  WARNING: crun not available via dnf'
   command -v caddy  >/dev/null 2>&1 || dnf install -y caddy 2>/dev/null || \
     (dnf copr enable -y @caddy/caddy 2>/dev/null && dnf install -y caddy) || echo '  WARNING: caddy not via dnf'
-  command -v node >/dev/null 2>&1 || { dnf module enable -y nodejs:20 2>/dev/null || true; dnf install -y nodejs npm; }
+  if ! command -v node >/dev/null 2>&1 || [ "$(node --version | cut -d. -f1 | tr -d v)" -lt 22 ]; then
+    dnf module enable -y nodejs:22 2>/dev/null || curl -fsSL https://rpm.nodesource.com/setup_22.x | bash - 2>/dev/null || true
+    dnf install -y nodejs npm
+    npm install -g npm@latest 2>/dev/null || true
+  fi
   install_go_tarball ; configure_crun
 }
 
@@ -505,7 +511,11 @@ install_deps_yum() {
   command -v podman >/dev/null 2>&1 || yum install -y podman
   command -v crun   >/dev/null 2>&1 || yum install -y crun 2>/dev/null || echo '  WARNING: crun not available via yum'
   command -v caddy  >/dev/null 2>&1 || (yum install -y yum-plugin-copr && yum copr enable -y @caddy/caddy && yum install -y caddy) || echo '  WARNING: caddy not via yum'
-  command -v node >/dev/null 2>&1 || { curl -fsSL https://rpm.nodesource.com/setup_20.x | bash -; yum install -y nodejs; }
+  if ! command -v node >/dev/null 2>&1 || [ "$(node --version | cut -d. -f1 | tr -d v)" -lt 22 ]; then
+    curl -fsSL https://rpm.nodesource.com/setup_22.x | bash -
+    yum install -y nodejs
+    npm install -g npm@latest 2>/dev/null || true
+  fi
   install_go_tarball ; configure_crun
 }
 
@@ -534,7 +544,7 @@ install_go_tarball() {
     { [ "$major" -lt 1 ] || { [ "$major" -eq 1 ] && [ "$minor" -lt 21 ]; }; } && need_go=true || true
   fi
   if $need_go; then
-    local GO_VER="1.22.4" GO_TAR
+    local GO_VER="1.24.3" GO_TAR
     GO_TAR="go${GO_VER}.linux-amd64.tar.gz"
     echo "==> Installing Go ${GO_VER}..."
     curl -fsSL "https://dl.google.com/go/${GO_TAR}" -o "/tmp/${GO_TAR}"
@@ -554,7 +564,7 @@ elif command -v dnf     >/dev/null 2>&1; then install_deps_dnf
 elif command -v yum     >/dev/null 2>&1; then install_deps_yum
 elif command -v apk     >/dev/null 2>&1; then install_deps_apk
 elif command -v pacman  >/dev/null 2>&1; then install_deps_pacman
-else echo 'WARNING: no supported package manager. Install git/curl/gcc/crun/Node.js 20/Go 1.22+ manually.'; fi
+else echo 'WARNING: no supported package manager. Install git/curl/gcc/crun/Node.js 22/Go 1.24+ manually.'; fi
 
 export PATH="/usr/local/go/bin:$PATH"
 
