@@ -1,10 +1,11 @@
+import { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import {
   ChevronLeft, Clock, GitCommit,
   CheckCircle2, Circle, Loader2, XCircle, AlertTriangle,
   Key, GitBranch, Wrench, Box, Layers, Rocket, CheckCheck,
-  StopCircle,
+  StopCircle, Hourglass,
 } from 'lucide-react'
 import { deploymentsApi } from '@/api/deployments'
 import { DeploymentStatusBadge } from '@/components/DeploymentStatusBadge'
@@ -115,11 +116,12 @@ function StepsSkeleton() {
 
 // ─── Full pipeline component ──────────────────────────────────────────────────
 function DeploymentPipeline({
-  lines, done, failed,
+  lines, done, failed, isQueued,
 }: {
   lines: { line?: string }[]
   done: boolean
   failed: boolean
+  isQueued?: boolean
 }) {
   const logText = lines.map(l => (l.line ?? '').toLowerCase()).join('\n')
   const stepReached = PIPELINE_STEPS.map(s => logText.includes(s.prefix.toLowerCase()))
@@ -135,8 +137,17 @@ function DeploymentPipeline({
     return (
       <div className="space-y-1.5">
         <p className="text-xs text-muted-foreground mb-3 flex items-center gap-1.5">
-          <Loader2 className="h-3 w-3 animate-spin" />
-          Waiting for deployment to start…
+          {isQueued ? (
+            <>
+              <Hourglass className="h-3 w-3 shrink-0" />
+              Queued — waiting for a worker to pick up this deployment…
+            </>
+          ) : (
+            <>
+              <Loader2 className="h-3 w-3 animate-spin" />
+              Waiting for deployment to start…
+            </>
+          )}
         </p>
         <StepsSkeleton />
       </div>
@@ -198,6 +209,24 @@ function ResultBanner({ status }: { status?: string }) {
   return null
 }
 
+// ─── Queued banner ────────────────────────────────────────────────────────────
+function QueuedBanner({ waitingSecs }: { waitingSecs: number }) {
+  const m = Math.floor(waitingSecs / 60)
+  const s = waitingSecs % 60
+  const label = m > 0 ? `${m}m ${s}s` : `${s}s`
+  return (
+    <div className="flex items-center gap-2.5 rounded-xl border border-amber-500/30 bg-amber-500/8 px-4 py-3">
+      <Hourglass className="h-5 w-5 text-amber-500 shrink-0" />
+      <div>
+        <p className="text-sm font-semibold text-amber-500">Deployment queued</p>
+        <p className="text-xs text-amber-500/70 mt-0.5">
+          Waiting for an available worker… {label} in queue
+        </p>
+      </div>
+    </div>
+  )
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 // formatDate and formatDuration are imported from @/lib/dateFormat
 
@@ -224,8 +253,22 @@ export function DeploymentDetailPage() {
   const { lines, done } = useDeploymentLogs(projectId!, serviceId!, deploymentId!)
 
   const isActive = deployment?.status === 'pending' || deployment?.status === 'running'
+  const isQueued = deployment?.status === 'pending'
   const isFailed = deployment?.status === 'failed'
   const isSuccess = deployment?.status === 'success'
+
+  // ── Live timer: ticks every second while deployment is active ──────────────
+  const [now, setNow] = useState(Date.now())
+  useEffect(() => {
+    if (!isActive) return
+    const id = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [isActive])
+
+  // How long has the deployment been queued?
+  const queuedSecs = isQueued && deployment?.created_at
+    ? Math.max(0, Math.floor((now - new Date(deployment.created_at).getTime()) / 1000))
+    : 0
 
   return (
     <div className="space-y-4 pb-8">
@@ -267,7 +310,12 @@ export function DeploymentDetailPage() {
                   <span className="truncate">{formatDate(deployment?.started_at ?? deployment?.created_at, timezone)}</span>
                 </div>
                 <div className="text-right font-mono">
-                  {formatDuration(deployment?.started_at, deployment?.finished_at)}
+                  {isActive && deployment?.status === 'running'
+                    ? formatDuration(deployment?.started_at, undefined, now)
+                    : formatDuration(deployment?.started_at, deployment?.finished_at)}
+                  {isActive && deployment?.status === 'running' && (
+                    <span className="ml-1 inline-block w-1 bg-primary animate-pulse rounded-sm align-middle" style={{ height: '8px' }} />
+                  )}
                 </div>
               </div>
             </div>
@@ -281,10 +329,12 @@ export function DeploymentDetailPage() {
                 lines={lines}
                 done={done && !isFailed}
                 failed={isFailed}
+                isQueued={isQueued}
               />
             </div>
 
-            {/* Result banner */}
+            {/* Status banner */}
+            {isQueued && <QueuedBanner waitingSecs={queuedSecs} />}
             {(isSuccess || isFailed) && <ResultBanner status={deployment?.status} />}
           </div>
 

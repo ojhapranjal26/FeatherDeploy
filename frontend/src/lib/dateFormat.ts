@@ -67,10 +67,15 @@ export function formatTimestampFull(ms: number, tz: string): string {
   }
 }
 
-/** Format deployment duration as m:ss (e.g. "1:23"). Returns "—" for missing/negative. */
-export function formatDuration(start?: string, end?: string): string {
+/**
+ * Format deployment duration as m:ss (e.g. "1:23"). Returns "—" for missing/negative.
+ * Pass `nowMs` (from a live-ticking state) to get a continuously updating display for
+ * active deployments. When `end` is provided it takes precedence over `nowMs`.
+ */
+export function formatDuration(start?: string, end?: string, nowMs?: number): string {
   if (!start) return '—'
-  const ms = new Date(end ?? Date.now()).getTime() - new Date(start).getTime()
+  const endMs = end ? new Date(end).getTime() : (nowMs ?? Date.now())
+  const ms = endMs - new Date(start).getTime()
   if (ms < 0) return '—'
   const s = Math.floor(ms / 1000)
   const m = Math.floor(s / 60)
