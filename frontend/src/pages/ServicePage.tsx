@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { ChevronLeft, Rocket, Clock, Search, Loader2, CheckCircle2, XCircle, Circle, Plus, Trash2, Eye, EyeOff, Terminal, Code2, CircleDot, Cpu, MemoryStick, Network, HardDrive, Copy, Download, Upload, X, Lock, Globe, Pencil, Check, GitBranch, GitCommit, GitFork, Settings2, Unlink, RotateCcw } from 'lucide-react'
+import { ChevronLeft, Rocket, Clock, Search, Loader2, CheckCircle2, XCircle, Circle, Plus, Trash2, Eye, EyeOff, Terminal, Code2, CircleDot, Cpu, MemoryStick, Network, HardDrive, Activity, Copy, Download, Upload, X, Lock, Globe, Pencil, Check, GitBranch, GitCommit, GitFork, Settings2, Unlink, RotateCcw } from 'lucide-react'
 import {
   AreaChart, Area, BarChart, Bar, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis, CartesianGrid, ReferenceLine,
 } from 'recharts'
