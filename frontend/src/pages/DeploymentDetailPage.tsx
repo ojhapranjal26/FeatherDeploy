@@ -13,6 +13,8 @@ import { useDeploymentLogs } from '@/hooks/useDeploymentLogs'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { cn } from '@/lib/utils'
+import { useTimezone } from '@/context/TimezoneContext'
+import { formatDate, formatDuration } from '@/lib/dateFormat'
 
 // ─── Pipeline step definitions ────────────────────────────────────────────────
 const PIPELINE_STEPS = [
@@ -197,20 +199,7 @@ function ResultBanner({ status }: { status?: string }) {
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-function formatDate(iso?: string) {
-  if (!iso) return '—'
-  return new Date(iso).toLocaleString()
-}
-
-function formatDuration(start?: string, end?: string) {
-  if (!start) return '—'
-  const ms = new Date(end ?? Date.now()).getTime() - new Date(start).getTime()
-  if (ms < 0) return '—'
-  const s = Math.floor(ms / 1000)
-  const m = Math.floor(s / 60)
-  const sec = s % 60
-  return `${m}:${String(sec).padStart(2, '0')}`
-}
+// formatDate and formatDuration are imported from @/lib/dateFormat
 
 // ─── Page ─────────────────────────────────────────────────────────────────────
 export function DeploymentDetailPage() {
@@ -220,6 +209,7 @@ export function DeploymentDetailPage() {
     deploymentId: string
   }>()
   const navigate = useNavigate()
+  const { timezone } = useTimezone()
 
   const { data: deployment, isLoading } = useQuery({
     queryKey: ['deployment', deploymentId],
@@ -274,7 +264,7 @@ export function DeploymentDetailPage() {
               <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
                 <div className="flex items-center gap-1">
                   <Clock className="h-3 w-3 shrink-0" />
-                  <span className="truncate">{formatDate(deployment?.started_at ?? deployment?.created_at)}</span>
+                  <span className="truncate">{formatDate(deployment?.started_at ?? deployment?.created_at, timezone)}</span>
                 </div>
                 <div className="text-right font-mono">
                   {formatDuration(deployment?.started_at, deployment?.finished_at)}

@@ -6,23 +6,8 @@ import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
-
-function formatDate(iso?: string) {
-  if (!iso) return '—'
-  const d = new Date(iso)
-  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
-    + ' ' + d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
-}
-
-function formatDuration(start?: string, end?: string) {
-  if (!start) return '—'
-  const ms = new Date(end ?? Date.now()).getTime() - new Date(start).getTime()
-  if (ms < 0) return '—'
-  const s = Math.floor(ms / 1000)
-  const m = Math.floor(s / 60)
-  const sec = s % 60
-  return `${m}:${String(sec).padStart(2, '0')}`
-}
+import { useTimezone } from '@/context/TimezoneContext'
+import { formatDate, formatDuration } from '@/lib/dateFormat'
 
 type DepStatus = 'success' | 'failed' | 'running' | 'pending' | string
 
@@ -54,6 +39,7 @@ function StatusBadge({ status }: { status: DepStatus }) {
 export function DeploymentListPage() {
   const { projectId, serviceId } = useParams<{ projectId: string; serviceId: string }>()
   const navigate = useNavigate()
+  const { timezone } = useTimezone()
 
   const { data, isLoading, refetch, isFetching } = useQuery({
     queryKey: ['deployments', serviceId],
@@ -81,7 +67,7 @@ export function DeploymentListPage() {
       <div className="mb-6 flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-semibold">Deployments</h1>
-          <p className="text-sm text-muted-foreground mt-0.5">Newest first — auto-refreshes every 5 s</p>
+          <p className="text-sm text-muted-foreground mt-0.5">Newest first · times in {timezone}</p>
         </div>
         <Button
           variant="outline"
@@ -154,7 +140,7 @@ export function DeploymentListPage() {
                         {d.deploy_type}
                       </span>
                     )}
-                    <span className="shrink-0">{formatDate(d.started_at ?? d.created_at)}</span>
+                    <span className="shrink-0">{formatDate(d.started_at ?? d.created_at, timezone)}</span>
                     <span className="flex items-center gap-1 shrink-0 tabular-nums font-mono">
                       <Clock className="h-3 w-3" />
                       {formatDuration(d.started_at, d.finished_at)}

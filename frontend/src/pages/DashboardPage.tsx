@@ -27,6 +27,8 @@ import {
 } from '@/components/ui/dialog'
 import { toast } from 'sonner'
 import { cn } from '@/lib/utils'
+import { useTimezone } from '@/context/TimezoneContext'
+import { formatDate } from '@/lib/dateFormat'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 type DashDep = {
@@ -446,6 +448,7 @@ export function DashboardPage() {
   })
 
   const { brain, nodes: liveNodes, connected } = useStatsSSE()
+  const { timezone } = useTimezone()
 
   const brainHistoryRef = useRef<CpuPoint[]>([])
   const brainRamHistoryRef = useRef<RamPoint[]>([])
@@ -619,7 +622,10 @@ export function DashboardPage() {
                     </span>
 
                     {/* Time ago */}
-                    <span className="flex items-center gap-1 text-xs text-muted-foreground shrink-0 whitespace-nowrap">
+                    <span
+                      className="flex items-center gap-1 text-xs text-muted-foreground shrink-0 whitespace-nowrap"
+                      title={formatDate(dep.created_at, timezone)}
+                    >
                       <Clock className="h-3 w-3" />
                       {fmt(new Date(dep.created_at).getTime())}
                     </span>

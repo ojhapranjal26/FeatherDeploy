@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { ChevronLeft, Rocket, Clock, Search, Loader2, CheckCircle2, Plus, Trash2, Eye, EyeOff, ExternalLink, Terminal, Code2, CircleDot, Cpu, MemoryStick, Network, HardDrive, Activity, Copy, Download, Upload, X, Lock, Globe, Pencil, Check, GitBranch, GitFork, Settings2, Unlink, RotateCcw } from 'lucide-react'
+import { ChevronLeft, Rocket, Clock, Search, Loader2, CheckCircle2, XCircle, Circle, Plus, Trash2, Eye, EyeOff, Terminal, Code2, CircleDot, Cpu, MemoryStick, Network, HardDrive, Copy, Download, Upload, X, Lock, Globe, Pencil, Check, GitBranch, GitCommit, GitFork, Settings2, Unlink, RotateCcw } from 'lucide-react'
 import {
   AreaChart, Area, BarChart, Bar, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis, CartesianGrid, ReferenceLine,
 } from 'recharts'
@@ -30,14 +30,9 @@ import { Textarea } from '@/components/ui/textarea'
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from '@/components/ui/table'
-
-function formatDuration(start?: string, end?: string) {
-  if (!start) return '—'
-  const ms = new Date(end ?? Date.now()).getTime() - new Date(start).getTime()
-  const s = Math.floor(ms / 1000)
-  if (s < 60) return `${s}s`
-  return `${Math.floor(s / 60)}m ${s % 60}s`
-}
+import { cn } from '@/lib/utils'
+import { useTimezone } from '@/context/TimezoneContext'
+import { formatDate, formatDuration, formatTimestamp, formatTimestampFull } from '@/lib/dateFormat'
 
 // ─── Detection confirmation modal ────────────────────────────────────────────
 
@@ -169,6 +164,7 @@ export function ServicePage() {
   const { projectId, serviceId } = useParams<{ projectId: string; serviceId: string }>()
   const navigate = useNavigate()
   const qc = useQueryClient()
+  const { timezone } = useTimezone()
 
   // Detection modal state
   const [detectOpen, setDetectOpen] = useState(false)
@@ -822,79 +818,149 @@ export function ServicePage() {
           <div>
             <div className="mb-3 flex items-center justify-between">
               <h2 className="font-medium flex items-center gap-2"><Terminal className="h-4 w-4 text-muted-foreground" /> Recent deployments</h2>
+              <Button variant="ghost" size="sm" className="text-xs text-muted-foreground"
+                onClick={() => setActiveTab('deployments')}>
+                View all →
+              </Button>
             </div>
-            {deploymentsData?.deployments.length === 0 && (
+            {(deploymentsData?.deployments.length ?? 0) === 0 && (
               <p className="text-sm text-muted-foreground">No deployments yet. Click <strong>Deploy now</strong> to start.</p>
             )}
-            {deploymentsData?.deployments.slice(0, 5).map((d) => (
-              <div
-                key={d.id}
-                className="flex items-center gap-3 py-2.5 border-b last:border-0 cursor-pointer hover:bg-muted/40 -mx-2 px-2 rounded"
-                onClick={() => navigate(`/projects/${projectId}/services/${serviceId}/deployments/${d.id}`)}
-              >
-                <DeploymentStatusBadge status={d.status} />
-                <span className="font-mono text-xs text-muted-foreground">{d.commit_sha?.slice(0, 7) ?? d.deploy_type}</span>
-                {d.branch && (
-                  <span className="flex items-center gap-0.5 text-[10px] text-muted-foreground font-mono">
-                    <GitBranch className="h-2.5 w-2.5" />{d.branch}
-                  </span>
-                )}
-                <div className="ml-auto flex items-center gap-1 text-xs text-muted-foreground">
-                  <Clock className="h-3 w-3" />
-                  {formatDuration(d.started_at, d.finished_at)}
-                </div>
-              </div>
-            ))}
+            <div className="rounded-xl border divide-y overflow-hidden">
+              {[...(deploymentsData?.deployments ?? [])]
+                .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+                .slice(0, 5)
+                .map((d, idx) => (
+                  <div
+                    key={d.id}
+                    className="group relative flex items-center gap-3 px-4 py-3 cursor-pointer hover:bg-muted/40 transition-colors"
+                    onClick={() => navigate(`/projects/${projectId}/services/${serviceId}/deployments/${d.id}`)}
+                  >
+                    <div className={cn(
+                      'absolute inset-y-0 left-0 w-0.5',
+                      d.status === 'success' ? 'bg-emerald-500' :
+                      d.status === 'failed'  ? 'bg-red-500' :
+                      d.status === 'running' ? 'bg-blue-500 animate-pulse' :
+                      'bg-border',
+                    )} />
+                    {d.status === 'success' ? <CheckCircle2 className="h-4 w-4 text-emerald-500 shrink-0 ml-1" /> :
+                     d.status === 'failed'  ? <XCircle className="h-4 w-4 text-red-500 shrink-0 ml-1" /> :
+                     d.status === 'running' ? <Loader2 className="h-4 w-4 text-blue-500 animate-spin shrink-0 ml-1" /> :
+                     <Circle className="h-4 w-4 text-muted-foreground/50 shrink-0 ml-1" />}
+                    <DeploymentStatusBadge status={d.status} />
+                    {idx === 0 && <Badge variant="outline" className="text-[10px] px-1.5 py-0 font-normal text-muted-foreground">latest</Badge>}
+                    <span className="font-mono text-xs text-muted-foreground truncate">
+                      {d.commit_sha?.slice(0, 7) ?? d.deploy_type}
+                    </span>
+                    {d.branch && (
+                      <span className="hidden sm:flex items-center gap-0.5 text-[10px] text-muted-foreground font-mono shrink-0">
+                        <GitBranch className="h-2.5 w-2.5" />{d.branch}
+                      </span>
+                    )}
+                    <div className="ml-auto flex items-center gap-3 text-xs text-muted-foreground shrink-0">
+                      <span className="hidden sm:inline">{formatDate(d.started_at ?? d.created_at, timezone)}</span>
+                      <span className="flex items-center gap-1 font-mono tabular-nums">
+                        <Clock className="h-3 w-3" />
+                        {formatDuration(d.started_at, d.finished_at)}
+                      </span>
+                    </div>
+                  </div>
+                ))}
+            </div>
           </div>
         </TabsContent>
 
         {/* ── Deployments ──────────────────────────────────────────────────── */}
         <TabsContent value="deployments" className="space-y-4">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <h2 className="font-medium">All deployments</h2>
+            <div>
+              <h2 className="font-medium">All deployments</h2>
+              <p className="text-xs text-muted-foreground mt-0.5">Newest first · times in {timezone}</p>
+            </div>
             <Button size="sm" className="gap-1.5" onClick={handleDeployClick} disabled={isDeploying}>
               {isDeploying ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Deploying…</> : <><Rocket className="h-3.5 w-3.5" /> Deploy now</>}
             </Button>
           </div>
-          {deploymentsData?.deployments.length === 0 && (
+          {(deploymentsData?.deployments.length ?? 0) === 0 ? (
             <div className="flex flex-col items-center justify-center rounded-xl border border-dashed py-14 text-center">
               <Rocket className="mb-2 h-8 w-8 text-muted-foreground" />
               <p className="text-sm font-medium">No deployments yet</p>
               <p className="text-xs text-muted-foreground mt-1">Trigger your first deployment above.</p>
             </div>
-          )}
-          <div className="divide-y rounded-lg border overflow-hidden">
-            {deploymentsData?.deployments.map((d) => (
-              <div
-                key={d.id}
-                className="flex flex-col gap-2 px-4 py-3 cursor-pointer hover:bg-muted/40 transition-colors sm:flex-row sm:items-center sm:gap-3"
-                onClick={() => navigate(`/projects/${projectId}/services/${serviceId}/deployments/${d.id}`)}
-              >
-                <div className="flex items-center gap-3 flex-1 min-w-0">
-                  <DeploymentStatusBadge status={d.status} />
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className="font-mono text-xs">{d.commit_sha?.slice(0, 7) ?? `#${d.id}`}</span>
-                      {d.branch && (
-                        <span className="flex items-center gap-0.5 text-[10px] text-muted-foreground font-mono">
-                          <GitBranch className="h-2.5 w-2.5" />{d.branch}
-                        </span>
+          ) : (
+            <div className="rounded-xl border divide-y overflow-hidden">
+              {[...(deploymentsData?.deployments ?? [])]
+                .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+                .map((d, idx) => {
+                  const isLatest = idx === 0
+                  return (
+                    <div
+                      key={d.id}
+                      className={cn(
+                        'group relative flex items-center gap-3 px-4 py-3.5 cursor-pointer transition-colors hover:bg-muted/40',
+                        isLatest && 'bg-muted/20',
                       )}
-                      <Badge variant="outline" className="text-[10px]">{d.deploy_type}</Badge>
+                      onClick={() => navigate(`/projects/${projectId}/services/${serviceId}/deployments/${d.id}`)}
+                    >
+                      {/* Status stripe */}
+                      <div className={cn(
+                        'absolute inset-y-0 left-0 w-0.5',
+                        d.status === 'success' ? 'bg-emerald-500' :
+                        d.status === 'failed'  ? 'bg-red-500' :
+                        d.status === 'running' ? 'bg-blue-500 animate-pulse' :
+                        'bg-border',
+                      )} />
+
+                      {/* Status icon */}
+                      <div className="shrink-0 ml-1">
+                        {d.status === 'success' ? <CheckCircle2 className="h-4 w-4 text-emerald-500" /> :
+                         d.status === 'failed'  ? <XCircle className="h-4 w-4 text-red-500" /> :
+                         d.status === 'running' ? <Loader2 className="h-4 w-4 text-blue-500 animate-spin" /> :
+                         <Circle className="h-4 w-4 text-muted-foreground/50" />}
+                      </div>
+
+                      {/* Badges */}
+                      <div className="flex items-center gap-2 min-w-0">
+                        <DeploymentStatusBadge status={d.status} />
+                        {isLatest && (
+                          <Badge variant="outline" className="text-[10px] px-1.5 py-0 font-normal text-muted-foreground shrink-0">
+                            latest
+                          </Badge>
+                        )}
+                      </div>
+
+                      {/* Meta */}
+                      <div className="ml-auto flex items-center gap-3 text-xs text-muted-foreground shrink-0">
+                        {d.commit_sha ? (
+                          <span className="hidden sm:flex items-center gap-1 font-mono">
+                            <GitCommit className="h-3 w-3" />{d.commit_sha.slice(0, 7)}
+                          </span>
+                        ) : (
+                          <span className="hidden sm:flex items-center gap-1 font-mono">
+                            <GitBranch className="h-3 w-3" />{d.deploy_type}
+                          </span>
+                        )}
+                        {d.branch && (
+                          <span className="hidden md:flex items-center gap-0.5 font-mono">
+                            <GitBranch className="h-2.5 w-2.5" />{d.branch}
+                          </span>
+                        )}
+                        <span className="hidden sm:inline whitespace-nowrap">
+                          {formatDate(d.started_at ?? d.created_at, timezone)}
+                        </span>
+                        <span className="flex items-center gap-1 font-mono tabular-nums">
+                          <Clock className="h-3 w-3" />
+                          {formatDuration(d.started_at, d.finished_at)}
+                        </span>
+                      </div>
+
+                      {/* Arrow */}
+                      <span className="text-xs text-muted-foreground shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">→</span>
                     </div>
-                    {d.started_at && (
-                      <p className="text-xs text-muted-foreground">{new Date(d.started_at).toLocaleString()}</p>
-                    )}
-                  </div>
-                </div>
-                <div className="flex items-center gap-2 text-xs text-muted-foreground shrink-0 pl-8 sm:pl-0">
-                  <Clock className="h-3 w-3" />
-                  {formatDuration(d.started_at, d.finished_at)}
-                  <ExternalLink className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
-                </div>
-              </div>
-            ))}
-          </div>
+                  )
+                })}
+            </div>
+          )}
         </TabsContent>
 
         {/* ── Settings ─────────────────────────────────────────────────────── */}
@@ -1397,12 +1463,6 @@ const fmtHour = (h: number) => {
   return `${display}${suffix}`
 }
 
-const fmtTs = (ms: number) =>
-  new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })
-
-const fmtTsFull = (ms: number) =>
-  new Date(ms).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
-
 function ContainerStatsPanel({
   projectId,
   serviceId,
@@ -1415,6 +1475,9 @@ function ContainerStatsPanel({
   const { latest, history: liveHistory, status } = useContainerStatsSSE(projectId, serviceId, enabled)
   const [mode, setMode] = useState<'live' | 'history' | 'monthly'>('live')
   const [range, setRange] = useState<StatsRange>('24h')
+  const { timezone } = useTimezone()
+  const fmtTs = (ms: number) => formatTimestamp(ms, timezone)
+  const fmtTsFull = (ms: number) => formatTimestampFull(ms, timezone)
 
   const { data: histData, isLoading: histLoading } = useQuery<StatsHistoryResponse>({
     queryKey: ['stats-history', projectId, serviceId, range],

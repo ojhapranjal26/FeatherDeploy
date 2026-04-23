@@ -224,8 +224,8 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
                 variant="ghost"
                 size="icon"
                 className="h-7 w-7 text-sidebar-foreground/50 hover:text-sidebar-foreground hover:bg-sidebar-accent"
-                onClick={() => navigate('/settings')}
-                title="Settings"
+                onClick={() => navigate('/settings/profile')}
+                title="My Preferences"
               >
                 <Settings className="h-3.5 w-3.5" />
               </Button>

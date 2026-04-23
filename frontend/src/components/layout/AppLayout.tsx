@@ -23,6 +23,7 @@ function usePageTitle() {
   if (pathname.startsWith('/admin/nodes')) return 'Cluster Nodes'
   if (pathname.startsWith('/admin/settings')) return 'System Settings'
   if (pathname.startsWith('/settings/github')) return 'GitHub'
+  if (pathname.startsWith('/settings/profile')) return 'My Preferences'
   return ''
 }
 
