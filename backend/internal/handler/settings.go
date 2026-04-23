@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // SettingsHandler manages platform-wide settings stored in system_settings
@@ -259,4 +260,53 @@ func (h *SettingsHandler) DeleteGitHubOAuth(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// ─── Global timezone ─────────────────────────────────────────────────────────
+
+// GET /api/settings/timezone — public; returns the platform-wide timezone.
+func (h *SettingsHandler) GetTimezone(w http.ResponseWriter, r *http.Request) {
+	var tz string
+	err := h.db.QueryRowContext(r.Context(),
+		`SELECT value FROM system_settings WHERE setting_key='timezone'`,
+	).Scan(&tz)
+	if err == sql.ErrNoRows {
+		writeJSON(w, http.StatusOK, map[string]string{"timezone": "UTC"})
+		return
+	}
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errMap("internal error"))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"timezone": tz})
+}
+
+// PUT /api/settings/timezone — superadmin only; sets the platform-wide timezone.
+func (h *SettingsHandler) SetTimezone(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Timezone string `json:"timezone"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errMap("invalid JSON"))
+		return
+	}
+	tz := strings.TrimSpace(req.Timezone)
+	if tz == "" {
+		writeJSON(w, http.StatusBadRequest, errMap("timezone is required"))
+		return
+	}
+	// Validate that the timezone string is a recognised IANA location.
+	if _, err := time.LoadLocation(tz); err != nil {
+		writeJSON(w, http.StatusBadRequest, errMap("invalid timezone: "+tz))
+		return
+	}
+	if _, err := h.db.ExecContext(r.Context(),
+		`INSERT INTO system_settings(setting_key,value,updated_at) VALUES('timezone',?,datetime('now'))
+		 ON CONFLICT(setting_key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`,
+		tz,
+	); err != nil {
+		writeJSON(w, http.StatusInternalServerError, errMap("internal error"))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "timezone": tz})
 }

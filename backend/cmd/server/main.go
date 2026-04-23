@@ -385,6 +385,8 @@ func serve() {
 	r.Get("/api/settings/branding", settingsH.GetBranding)
 	// Uploaded logo is public so it can be used in the login page and sidebar
 	r.Get("/api/settings/branding/logo", settingsH.GetLogoImage)
+	// Timezone is public so the app can apply it before the user logs in
+	r.Get("/api/settings/timezone", settingsH.GetTimezone)
 
 	// Invitation accept flow (public — token acts as credential)
 	r.Get("/api/invitations/{token}", inviteH.Verify)
@@ -463,6 +465,8 @@ func serve() {
 			// Branding
 			r.Put("/api/settings/branding", settingsH.SetBranding)
 			r.Post("/api/settings/branding/logo", settingsH.UploadLogo)
+			// Global timezone
+			r.Put("/api/settings/timezone", settingsH.SetTimezone)
 			// SMTP
 			r.Get("/api/settings/smtp", settingsH.GetSMTPStatus)
 			r.Post("/api/settings/smtp", settingsH.SetSMTP)

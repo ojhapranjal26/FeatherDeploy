@@ -74,4 +74,15 @@ export const settingsApi = {
   deleteGitHubOAuth: async (): Promise<void> => {
     await client.delete('/settings/github-oauth')
   },
+
+  // ── Global timezone ──────────────────────────────────────────────────────
+
+  getTimezone: async (): Promise<string> => {
+    const res = await client.get<{ timezone: string }>('/settings/timezone')
+    return res.data.timezone
+  },
+
+  setTimezone: async (timezone: string): Promise<void> => {
+    await client.put('/settings/timezone', { timezone })
+  },
 }

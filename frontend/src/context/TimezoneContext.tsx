@@ -1,7 +1,10 @@
-import { createContext, useContext, useState } from 'react'
+import { createContext, useContext, useState, useEffect } from 'react'
 import type { ReactNode } from 'react'
+import { settingsApi } from '@/api/settings'
 
-const STORAGE_KEY = 'preferred-timezone'
+// Cache key stores the last known platform timezone so it is available
+// immediately on page load (avoids a flash of wrong timezone).
+const CACHE_KEY = 'platform-timezone'
 const DEFAULT_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone
 
 interface TimezoneContextValue {
@@ -13,11 +16,24 @@ const TimezoneContext = createContext<TimezoneContextValue | null>(null)
 
 export function TimezoneProvider({ children }: { children: ReactNode }) {
   const [timezone, setTimezoneState] = useState<string>(
-    () => localStorage.getItem(STORAGE_KEY) ?? DEFAULT_TZ,
+    () => localStorage.getItem(CACHE_KEY) ?? DEFAULT_TZ,
   )
 
+  // Fetch the globally configured platform timezone from the backend.
+  useEffect(() => {
+    settingsApi.getTimezone()
+      .then(tz => {
+        if (tz) {
+          localStorage.setItem(CACHE_KEY, tz)
+          setTimezoneState(tz)
+        }
+      })
+      .catch(() => {/* keep cached / browser timezone on error */})
+  }, [])
+
+  // Update local state + cache (the actual API call is done by the caller).
   const setTimezone = (tz: string) => {
-    localStorage.setItem(STORAGE_KEY, tz)
+    localStorage.setItem(CACHE_KEY, tz)
     setTimezoneState(tz)
   }
 

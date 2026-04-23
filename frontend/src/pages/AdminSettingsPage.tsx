@@ -1,8 +1,9 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   ShieldCheck, Server, ImageIcon, Building2, Mail, Github,
   CheckCircle2, XCircle, Trash2, Eye, EyeOff, ExternalLink, Upload,
+  Globe, Clock, Check, Search,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
@@ -10,7 +11,33 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
 import { settingsApi } from '@/api/settings'
+import { useTimezone } from '@/context/TimezoneContext'
+import { formatDateFull } from '@/lib/dateFormat'
 import { cn } from '@/lib/utils'
+
+// ─── IANA timezone list ───────────────────────────────────────────────────────
+const ALL_TIMEZONES: string[] = (() => {
+  try {
+    return (Intl as unknown as { supportedValuesOf: (k: string) => string[] }).supportedValuesOf('timeZone')
+  } catch {
+    return [
+      'UTC',
+      'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles',
+      'America/Toronto', 'America/Vancouver', 'America/Sao_Paulo',
+      'Europe/London', 'Europe/Paris', 'Europe/Berlin', 'Europe/Rome',
+      'Europe/Moscow', 'Europe/Istanbul',
+      'Asia/Dubai', 'Asia/Karachi', 'Asia/Kolkata', 'Asia/Dhaka',
+      'Asia/Bangkok', 'Asia/Singapore', 'Asia/Shanghai', 'Asia/Tokyo',
+      'Australia/Sydney', 'Pacific/Auckland',
+      'Africa/Cairo', 'Africa/Nairobi', 'Africa/Johannesburg',
+    ]
+  }
+})()
+
+function tzRegion(tz: string) {
+  const i = tz.indexOf('/')
+  return i !== -1 ? tz.slice(0, i) : 'Other'
+}
 
 // ─── Write-only password field ────────────────────────────────────────────────
 function SecretInput(props: React.InputHTMLAttributes<HTMLInputElement> & { label: string; hint?: string }) {
@@ -72,6 +99,36 @@ function SectionHeader({ icon: Icon, title, desc }: { icon: React.ElementType; t
 // ─── Page ─────────────────────────────────────────────────────────────────────
 export function AdminSettingsPage() {
   const qc = useQueryClient()
+  const { timezone, setTimezone } = useTimezone()
+
+  // ── Timezone ─────────────────────────────────────────────────────────────────
+  const [tzSearch, setTzSearch] = useState('')
+  const [tzPending, setTzPending] = useState(timezone)
+  // Keep pending in sync when the context timezone loads from the server
+  useEffect(() => { setTzPending(timezone) }, [timezone])
+
+  const tzFiltered = useMemo(() => {
+    const q = tzSearch.toLowerCase().replace(/\s+/g, '_')
+    return q ? ALL_TIMEZONES.filter(t => t.toLowerCase().includes(q)) : ALL_TIMEZONES
+  }, [tzSearch])
+  const tzGrouped = useMemo(() => {
+    const map = new Map<string, string[]>()
+    for (const t of tzFiltered) {
+      const r = tzRegion(t)
+      if (!map.has(r)) map.set(r, [])
+      map.get(r)!.push(t)
+    }
+    return map
+  }, [tzFiltered])
+
+  const tzMutation = useMutation({
+    mutationFn: () => settingsApi.setTimezone(tzPending),
+    onSuccess: () => {
+      setTimezone(tzPending)
+      toast.success(`Platform timezone set to ${tzPending}`)
+    },
+    onError: (e: any) => toast.error(e?.response?.data?.error ?? 'Failed to save timezone'),
+  })
 
   // ── Branding ────────────────────────────────────────────────────────────────
   const { data: branding } = useQuery({ queryKey: ['branding'], queryFn: settingsApi.getBranding })
@@ -171,6 +228,79 @@ export function AdminSettingsPage() {
         <h1 className="text-2xl font-semibold tracking-tight">System Settings</h1>
         <p className="mt-1 text-sm text-muted-foreground">Platform-wide configuration (superadmin only).</p>
       </div>
+
+      {/* ── Timezone ──────────────────────────────────────────────────────── */}
+      <section className="rounded-xl border bg-card p-6 space-y-5">
+        <SectionHeader icon={Globe} title="Platform Timezone"
+          desc="All dates and times shown to every user in the panel will use this timezone." />
+
+        {/* Preview */}
+        <div className="flex items-center gap-2 rounded-lg border bg-muted/30 px-4 py-2.5 text-sm">
+          <Clock className="h-4 w-4 text-muted-foreground shrink-0" />
+          <span className="text-muted-foreground">Preview in <strong className="text-foreground font-mono">{tzPending}</strong>:</span>
+          <span className="font-mono font-medium ml-1">{formatDateFull(new Date().toISOString(), tzPending)}</span>
+        </div>
+
+        {/* Search */}
+        <div className="space-y-1.5">
+          <Label className="text-xs">Search timezone</Label>
+          <div className="relative">
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground pointer-events-none" />
+            <Input
+              className="pl-8 h-8 text-xs"
+              placeholder="e.g. Asia/Kolkata, New_York, UTC…"
+              value={tzSearch}
+              onChange={e => setTzSearch(e.target.value)}
+            />
+          </div>
+        </div>
+
+        {/* Scrollable timezone list */}
+        <div className="rounded-lg border overflow-hidden">
+          <div className="max-h-72 overflow-y-auto divide-y">
+            {tzGrouped.size === 0 ? (
+              <p className="py-8 text-center text-sm text-muted-foreground">No timezones match "{tzSearch}"</p>
+            ) : (
+              Array.from(tzGrouped.entries()).map(([region, tzs]) => (
+                <div key={region}>
+                  <div className="sticky top-0 bg-muted/80 backdrop-blur-sm px-3 py-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground border-b">
+                    {region}
+                  </div>
+                  {tzs.map(tz => (
+                    <button
+                      key={tz}
+                      type="button"
+                      onClick={() => setTzPending(tz)}
+                      className={cn(
+                        'flex w-full items-center justify-between px-4 py-2 text-sm transition-colors hover:bg-muted/40',
+                        tzPending === tz && 'bg-primary/8 text-primary font-medium',
+                      )}
+                    >
+                      <span>{tz.replace(/_/g, ' ')}</span>
+                      {tzPending === tz && <Check className="h-3.5 w-3.5 shrink-0" />}
+                    </button>
+                  ))}
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+
+        <div className="flex items-center justify-between">
+          <p className="text-xs text-muted-foreground">
+            Current: <span className="font-mono">{timezone}</span>
+          </p>
+          <button
+            type="button"
+            className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+            onClick={() => tzMutation.mutate()}
+            disabled={tzMutation.isPending || tzPending === timezone}
+          >
+            <Check className="h-3.5 w-3.5" />
+            {tzMutation.isPending ? 'Saving…' : 'Save timezone'}
+          </button>
+        </div>
+      </section>
 
       {/* ── Branding ──────────────────────────────────────────────────────── */}
       <section className="rounded-xl border bg-card p-6 space-y-5">
