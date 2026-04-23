@@ -5,7 +5,7 @@ import {
   Activity, AlertTriangle, Rocket, CheckCircle2, XCircle,
   Crown, Cpu, MemoryStick, HardDrive, Server, Wifi, WifiOff,
   FolderGit2, TrendingUp, Layers, ArrowUpCircle, X, RefreshCw,
-  Tag,
+  Tag, GitCommit, Clock, Loader2, Circle,
 } from 'lucide-react'
 import {
   AreaChart, Area, ResponsiveContainer, Tooltip, XAxis,
@@ -564,29 +564,68 @@ export function DashboardPage() {
             Recent Deployments
           </h2>
           <Card className="border-border/60 overflow-hidden">
-            <div className="divide-y divide-border/60">
-              {recentDeps.slice(0, 8).map(dep => (
-                <div key={dep.id} className="flex items-center gap-2 sm:gap-3 px-3 sm:px-4 py-3 hover:bg-muted/40 transition-colors">
-                  <span className={cn(
-                    'text-xs font-medium rounded-full px-2 py-0.5 shrink-0',
-                    dep.status === 'success' ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400' :
-                    dep.status === 'failed' ? 'bg-red-500/15 text-red-700 dark:text-red-400' :
-                    dep.status === 'running' ? 'bg-blue-500/15 text-blue-700 dark:text-blue-400' :
-                    'bg-muted text-muted-foreground'
-                  )}>
-                    {dep.status}
-                  </span>
-                  <span className="text-sm font-medium truncate min-w-0">{dep.service_name}</span>
-                  {dep.commit_sha && (
-                    <span className="hidden sm:inline text-xs font-mono text-muted-foreground shrink-0">
-                      {dep.commit_sha.slice(0, 7)}
+            <div className="divide-y divide-border/50">
+              {recentDeps.slice(0, 8).map(dep => {
+                const statusMap: Record<string, { bg: string; text: string; icon: React.ReactNode }> = {
+                  success: {
+                    bg:   'bg-emerald-500/10',
+                    text: 'text-emerald-600 dark:text-emerald-400',
+                    icon: <CheckCircle2 className="h-3.5 w-3.5" />,
+                  },
+                  failed: {
+                    bg:   'bg-red-500/10',
+                    text: 'text-red-600 dark:text-red-400',
+                    icon: <XCircle className="h-3.5 w-3.5" />,
+                  },
+                  running: {
+                    bg:   'bg-blue-500/10',
+                    text: 'text-blue-600 dark:text-blue-400',
+                    icon: <Loader2 className="h-3.5 w-3.5 animate-spin" />,
+                  },
+                  pending: {
+                    bg:   'bg-muted',
+                    text: 'text-muted-foreground',
+                    icon: <Circle className="h-3.5 w-3.5" />,
+                  },
+                }
+                const s = statusMap[dep.status] ?? statusMap.pending
+                return (
+                  <div
+                    key={dep.id}
+                    className="flex items-center gap-3 px-4 py-3 hover:bg-muted/40 transition-colors"
+                  >
+                    {/* Status icon circle */}
+                    <div className={cn('flex h-7 w-7 shrink-0 items-center justify-center rounded-full', s.bg, s.text)}>
+                      {s.icon}
+                    </div>
+
+                    {/* Service name + commit */}
+                    <div className="min-w-0 flex-1">
+                      <p className="text-sm font-medium truncate">{dep.service_name}</p>
+                      {dep.commit_sha && (
+                        <p className="flex items-center gap-1 text-[11px] font-mono text-muted-foreground mt-0.5">
+                          <GitCommit className="h-3 w-3" />
+                          {dep.commit_sha.slice(0, 7)}
+                        </p>
+                      )}
+                    </div>
+
+                    {/* Status badge */}
+                    <span className={cn(
+                      'hidden sm:inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-0.5 rounded-full capitalize',
+                      s.bg, s.text,
+                    )}>
+                      {dep.status}
                     </span>
-                  )}
-                  <span className="ml-auto text-xs text-muted-foreground shrink-0 whitespace-nowrap">
-                    {fmt(new Date(dep.created_at).getTime())}
-                  </span>
-                </div>
-              ))}
+
+                    {/* Time ago */}
+                    <span className="flex items-center gap-1 text-xs text-muted-foreground shrink-0 whitespace-nowrap">
+                      <Clock className="h-3 w-3" />
+                      {fmt(new Date(dep.created_at).getTime())}
+                    </span>
+                  </div>
+                )
+              })}
             </div>
             <div className="px-4 py-2 border-t border-border/60">
               <Button variant="ghost" size="sm" className="w-full text-xs"

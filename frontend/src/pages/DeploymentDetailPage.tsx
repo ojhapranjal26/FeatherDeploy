@@ -205,9 +205,11 @@ function formatDate(iso?: string) {
 function formatDuration(start?: string, end?: string) {
   if (!start) return '—'
   const ms = new Date(end ?? Date.now()).getTime() - new Date(start).getTime()
+  if (ms < 0) return '—'
   const s = Math.floor(ms / 1000)
-  if (s < 60) return `${s}s`
-  return `${Math.floor(s / 60)}m ${s % 60}s`
+  const m = Math.floor(s / 60)
+  const sec = s % 60
+  return `${m}:${String(sec).padStart(2, '0')}`
 }
 
 // ─── Page ─────────────────────────────────────────────────────────────────────
