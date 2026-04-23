@@ -90,8 +90,7 @@ export function formatDuration(start?: string, end?: string, nowMs?: number): st
   const startMs = new Date(start).getTime()
   if (isNaN(startMs) || new Date(start).getFullYear() < 2000) return '—'
   const endMs = end ? new Date(end).getTime() : (nowMs ?? Date.now())
-  const ms = endMs - startMs
-  if (ms < 0) return '—'
+  const ms = Math.max(0, endMs - startMs) // clamp negative to 0 (clock skew)
   const s = Math.floor(ms / 1000)
   const m = Math.floor(s / 60)
   const sec = s % 60

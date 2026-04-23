@@ -257,13 +257,13 @@ export function DeploymentDetailPage() {
   const isFailed = deployment?.status === 'failed'
   const isSuccess = deployment?.status === 'success'
 
-  // ── Live timer: ticks every second while deployment is active ──────────────
+  // ── Live timer: always-running 1s tick so `now` is never stale regardless
+  // of whether the deployment is active, queued, or just completed.
   const [now, setNow] = useState(Date.now())
   useEffect(() => {
-    if (!isActive) return
     const id = setInterval(() => setNow(Date.now()), 1000)
     return () => clearInterval(id)
-  }, [isActive])
+  }, []) // unconditional — no dependency
 
   // How long has the deployment been queued?
   const queuedSecs = isQueued && deployment?.created_at

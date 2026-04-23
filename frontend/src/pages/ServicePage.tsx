@@ -218,17 +218,13 @@ export function ServicePage() {
     enabled: !!projectId && !!serviceId,
   })
 
-  // Live ticker — ticks every second while any deployment is active so the
-  // elapsed-time counter updates smoothly.
-  const hasActiveDeployment = (deploymentsData?.deployments ?? []).some(
-    d => d.status === 'running' || d.status === 'pending',
-  )
+  // Live ticker — always-running so depNow is never stale during
+  // pending → running transitions.
   const [depNow, setDepNow] = useState(Date.now())
   useEffect(() => {
-    if (!hasActiveDeployment) return
     const id = setInterval(() => setDepNow(Date.now()), 1000)
     return () => clearInterval(id)
-  }, [hasActiveDeployment])
+  }, [])
 
   const { data: envVars, isLoading: envLoading } = useQuery({
     queryKey: ['env', serviceId],
@@ -879,7 +875,7 @@ export function ServicePage() {
                         {formatDuration(
                           d.started_at ?? d.created_at,
                           d.finished_at,
-                          (d.status === 'running' || d.status === 'pending') ? depNow : undefined,
+                          depNow,
                         )}
                         {(d.status === 'running' || d.status === 'pending') && (
                           <span className="inline-block w-1 bg-blue-500 animate-pulse rounded-sm align-middle" style={{ height: '8px' }} />
@@ -978,7 +974,7 @@ export function ServicePage() {
                           {formatDuration(
                             d.started_at ?? d.created_at,
                             d.finished_at,
-                            (d.status === 'running' || d.status === 'pending') ? depNow : undefined,
+                            depNow,
                           )}
                           {(d.status === 'running' || d.status === 'pending') && (
                             <span className="inline-block w-1 bg-blue-500 animate-pulse rounded-sm align-middle" style={{ height: '8px' }} />

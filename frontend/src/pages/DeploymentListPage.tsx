@@ -56,15 +56,13 @@ export function DeploymentListPage() {
     return tDiff !== 0 ? tDiff : b.id - a.id
   })
 
-  // Live ticker — ticks every second while any deployment is active so the
-  // elapsed-time counter updates smoothly without waiting for the next refetch.
-  const hasActive = deployments.some(d => d.status === 'running' || d.status === 'pending')
+  // Live ticker — always-running so `now` is never stale when a deployment
+  // transitions from pending → running (avoids ms<0 glitch).
   const [now, setNow] = useState(Date.now())
   useEffect(() => {
-    if (!hasActive) return
     const id = setInterval(() => setNow(Date.now()), 1000)
     return () => clearInterval(id)
-  }, [hasActive])
+  }, [])
 
   return (
     <div className="space-y-6">
@@ -159,7 +157,7 @@ export function DeploymentListPage() {
                       {formatDuration(
                         d.started_at ?? d.created_at,
                         d.finished_at,
-                        (d.status === 'running' || d.status === 'pending') ? now : undefined,
+                        now,
                       )}
                       {(d.status === 'running' || d.status === 'pending') && (
                         <span className="inline-block w-1 bg-blue-500 animate-pulse rounded-sm align-middle" style={{ height: '8px' }} />
