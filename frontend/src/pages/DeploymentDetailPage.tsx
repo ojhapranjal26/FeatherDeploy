@@ -310,10 +310,10 @@ export function DeploymentDetailPage() {
                   <span className="truncate">{formatDate(deployment?.started_at ?? deployment?.created_at, timezone)}</span>
                 </div>
                 <div className="text-right font-mono">
-                  {isActive && deployment?.status === 'running'
-                    ? formatDuration(deployment?.started_at, undefined, now)
+                  {isActive
+                    ? formatDuration(deployment?.started_at ?? deployment?.created_at, undefined, now)
                     : formatDuration(deployment?.started_at, deployment?.finished_at)}
-                  {isActive && deployment?.status === 'running' && (
+                  {isActive && (
                     <span className="ml-1 inline-block w-1 bg-primary animate-pulse rounded-sm align-middle" style={{ height: '8px' }} />
                   )}
                 </div>

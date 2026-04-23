@@ -218,6 +218,18 @@ export function ServicePage() {
     enabled: !!projectId && !!serviceId,
   })
 
+  // Live ticker — ticks every second while any deployment is active so the
+  // elapsed-time counter updates smoothly.
+  const hasActiveDeployment = (deploymentsData?.deployments ?? []).some(
+    d => d.status === 'running' || d.status === 'pending',
+  )
+  const [depNow, setDepNow] = useState(Date.now())
+  useEffect(() => {
+    if (!hasActiveDeployment) return
+    const id = setInterval(() => setDepNow(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [hasActiveDeployment])
+
   const { data: envVars, isLoading: envLoading } = useQuery({
     queryKey: ['env', serviceId],
     queryFn: () => envApi.list(projectId!, serviceId!),
@@ -861,7 +873,14 @@ export function ServicePage() {
                       <span className="hidden sm:inline">{formatDate(d.started_at ?? d.created_at, timezone)}</span>
                       <span className="flex items-center gap-1 font-mono tabular-nums">
                         <Clock className="h-3 w-3" />
-                        {formatDuration(d.started_at, d.finished_at)}
+                        {formatDuration(
+                          d.started_at ?? ((d.status === 'running' || d.status === 'pending') ? d.created_at : undefined),
+                          d.finished_at,
+                          (d.status === 'running' || d.status === 'pending') ? depNow : undefined,
+                        )}
+                        {(d.status === 'running' || d.status === 'pending') && (
+                          <span className="inline-block w-1 bg-blue-500 animate-pulse rounded-sm align-middle" style={{ height: '8px' }} />
+                        )}
                       </span>
                     </div>
                   </div>
@@ -950,7 +969,14 @@ export function ServicePage() {
                         </span>
                         <span className="flex items-center gap-1 font-mono tabular-nums">
                           <Clock className="h-3 w-3" />
-                          {formatDuration(d.started_at, d.finished_at)}
+                          {formatDuration(
+                            d.started_at ?? ((d.status === 'running' || d.status === 'pending') ? d.created_at : undefined),
+                            d.finished_at,
+                            (d.status === 'running' || d.status === 'pending') ? depNow : undefined,
+                          )}
+                          {(d.status === 'running' || d.status === 'pending') && (
+                            <span className="inline-block w-1 bg-blue-500 animate-pulse rounded-sm align-middle" style={{ height: '8px' }} />
+                          )}
                         </span>
                       </div>
 
@@ -1837,7 +1863,7 @@ function ContainerStatsPanel({
                 <div className="rounded-xl border border-border/60 bg-card p-4">
                   <div className="flex items-start justify-between mb-3">
                     <p className="text-sm font-medium flex items-center gap-2">
-                      <Activity className="h-4 w-4 text-muted-foreground" /> Busiest hours of the day (UTC)
+                      <Activity className="h-4 w-4 text-muted-foreground" /> Busiest hours of the day
                     </p>
                     {peakCPUHour && (
                       <p className="text-xs text-muted-foreground">

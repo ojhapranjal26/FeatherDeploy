@@ -1,3 +1,4 @@
+import { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { ChevronLeft, Clock, RefreshCw, GitCommit, CheckCircle2, XCircle, Loader2, Circle, GitBranch } from 'lucide-react'
@@ -52,6 +53,16 @@ export function DeploymentListPage() {
   const deployments = [...(data?.deployments ?? [])].sort(
     (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
   )
+
+  // Live ticker — ticks every second while any deployment is active so the
+  // elapsed-time counter updates smoothly without waiting for the next refetch.
+  const hasActive = deployments.some(d => d.status === 'running' || d.status === 'pending')
+  const [now, setNow] = useState(Date.now())
+  useEffect(() => {
+    if (!hasActive) return
+    const id = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [hasActive])
 
   return (
     <div className="space-y-6">
@@ -143,7 +154,14 @@ export function DeploymentListPage() {
                     <span className="shrink-0">{formatDate(d.started_at ?? d.created_at, timezone)}</span>
                     <span className="flex items-center gap-1 shrink-0 tabular-nums font-mono">
                       <Clock className="h-3 w-3" />
-                      {formatDuration(d.started_at, d.finished_at)}
+                      {formatDuration(
+                        d.started_at ?? ((d.status === 'running' || d.status === 'pending') ? d.created_at : undefined),
+                        d.finished_at,
+                        (d.status === 'running' || d.status === 'pending') ? now : undefined,
+                      )}
+                      {(d.status === 'running' || d.status === 'pending') && (
+                        <span className="inline-block w-1 bg-blue-500 animate-pulse rounded-sm align-middle" style={{ height: '8px' }} />
+                      )}
                     </span>
                   </div>
                 </div>
