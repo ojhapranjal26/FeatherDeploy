@@ -375,30 +375,40 @@ func (h *DeploymentHandler) ContainerLogs(w http.ResponseWriter, r *http.Request
 }
 
 func scanDeployment(row scanner, d *model.Deployment) error {
+	var startedAt sql.NullTime
 	var finishedAt sql.NullTime
 	err := row.Scan(&d.ID, &d.ServiceID, &d.TriggeredBy, &d.DeployType,
 		&d.RepoURL, &d.CommitSHA, &d.Branch, &d.ArtifactPath, &d.Status,
-		&d.ErrorMessage, &d.StartedAt, &finishedAt, &d.CreatedAt)
+		&d.ErrorMessage, &startedAt, &finishedAt, &d.CreatedAt)
 	if err != nil {
 		return err
 	}
+	if startedAt.Valid {
+		t := startedAt.Time.UTC()
+		d.StartedAt = &t
+	}
 	if finishedAt.Valid {
-		t := finishedAt.Time
+		t := finishedAt.Time.UTC()
 		d.FinishedAt = &t
 	}
 	return nil
 }
 
 func scanDeploymentRow(row *sql.Row, d *model.Deployment) error {
+	var startedAt sql.NullTime
 	var finishedAt sql.NullTime
 	err := row.Scan(&d.ID, &d.ServiceID, &d.TriggeredBy, &d.DeployType,
 		&d.RepoURL, &d.CommitSHA, &d.Branch, &d.ArtifactPath, &d.Status,
-		&d.ErrorMessage, &d.StartedAt, &finishedAt, &d.CreatedAt)
+		&d.ErrorMessage, &startedAt, &finishedAt, &d.CreatedAt)
 	if err != nil {
 		return err
 	}
+	if startedAt.Valid {
+		t := startedAt.Time.UTC()
+		d.StartedAt = &t
+	}
 	if finishedAt.Valid {
-		t := finishedAt.Time
+		t := finishedAt.Time.UTC()
 		d.FinishedAt = &t
 	}
 	return nil

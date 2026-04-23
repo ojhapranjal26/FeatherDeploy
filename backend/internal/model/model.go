@@ -77,7 +77,7 @@ type Deployment struct {
 	ArtifactPath string     `json:"artifact_path,omitempty"`
 	Status       string     `json:"status"` // pending | running | success | failed
 	ErrorMessage string     `json:"error_message,omitempty"`
-	StartedAt    time.Time  `json:"started_at"`
+	StartedAt    *time.Time `json:"started_at,omitempty"`  // nil when deployment is queued/pending
 	FinishedAt   *time.Time `json:"finished_at,omitempty"`
 	CreatedAt    time.Time  `json:"created_at"`
 }

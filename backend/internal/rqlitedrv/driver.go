@@ -253,7 +253,10 @@ func convertValue(v interface{}, colType string) driver.Value {
 		if colType == "datetime" || colType == "date" || colType == "timestamp" {
 			for _, layout := range datetimeLayouts {
 				if ts, err := time.Parse(layout, t); err == nil {
-					return ts
+					// Explicitly set UTC location — time.Parse with a timezone-free
+					// layout already returns UTC, but .UTC() makes the intent clear
+					// and guards against any future layout changes.
+					return ts.UTC()
 				}
 			}
 		}

@@ -4,9 +4,20 @@
  * respect the user's preferred timezone from TimezoneContext.
  */
 
+/**
+ * Guard against zero-time values that the backend may emit when a nullable
+ * datetime column (e.g. started_at) hasn't been set yet. Dates before 2000
+ * are treated as absent so we fall back to '—' or a sibling field.
+ */
+function isValidDate(d: Date): boolean {
+  return !isNaN(d.getTime()) && d.getFullYear() >= 2000
+}
+
 /** Format ISO date string as "Apr 23, 14:05" in the given timezone. */
 export function formatDate(iso: string | undefined, tz: string): string {
   if (!iso) return '—'
+  const d = new Date(iso)
+  if (!isValidDate(d)) return '—'
   try {
     return new Intl.DateTimeFormat(undefined, {
       timeZone: tz,
@@ -14,15 +25,17 @@ export function formatDate(iso: string | undefined, tz: string): string {
       day: 'numeric',
       hour: '2-digit',
       minute: '2-digit',
-    }).format(new Date(iso))
+    }).format(d)
   } catch {
-    return new Date(iso).toLocaleString()
+    return d.toLocaleString(undefined, { timeZone: tz, month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
   }
 }
 
 /** Format ISO date string as full datetime including seconds. */
 export function formatDateFull(iso: string | undefined, tz: string): string {
   if (!iso) return '—'
+  const d = new Date(iso)
+  if (!isValidDate(d)) return '—'
   try {
     return new Intl.DateTimeFormat(undefined, {
       timeZone: tz,
@@ -32,9 +45,9 @@ export function formatDateFull(iso: string | undefined, tz: string): string {
       hour: '2-digit',
       minute: '2-digit',
       second: '2-digit',
-    }).format(new Date(iso))
+    }).format(d)
   } catch {
-    return new Date(iso).toLocaleString()
+    return d.toLocaleString(undefined, { timeZone: tz, year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' })
   }
 }
 
@@ -48,7 +61,7 @@ export function formatTimestamp(ms: number, tz: string): string {
       hour12: false,
     }).format(ms)
   } catch {
-    return new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })
+    return new Date(ms).toLocaleTimeString(undefined, { timeZone: tz, hour: '2-digit', minute: '2-digit', hour12: false })
   }
 }
 
@@ -63,7 +76,7 @@ export function formatTimestampFull(ms: number, tz: string): string {
       minute: '2-digit',
     }).format(ms)
   } catch {
-    return new Date(ms).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+    return new Date(ms).toLocaleString(undefined, { timeZone: tz, month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
   }
 }
 
@@ -74,8 +87,10 @@ export function formatTimestampFull(ms: number, tz: string): string {
  */
 export function formatDuration(start?: string, end?: string, nowMs?: number): string {
   if (!start) return '—'
+  const startMs = new Date(start).getTime()
+  if (isNaN(startMs) || new Date(start).getFullYear() < 2000) return '—'
   const endMs = end ? new Date(end).getTime() : (nowMs ?? Date.now())
-  const ms = endMs - new Date(start).getTime()
+  const ms = endMs - startMs
   if (ms < 0) return '—'
   const s = Math.floor(ms / 1000)
   const m = Math.floor(s / 60)
