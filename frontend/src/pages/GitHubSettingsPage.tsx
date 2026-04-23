@@ -14,6 +14,8 @@ import {
   DialogHeader, DialogTitle, DialogTrigger,
 } from '@/components/ui/dialog'
 import { useAuth } from '@/context/AuthContext'
+import { useTimezone } from '@/context/TimezoneContext'
+import { formatDate } from '@/lib/dateFormat'
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? ''
 
@@ -232,6 +234,7 @@ interface WebhookDelivery {
 }
 
 function GitHubAppTab({ isSuperAdmin }: { isSuperAdmin: boolean }) {
+  const { timezone } = useTimezone()
   const [status, setStatus] = useState<GitHubAppStatus | null>(null)
   const [loading, setLoading] = useState(true)
   const [configOpen, setConfigOpen] = useState(false)
@@ -552,9 +555,8 @@ function GitHubAppTab({ isSuperAdmin }: { isSuperAdmin: boolean }) {
                     <div className="text-right shrink-0">
                       <p className="text-xs text-muted-foreground flex items-center gap-1">
                         <Clock className="h-3 w-3" />
-                        {new Date(d.delivered_at).toLocaleTimeString()}
+                        {formatDate(d.delivered_at, timezone)}
                       </p>
-                      <p className="text-xs text-muted-foreground">{new Date(d.delivered_at).toLocaleDateString()}</p>
                     </div>
                   </div>
                 )

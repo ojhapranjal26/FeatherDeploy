@@ -31,6 +31,8 @@ import { toast } from 'sonner'
 import { useAuth } from '@/context/AuthContext'
 import client from '@/api/client'
 import type { User } from '@/api/auth'
+import { useTimezone } from '@/context/TimezoneContext'
+import { formatDate } from '@/lib/dateFormat'
 
 const ROLE_BADGE: Record<string, string> = {
   superadmin: 'bg-violet-500/15 text-violet-600 dark:text-violet-400 border-violet-300/30',
@@ -43,6 +45,7 @@ export function AdminUsersPage() {
   const qc = useQueryClient()
   const isSuperAdmin = user?.role === 'superadmin'
   const isAdmin = user?.role === 'admin' || isSuperAdmin
+  const { timezone } = useTimezone()
 
   // â”€â”€ User list â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const { data: users, isLoading: usersLoading } = useQuery({
@@ -271,7 +274,7 @@ export function AdminUsersPage() {
                   </span>
                 </td>
                 <td className="px-4 py-3 text-muted-foreground">
-                  {new Date(u.created_at).toLocaleDateString()}
+                  {formatDate(u.created_at, timezone)}
                 </td>
                 {isSuperAdmin && (
                   <td className="px-4 py-3">

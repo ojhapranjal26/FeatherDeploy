@@ -11,6 +11,8 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/u
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { useAuth } from '@/context/AuthContext'
+import { useTimezone } from '@/context/TimezoneContext'
+import { formatDateFull } from '@/lib/dateFormat'
 
 // ── Tiny user-agent parser ────────────────────────────────────────────────────
 
@@ -48,15 +50,8 @@ function deviceLabel(ua: string): string {
   return `${parseBrowser(ua)} on ${parseOS(ua)}`
 }
 
-function fmtDate(s: string): string {
-  const d = new Date(s.includes('T') ? s : s + 'Z')
-  return d.toLocaleString(undefined, {
-    month: 'short',
-    day: 'numeric',
-    year: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  })
+function fmtDate(s: string, tz: string): string {
+  return formatDateFull(s, tz)
 }
 
 // ── Camera QR Scanner ─────────────────────────────────────────────────────────
@@ -271,6 +266,7 @@ export function DevicesPage() {
   const qc = useQueryClient()
   const { logout } = useAuth()
   const navigate = useNavigate()
+  const { timezone } = useTimezone()
   const [qrOpen, setQrOpen] = useState(false)
 
   const { data: sessions = [], isLoading } = useQuery({
@@ -393,9 +389,9 @@ export function DevicesPage() {
                 </CardHeader>
                 <CardContent className="pb-3 pt-0">
                   <div className="flex gap-4 text-xs text-muted-foreground">
-                    <span>Signed in {fmtDate(session.created_at)}</span>
+                    <span>Signed in {fmtDate(session.created_at, timezone)}</span>
                     <span>·</span>
-                    <span>Last seen {fmtDate(session.last_seen)}</span>
+                    <span>Last seen {fmtDate(session.last_seen, timezone)}</span>
                   </div>
                 </CardContent>
               </Card>

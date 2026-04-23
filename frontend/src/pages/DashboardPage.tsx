@@ -458,16 +458,22 @@ export function DashboardPage() {
 
   useEffect(() => {
     if (!brain) return
-    const t = new Date().toLocaleTimeString('en', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    const t = new Intl.DateTimeFormat(undefined, {
+      timeZone: timezone,
+      hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+    }).format(new Date())
     brainHistoryRef.current = [...brainHistoryRef.current, { t, v: brain.CPU ?? 0 }].slice(-30)
     const ramPct = brain.RAMTotal > 0 ? (brain.RAMUsed / brain.RAMTotal) * 100 : 0
     brainRamHistoryRef.current = [...brainRamHistoryRef.current, { t, v: ramPct }].slice(-30)
     setTick(n => n + 1)
-  }, [brain])
+  }, [brain, timezone])
 
   useEffect(() => {
     if (!liveNodes.length) return
-    const t = new Date().toLocaleTimeString('en', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    const t = new Intl.DateTimeFormat(undefined, {
+      timeZone: timezone,
+      hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+    }).format(new Date())
     for (const node of liveNodes) {
       const prev = nodeHistoriesRef.current[node.id] ?? []
       nodeHistoriesRef.current[node.id] = [...prev, { t, v: node.cpu_usage }].slice(-30)

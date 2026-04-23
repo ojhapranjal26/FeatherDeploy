@@ -21,6 +21,8 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { toast } from 'sonner'
 import { useAuth } from '@/context/AuthContext'
 import { nodesApi, clusterApi, type Node, type AddNodeResponse } from '@/api/nodes'
+import { useTimezone } from '@/context/TimezoneContext'
+import { formatDateFull } from '@/lib/dateFormat'
 
 // ── Status badge ─────────────────────────────────────────────────────────────
 
@@ -167,6 +169,7 @@ function SSHCommandDialog({ node }: { node: Node }) {
 export function NodesPage() {
   const { user } = useAuth()
   const qc = useQueryClient()
+  const { timezone } = useTimezone()
 
   const canManage = user?.role === 'superadmin' || user?.role === 'admin'
 
@@ -383,7 +386,7 @@ export function NodesPage() {
                     </td>
                     <td className="px-4 py-3 text-muted-foreground">
                       {node.last_seen
-                        ? new Date(node.last_seen).toLocaleString()
+                        ? formatDateFull(node.last_seen, timezone)
                         : <span className="italic opacity-50">never</span>}
                     </td>
                     <td className="px-4 py-3 font-mono text-xs text-muted-foreground">
