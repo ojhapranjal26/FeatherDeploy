@@ -52,48 +52,48 @@ export interface GrantAccessPayload {
 export const storageApi = {
   /** List all storages (admin/superadmin). */
   list: (): Promise<Storage[]> =>
-    client.get('/api/storages').then((r) => r.data),
+    client.get('/storages').then((r) => r.data),
 
   /** Get a single storage by ID. */
   get: (id: number): Promise<Storage> =>
-    client.get(`/api/storages/${id}`).then((r) => r.data),
+    client.get(`/storages/${id}`).then((r) => r.data),
 
   /** Create a storage. Returns the plaintext API key ONCE. */
   create: (payload: CreateStoragePayload): Promise<StorageCreated> =>
-    client.post('/api/storages', payload).then((r) => r.data),
+    client.post('/storages', payload).then((r) => r.data),
 
   /** Permanently delete a storage and all its data. */
   delete: (id: number): Promise<void> =>
-    client.delete(`/api/storages/${id}`).then(() => undefined),
+    client.delete(`/storages/${id}`).then(() => undefined),
 
   /**
    * Rotate the API key of a storage.
    * Returns the new plaintext key ONCE — it cannot be recovered later.
    */
   rotateKey: (id: number): Promise<{ api_key: string; api_key_preview: string }> =>
-    client.post(`/api/storages/${id}/rotate-key`).then((r) => r.data),
+    client.post(`/storages/${id}/rotate-key`).then((r) => r.data),
 
   // ── Access management ────────────────────────────────────────────────────
 
   /** List services that have access to a storage. */
   listAccess: (id: number): Promise<StorageAccess[]> =>
-    client.get(`/api/storages/${id}/access`).then((r) => r.data),
+    client.get(`/storages/${id}/access`).then((r) => r.data),
 
   /** Grant a service access to a storage. */
   grantAccess: (id: number, payload: GrantAccessPayload): Promise<void> =>
-    client.post(`/api/storages/${id}/access`, payload).then(() => undefined),
+    client.post(`/storages/${id}/access`, payload).then(() => undefined),
 
   /** Revoke a service's access to a storage. */
   revokeAccess: (storageId: number, serviceId: number): Promise<void> =>
-    client.delete(`/api/storages/${storageId}/access/${serviceId}`).then(() => undefined),
+    client.delete(`/storages/${storageId}/access/${serviceId}`).then(() => undefined),
 
   // ── KV admin ─────────────────────────────────────────────────────────────
 
   /** List all keys in a storage (admin view, no values). */
   listKeys: (id: number): Promise<StorageKVItem[]> =>
-    client.get(`/api/storages/${id}/kv`).then((r) => r.data),
+    client.get(`/storages/${id}/kv`).then((r) => r.data),
 
   /** Delete a key from a storage (admin action, no storage API key needed). */
   adminDeleteKey: (id: number, key: string): Promise<void> =>
-    client.delete(`/api/storages/${id}/kv/${encodeURIComponent(key)}`).then(() => undefined),
+    client.delete(`/storages/${id}/kv/${encodeURIComponent(key)}`).then(() => undefined),
 }
