@@ -333,8 +333,8 @@ ALTER TABLE databases ADD COLUMN cluster_port INTEGER DEFAULT NULL;
 -- 023: storages — internal key-value object stores accessible only via API key
 -- Values are encrypted at rest with AES-256-GCM. Only services explicitly
 -- granted access can read/write using the storage's API key.
--- The api_key is stored as a bcrypt hash; the plaintext is only returned once
--- on creation or rotation. api_key_preview holds the first 12 chars for display.
+-- The api_key is stored as a bcrypt hash (plaintext returned only once on creation or rotation).
+-- api_key_preview holds the first 12 chars for display.
 CREATE TABLE IF NOT EXISTS storages (
     id               INTEGER  PRIMARY KEY AUTOINCREMENT,
     name             TEXT     NOT NULL UNIQUE COLLATE NOCASE,
