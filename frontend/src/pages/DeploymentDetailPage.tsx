@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import {
@@ -257,18 +257,46 @@ export function DeploymentDetailPage() {
   const isFailed = deployment?.status === 'failed'
   const isSuccess = deployment?.status === 'success'
 
-  // ── Live timer: always-running 1s tick so `now` is never stale regardless
-  // of whether the deployment is active, queued, or just completed.
+  // ── Live timer ────────────────────────────────────────────────────────────
+  // Always tick so `now` is never stale when status transitions arrive.
   const [now, setNow] = useState(Date.now())
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 1000)
     return () => clearInterval(id)
-  }, []) // unconditional — no dependency
+  }, [])
 
-  // How long has the deployment been queued?
-  const queuedSecs = isQueued && deployment?.created_at
-    ? Math.max(0, Math.floor((now - new Date(deployment.created_at).getTime()) / 1000))
-    : 0
+  // Track when we first observed the deployment start on the CLIENT side.
+  // This compensates for server/client clock skew: if the server clock is ahead
+  // the counter still counts up from 0 at the moment we loaded the data.
+  const startedSinceRef = useRef<{ clientMs: number; serverStartMs: number } | null>(null)
+  useEffect(() => {
+    if (!deployment) return
+    const startStr = deployment.started_at ?? deployment.created_at
+    if (!startStr || startedSinceRef.current) return
+    const serverStartMs = new Date(startStr).getTime()
+    if (isNaN(serverStartMs) || serverStartMs < 946684800000 /* year 2000 */) return
+    startedSinceRef.current = { clientMs: Date.now(), serverStartMs }
+  }, [deployment?.started_at, deployment?.created_at])
+
+  // Elapsed ms for active deployments, compensated for clock skew.
+  const activeElapsedMs = (() => {
+    if (!isActive || !startedSinceRef.current) return 0
+    const { clientMs, serverStartMs } = startedSinceRef.current
+    // Time elapsed before we loaded the page (0 if server clock was ahead)
+    const beforeLoad = Math.max(0, clientMs - serverStartMs)
+    // Time elapsed since we loaded the page
+    const sinceLoad = Math.max(0, now - clientMs)
+    return beforeLoad + sinceLoad
+  })()
+
+  const fmtElapsed = (ms: number): string => {
+    const s = Math.floor(ms / 1000)
+    const m = Math.floor(s / 60)
+    return `${m}:${String(s % 60).padStart(2, '0')}`
+  }
+
+  // How long has the deployment been queued? Use the same clock-skew-safe elapsed.
+  const queuedSecs = isQueued ? Math.floor(activeElapsedMs / 1000) : 0
 
   return (
     <div className="space-y-4 pb-8">
@@ -311,7 +339,7 @@ export function DeploymentDetailPage() {
                 </div>
                 <div className="text-right font-mono">
                   {isActive
-                    ? formatDuration(deployment?.started_at ?? deployment?.created_at, undefined, now)
+                    ? fmtElapsed(activeElapsedMs)
                     : formatDuration(deployment?.started_at ?? deployment?.created_at, deployment?.finished_at)}
                   {isActive && (
                     <span className="ml-1 inline-block w-1 bg-primary animate-pulse rounded-sm align-middle" style={{ height: '8px' }} />

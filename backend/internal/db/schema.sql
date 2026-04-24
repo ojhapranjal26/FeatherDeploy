@@ -329,3 +329,49 @@ ALTER TABLE services ADD COLUMN cluster_port INTEGER DEFAULT NULL;
 -- 022: add cluster_port to databases so the fdnet proxy port (0.0.0.0 binding)
 -- is persisted and used in public connection URLs, surviving process restarts.
 ALTER TABLE databases ADD COLUMN cluster_port INTEGER DEFAULT NULL;
+
+-- 023: storages — internal key-value object stores accessible only via API key
+-- Values are encrypted at rest with AES-256-GCM. Only services explicitly
+-- granted access can read/write using the storage's API key.
+-- The api_key is stored as a bcrypt hash; the plaintext is only returned once
+-- on creation or rotation. api_key_preview holds the first 12 chars for display.
+CREATE TABLE IF NOT EXISTS storages (
+    id               INTEGER  PRIMARY KEY AUTOINCREMENT,
+    name             TEXT     NOT NULL UNIQUE COLLATE NOCASE,
+    description      TEXT     NOT NULL DEFAULT '',
+    api_key_hash     TEXT     NOT NULL,                        -- bcrypt hash of API key
+    api_key_preview  TEXT     NOT NULL DEFAULT '',             -- first 12 chars (display only)
+    enc_passphrase   TEXT     NOT NULL DEFAULT '',             -- AES-256-GCM encrypted per-storage encryption key
+    created_by       INTEGER  NOT NULL REFERENCES users(id),
+    created_at       DATETIME NOT NULL DEFAULT (datetime('now')),
+    updated_at       DATETIME NOT NULL DEFAULT (datetime('now'))
+);
+
+-- 023b: storage_access — service whitelist (only listed services may use a storage)
+CREATE TABLE IF NOT EXISTS storage_access (
+    id          INTEGER  PRIMARY KEY AUTOINCREMENT,
+    storage_id  INTEGER  NOT NULL REFERENCES storages(id)  ON DELETE CASCADE,
+    service_id  INTEGER  NOT NULL REFERENCES services(id)  ON DELETE CASCADE,
+    can_read    INTEGER  NOT NULL DEFAULT 1  CHECK(can_read  IN (0,1)),
+    can_write   INTEGER  NOT NULL DEFAULT 1  CHECK(can_write IN (0,1)),
+    granted_at  DATETIME NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(storage_id, service_id)
+);
+
+-- 023c: storage_kv — individual key→value entries, values encrypted per storage key
+CREATE TABLE IF NOT EXISTS storage_kv (
+    id           INTEGER  PRIMARY KEY AUTOINCREMENT,
+    storage_id   INTEGER  NOT NULL REFERENCES storages(id) ON DELETE CASCADE,
+    kv_key       TEXT     NOT NULL,
+    enc_value    TEXT     NOT NULL,                            -- AES-256-GCM encrypted blob
+    content_type TEXT     NOT NULL DEFAULT 'text/plain',
+    size_bytes   INTEGER  NOT NULL DEFAULT 0,
+    created_at   DATETIME NOT NULL DEFAULT (datetime('now')),
+    updated_at   DATETIME NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(storage_id, kv_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_storages_created_by   ON storages(created_by);
+CREATE INDEX IF NOT EXISTS idx_storage_access_storage ON storage_access(storage_id);
+CREATE INDEX IF NOT EXISTS idx_storage_access_service ON storage_access(service_id);
+CREATE INDEX IF NOT EXISTS idx_storage_kv_storage    ON storage_kv(storage_id);

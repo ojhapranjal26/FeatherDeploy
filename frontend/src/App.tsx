@@ -18,6 +18,8 @@ import { NodesPage } from '@/pages/NodesPage'
 import { ProjectsListPage } from '@/pages/ProjectsListPage'
 import { DevicesPage } from '@/pages/DevicesPage'
 import { UserSettingsPage } from '@/pages/UserSettingsPage'
+import { StoragePage } from '@/pages/StoragePage'
+import { StorageDetailPage } from '@/pages/StorageDetailPage'
 
 export default function App() {
   return (
@@ -63,6 +65,8 @@ export default function App() {
           <Route element={<ProtectedRoute requiredRoles={['admin', 'superadmin']} />}>
             <Route path="admin/users" element={<AdminUsersPage />} />
             <Route path="admin/nodes" element={<NodesPage />} />
+            <Route path="storage" element={<StoragePage />} />
+            <Route path="storage/:storageId" element={<StorageDetailPage />} />
           </Route>
 
           {/* Superadmin-only routes */}

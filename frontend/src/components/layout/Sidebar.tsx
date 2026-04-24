@@ -14,6 +14,7 @@ import {
   Network,
   Feather,
   Smartphone,
+  HardDrive,
 } from 'lucide-react'
 import { useQuery } from '@tanstack/react-query'
 import { cn } from '@/lib/utils'
@@ -40,6 +41,7 @@ const NAV_ITEMS: NavItem[] = [
   { to: '/projects',        label: 'Projects',       icon: FolderKanban },
   { to: '/settings/github', label: 'GitHub',         icon: Github },
   { to: '/devices',         label: 'Devices',        icon: Smartphone },
+  { to: '/storage',         label: 'Storage',        icon: HardDrive,   roles: ['admin', 'superadmin'] },
   { to: '/admin/users',     label: 'User Management', icon: Users,       roles: ['admin', 'superadmin'] },
   { to: '/admin/nodes',     label: 'Cluster Nodes',   icon: Network,     roles: ['admin', 'superadmin'] },
   { to: '/admin/settings',  label: 'System Settings', icon: ShieldCheck, roles: ['superadmin'] },

@@ -360,6 +360,7 @@ func serve() {
 	systemH := handler.NewSystemHandler()
 
 	sessionsH := handler.NewSessionsHandler(db)
+	storageH := handler.NewStorageHandler(db, *jwtSecret)
 
 	// ─── Router ──────────────────────────────────────────────────────────────
 	r := chi.NewRouter()
@@ -373,7 +374,7 @@ func serve() {
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   splitOrigins(*origin),
 		AllowedMethods:   []string{"GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Authorization", "Content-Type", "X-Request-Id"},
+		AllowedHeaders:   []string{"Authorization", "Content-Type", "X-Request-Id", "X-Storage-Key"},
 		AllowCredentials: true,
 		MaxAge:           300,
 	}))
@@ -457,6 +458,21 @@ func serve() {
 			r.Use(mw.RequireRole(model.RoleSuperAdmin))
 			r.Patch("/api/admin/users/{userID}/role", userH.UpdateRole)
 			r.Delete("/api/admin/users/{userID}", userH.Delete)
+		})
+
+		// ── Storages (admin + superadmin) ────────────────────────────────
+		r.Group(func(r chi.Router) {
+			r.Use(mw.RequireRole(model.RoleSuperAdmin, model.RoleAdmin))
+			r.Get("/api/storages", storageH.List)
+			r.Post("/api/storages", storageH.Create)
+			r.Get("/api/storages/{storageId}", storageH.Get)
+			r.Delete("/api/storages/{storageId}", storageH.Delete)
+			r.Post("/api/storages/{storageId}/rotate-key", storageH.RotateKey)
+			r.Get("/api/storages/{storageId}/access", storageH.ListAccess)
+			r.Post("/api/storages/{storageId}/access", storageH.GrantAccess)
+			r.Delete("/api/storages/{storageId}/access/{serviceId}", storageH.RevokeAccess)
+			r.Get("/api/storages/{storageId}/kv", storageH.ListKeys)
+			r.Delete("/api/storages/{storageId}/kv/{key}", storageH.AdminDeleteKey)
 		})
 
 		// ── Superadmin: platform settings ─────────────────────────────────
@@ -630,6 +646,15 @@ func serve() {
 		r.With(mw.RequireProjectAccess(db, "editor")).
 			Get("/api/projects/{projectID}/databases/{databaseID}/start-log/stream", dbH.StartLogStream)
 	})
+
+	// ─── Storage KV API (API-key auth, no JWT) ───────────────────────────────
+	// Accessible by platform services using X-Storage-Key header.
+	// These routes are intentionally NOT JWT-protected; the storage API key
+	// is the only credential. Rate-limiting and IP filtering can be added
+	// via Caddy config for additional security hardening.
+	r.Get("/api/storage/{storageId}/kv/{key}", storageH.KVGet)
+	r.Put("/api/storage/{storageId}/kv/{key}", storageH.KVPut)
+	r.Delete("/api/storage/{storageId}/kv/{key}", storageH.KVDelete)
 
 	// ─── Health check (no auth) ───────────────────────────────────────────────
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {

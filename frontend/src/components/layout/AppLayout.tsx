@@ -24,6 +24,7 @@ function usePageTitle() {
   if (pathname.startsWith('/admin/settings')) return 'System Settings'
   if (pathname.startsWith('/settings/github')) return 'GitHub'
   if (pathname.startsWith('/settings/profile')) return 'My Preferences'
+  if (pathname.startsWith('/storage')) return 'Storage'
   return ''
 }
 
