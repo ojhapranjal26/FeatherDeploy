@@ -216,7 +216,7 @@ func (h *StorageHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(body.Name) > 64 {
-		writeJSON(w, http.StatusBadRequest, errMap("name too long (max 64 chars))")
+		writeJSON(w, http.StatusBadRequest, errMap("name too long (max 64 chars)"))
 		return
 	}
 
@@ -584,7 +584,7 @@ func (h *StorageHandler) KVPut(w http.ResponseWriter, r *http.Request) {
 	}
 	// Limit key length to prevent abuse
 	if len(key) > 256 {
-		writeJSON(w, http.StatusBadRequest, errMap("key too long (max 256 chars))")
+		writeJSON(w, http.StatusBadRequest, errMap("key too long (max 256 chars)"))
 		return
 	}
 
