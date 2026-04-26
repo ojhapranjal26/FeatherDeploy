@@ -11,6 +11,8 @@ FeatherDeploy Storage is a disk-backed object store with server-side encryption 
 
 Each service gets its own key. There is no shared bucket key for all services.
 
+Do not manually keep stale generic values like `STORAGE_KEY` and `STORAGE_ENDPOINT` alongside injected per-storage vars unless your app is intentionally reading the generic names. A stale manual key can override the correct injected key and cause `invalid key` errors.
+
 ## Auto-injected env vars
 
 After a service is granted access and redeployed, FeatherDeploy injects:
@@ -18,6 +20,13 @@ After a service is granted access and redeployed, FeatherDeploy injects:
 - `STORAGE_{NAME}_KEY`
 - `STORAGE_{NAME}_BUCKET`
 - `STORAGE_{NAME}_ENDPOINT`
+
+Preferred integration:
+
+1. Grant access to the service.
+2. Redeploy the service.
+3. Read the injected `STORAGE_{NAME}_KEY` and `STORAGE_{NAME}_ENDPOINT` vars inside the app.
+4. Avoid hardcoding `STORAGE_KEY` and `STORAGE_ENDPOINT` unless you have only one storage and explicitly want manual configuration.
 
 Example for a storage named `media uploads`:
 
