@@ -664,15 +664,6 @@ func serve() {
 			Get("/api/projects/{projectID}/databases/{databaseID}/start-log/stream", dbH.StartLogStream)
 	})
 
-	// ─── Storage KV API (API-key auth, no JWT) ───────────────────────────────
-	// Accessible by platform services using X-Storage-Key header.
-	// These routes are intentionally NOT JWT-protected; the storage API key
-	// is the only credential. Rate-limiting and IP filtering can be added
-	// via Caddy config for additional security hardening.
-	r.Get("/api/storage/{storageId}/kv/{key}", storageH.KVGet)
-	r.Put("/api/storage/{storageId}/kv/{key}", storageH.KVPut)
-	r.Delete("/api/storage/{storageId}/kv/{key}", storageH.KVDelete)
-
 	// ─── Health check (no auth) ───────────────────────────────────────────────
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

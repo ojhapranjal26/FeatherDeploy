@@ -266,8 +266,8 @@ function ServicesTab({ storageId }: { storageId: number }) {
   })
 
   const [addOpen, setAddOpen] = useState(false)
-  const [selectedProjectId, setSelectedProjectId] = useState('')
-  const [selectedServiceId, setSelectedServiceId] = useState('')
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null)
+  const [selectedServiceId, setSelectedServiceId] = useState<string | null>(null)
   const [canRead, setCanRead] = useState(true)
   const [canWrite, setCanWrite] = useState(true)
   const [newKey, setNewKey] = useState<string | null>(null)
@@ -297,8 +297,8 @@ function ServicesTab({ storageId }: { storageId: number }) {
       qc.invalidateQueries({ queryKey: ['storage-access', storageId] })
       qc.invalidateQueries({ queryKey: ['storages'] })
       setAddOpen(false)
-      setSelectedProjectId('')
-      setSelectedServiceId('')
+      setSelectedProjectId(null)
+      setSelectedServiceId(null)
       setNewKey(data.service_key)
       setKeyDialogOpen(true)
     },
@@ -437,7 +437,7 @@ function ServicesTab({ storageId }: { storageId: number }) {
           <div className="space-y-3 py-2">
             <div className="space-y-1.5">
               <Label>Project</Label>
-              <Select value={selectedProjectId} onValueChange={(v) => { setSelectedProjectId(v); setSelectedServiceId('') }}>
+              <Select value={selectedProjectId} onValueChange={(v) => { setSelectedProjectId(v); setSelectedServiceId(null) }}>
                 <SelectTrigger><SelectValue placeholder="Select project..." /></SelectTrigger>
                 <SelectContent>
                   {projects.map((p) => <SelectItem key={p.id} value={String(p.id)}>{p.name}</SelectItem>)}
@@ -602,7 +602,6 @@ function StatsTab({ storageId }: { storageId: number }) {
 export function StorageDetailPage() {
   const { storageId } = useParams<{ storageId: string }>()
   const navigate = useNavigate()
-  const qc = useQueryClient()
   const { timezone } = useTimezone()
   const id = Number(storageId)
 
