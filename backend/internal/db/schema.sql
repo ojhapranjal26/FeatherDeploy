@@ -332,7 +332,7 @@ ALTER TABLE databases ADD COLUMN cluster_port INTEGER DEFAULT NULL;
 
 -- 023: storages — disk-backed encrypted object stores with per-service access control
 -- Files written to STORAGE_DATA_DIR/{id}/{path}, encrypted with AES-256-CTR.
--- Each service gets its own API key; the master passphrase controls file encryption.
+-- Each service gets its own API key and the master passphrase controls file encryption.
 DROP TABLE IF EXISTS storage_kv;
 CREATE TABLE IF NOT EXISTS storages (
     id               INTEGER  PRIMARY KEY AUTOINCREMENT,

@@ -30,29 +30,29 @@ func OpenRqlite(url string) (*sql.DB, error) {
 	return db, nil
 }
 
-// applySchema runs each CREATE TABLE / CREATE INDEX statement from schema.sql.
-// Statements are split on ";" so they can be executed individually via rqlite.
+// applySchema runs each schema statement from schema.sql.
+// Comments are stripped before splitting on ";" so semicolons inside comments
+// cannot turn into bogus SQL fragments during startup.
 func applySchema(db *sql.DB) error {
 	schema, err := schemaFS.ReadFile("schema.sql")
 	if err != nil {
 		return fmt.Errorf("read schema: %w", err)
 	}
 
-	stmts := strings.Split(string(schema), ";")
-	for _, s := range stmts {
-		// Strip comment lines line-by-line, then trim surrounding whitespace.
-		// This is required because splitting on ";" produces fragments like:
-		//   "-- 004: services\nCREATE TABLE services (...)"
-		// A whole-statement HasPrefix("--") check would silently skip the CREATE TABLE.
-		var sqlLines []string
-		for _, line := range strings.Split(s, "\n") {
-			trimmed := strings.TrimSpace(line)
-			if trimmed == "" || strings.HasPrefix(trimmed, "--") {
-				continue
-			}
-			sqlLines = append(sqlLines, line)
+	var sqlLines []string
+	for _, line := range strings.Split(string(schema), "\n") {
+		if idx := strings.Index(line, "--"); idx >= 0 {
+			line = line[:idx]
 		}
-		s = strings.TrimSpace(strings.Join(sqlLines, "\n"))
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		sqlLines = append(sqlLines, line)
+	}
+
+	stmts := strings.Split(strings.Join(sqlLines, "\n"), ";")
+	for _, s := range stmts {
+		s = strings.TrimSpace(s)
 		if s == "" {
 			continue
 		}
