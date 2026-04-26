@@ -24,6 +24,7 @@ import { toast } from 'sonner'
 import { storageApi } from '@/api/storage'
 import { formatDate } from '@/lib/dateFormat'
 import { useTimezone } from '@/context/TimezoneContext'
+import { StorageDocsButton } from '@/components/StorageDocsButton'
 
 function formatBytes(bytes: number): string {
   if (bytes === 0) return '0 B'
@@ -68,7 +69,7 @@ export function StoragePage() {
   return (
     <div className="space-y-6 pb-8">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-semibold flex items-center gap-2">
             <HardDrive className="h-6 w-6 text-primary" />
@@ -79,9 +80,12 @@ export function StoragePage() {
             configurable read/write permissions. Files are AES-256 encrypted at rest.
           </p>
         </div>
-        <Button onClick={() => setCreateOpen(true)} className="gap-1.5">
-          <Plus className="h-4 w-4" /> New Storage
-        </Button>
+        <div className="flex items-center gap-2 shrink-0">
+          <StorageDocsButton />
+          <Button onClick={() => setCreateOpen(true)} className="gap-1.5">
+            <Plus className="h-4 w-4" /> New Storage
+          </Button>
+        </div>
       </div>
 
       {/* Storage list */}

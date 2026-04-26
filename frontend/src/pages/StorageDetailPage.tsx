@@ -59,6 +59,7 @@ import type { Service } from '@/api/services'
 import { formatDate } from '@/lib/dateFormat'
 import { useTimezone } from '@/context/TimezoneContext'
 import { cn } from '@/lib/utils'
+import { StorageDocsButton } from '@/components/StorageDocsButton'
 
 function formatBytes(bytes: number): string {
   if (bytes === 0) return '0 B'
@@ -642,9 +643,12 @@ export function StorageDetailPage() {
 
   return (
     <div className="space-y-5 pb-8">
-      <Button variant="ghost" size="sm" className="gap-1.5 text-muted-foreground" onClick={() => navigate('/storage')}>
-        <ChevronLeft className="h-3.5 w-3.5" /> Back to Storage
-      </Button>
+      <div className="flex items-center justify-between gap-3">
+        <Button variant="ghost" size="sm" className="gap-1.5 text-muted-foreground" onClick={() => navigate('/storage')}>
+          <ChevronLeft className="h-3.5 w-3.5" /> Back to Storage
+        </Button>
+        <StorageDocsButton storage={{ id, name: storage.name }} />
+      </div>
 
       <div className="rounded-xl border bg-card shadow-sm p-5 flex items-start justify-between gap-4 flex-wrap">
         <div className="flex items-center gap-3 min-w-0">
