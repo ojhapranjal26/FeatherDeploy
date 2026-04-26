@@ -212,39 +212,43 @@ ALTER TABLE databases   ADD COLUMN start_log    TEXT    NOT NULL DEFAULT '';
 ALTER TABLE services    ADD COLUMN cluster_port INTEGER DEFAULT NULL;
 ALTER TABLE databases   ADD COLUMN cluster_port INTEGER DEFAULT NULL;
 
--- 023: storages — encrypted internal KV object stores with per-service access control
+-- 023: storages v2 — disk-backed encrypted object stores with per-service access control
+DROP TABLE IF EXISTS storage_kv;
 CREATE TABLE IF NOT EXISTS storages (
     id               INTEGER  PRIMARY KEY AUTOINCREMENT,
     name             TEXT     NOT NULL UNIQUE COLLATE NOCASE,
     description      TEXT     NOT NULL DEFAULT '',
-    api_key_hash     TEXT     NOT NULL,
+    api_key_hash     TEXT     NOT NULL DEFAULT '',
     api_key_preview  TEXT     NOT NULL DEFAULT '',
     enc_passphrase   TEXT     NOT NULL DEFAULT '',
     created_by       INTEGER  NOT NULL REFERENCES users(id),
     created_at       DATETIME NOT NULL DEFAULT (datetime('now')),
     updated_at       DATETIME NOT NULL DEFAULT (datetime('now'))
 );
+ALTER TABLE storages ADD COLUMN size_bytes INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE storages ADD COLUMN data_path TEXT NOT NULL DEFAULT '';
 CREATE TABLE IF NOT EXISTS storage_access (
-    id          INTEGER  PRIMARY KEY AUTOINCREMENT,
-    storage_id  INTEGER  NOT NULL REFERENCES storages(id)  ON DELETE CASCADE,
-    service_id  INTEGER  NOT NULL REFERENCES services(id)  ON DELETE CASCADE,
-    can_read    INTEGER  NOT NULL DEFAULT 1  CHECK(can_read  IN (0,1)),
-    can_write   INTEGER  NOT NULL DEFAULT 1  CHECK(can_write IN (0,1)),
-    granted_at  DATETIME NOT NULL DEFAULT (datetime('now')),
+    id                  INTEGER  PRIMARY KEY AUTOINCREMENT,
+    storage_id          INTEGER  NOT NULL REFERENCES storages(id) ON DELETE CASCADE,
+    service_id          INTEGER  NOT NULL REFERENCES services(id) ON DELETE CASCADE,
+    can_read            INTEGER  NOT NULL DEFAULT 1 CHECK(can_read  IN (0,1)),
+    can_write           INTEGER  NOT NULL DEFAULT 1 CHECK(can_write IN (0,1)),
+    granted_at          DATETIME NOT NULL DEFAULT (datetime('now')),
     UNIQUE(storage_id, service_id)
 );
-CREATE TABLE IF NOT EXISTS storage_kv (
-    id           INTEGER  PRIMARY KEY AUTOINCREMENT,
-    storage_id   INTEGER  NOT NULL REFERENCES storages(id) ON DELETE CASCADE,
-    kv_key       TEXT     NOT NULL,
-    enc_value    TEXT     NOT NULL,
-    content_type TEXT     NOT NULL DEFAULT 'text/plain',
-    size_bytes   INTEGER  NOT NULL DEFAULT 0,
-    created_at   DATETIME NOT NULL DEFAULT (datetime('now')),
-    updated_at   DATETIME NOT NULL DEFAULT (datetime('now')),
-    UNIQUE(storage_id, kv_key)
+ALTER TABLE storage_access ADD COLUMN service_key_hash TEXT NOT NULL DEFAULT '';
+ALTER TABLE storage_access ADD COLUMN service_key_preview TEXT NOT NULL DEFAULT '';
+ALTER TABLE storage_access ADD COLUMN enc_service_key TEXT NOT NULL DEFAULT '';
+CREATE TABLE IF NOT EXISTS storage_bandwidth (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    storage_id    INTEGER NOT NULL REFERENCES storages(id)  ON DELETE CASCADE,
+    service_id    INTEGER NOT NULL REFERENCES services(id)  ON DELETE CASCADE,
+    period        TEXT    NOT NULL,
+    bytes_read    INTEGER NOT NULL DEFAULT 0,
+    bytes_written INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(storage_id, service_id, period)
 );
 CREATE INDEX IF NOT EXISTS idx_storages_created_by    ON storages(created_by);
 CREATE INDEX IF NOT EXISTS idx_storage_access_storage ON storage_access(storage_id);
 CREATE INDEX IF NOT EXISTS idx_storage_access_service ON storage_access(service_id);
-CREATE INDEX IF NOT EXISTS idx_storage_kv_storage     ON storage_kv(storage_id);
+CREATE INDEX IF NOT EXISTS idx_storage_bw             ON storage_bandwidth(storage_id, service_id, period);

@@ -506,6 +506,11 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 		envArgs = append(envArgs, NetDaemon.EnvVarsForPeers(projectID, svcName)...)
 	}
 
+	// ── 8c. Inject storage env vars ──────────────────────────────────────────
+	// For each storage this service has access to, inject:
+	//   STORAGE_{NAME}_KEY, STORAGE_{NAME}_BUCKET, STORAGE_{NAME}_ENDPOINT
+	envArgs = append(envArgs, collectStorageEnvArgs(db, svcID, jwtSecret)...)
+
 	// ── 9. Run new container ──────────────────────────────────────────────────
 
 	// With slirp4netns the container gets its own network namespace.
@@ -968,8 +973,58 @@ func collectEnvArgs(db *sql.DB, svcID int64, jwtSecret string) []string {
 	return args
 }
 
+// collectStorageEnvArgs returns -e KEY=VALUE pairs for all storage buckets
+// the service has access to. Injected per storage:
+//
+//	STORAGE_{NAME}_KEY      = per-service plaintext API key
+//	STORAGE_{NAME}_BUCKET   = storage name
+//	STORAGE_{NAME}_ENDPOINT = internal URL (http://10.0.2.2:8080/api/storage/{id})
+func collectStorageEnvArgs(db *sql.DB, svcID int64, jwtSecret string) []string {
+	rows, err := db.Query(`
+		SELECT st.id, st.name, sa.enc_service_key
+		FROM storage_access sa
+		JOIN storages st ON st.id = sa.storage_id
+		WHERE sa.service_id = ? AND sa.enc_service_key != ''
+	`, svcID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var args []string
+	for rows.Next() {
+		var stID int64
+		var stName, encSvcKey string
+		if err := rows.Scan(&stID, &stName, &encSvcKey); err != nil {
+			continue
+		}
+		plainKey, err := appCrypto.Decrypt(encSvcKey, jwtSecret)
+		if err != nil {
+			continue
+		}
+		upper := storageEnvVarName(stName)
+		args = append(args,
+			"-e", fmt.Sprintf("STORAGE_%s_KEY=%s", upper, plainKey),
+			"-e", fmt.Sprintf("STORAGE_%s_BUCKET=%s", upper, stName),
+			"-e", fmt.Sprintf("STORAGE_%s_ENDPOINT=http://10.0.2.2:8080/api/storage/%d", upper, stID),
+		)
+	}
+	return args
+}
+
+func storageEnvVarName(s string) string {
+	s = strings.ToUpper(s)
+	var b strings.Builder
+	for _, c := range s {
+		if (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') {
+			b.WriteRune(c)
+		} else {
+			b.WriteRune('_')
+		}
+	}
+	return b.String()
+}
+
 // sliceContainsKeyPrefix returns true if any element in s has the given prefix.
-// Used to check whether a specific env key is already present in a "-e KEY=VAL" slice.
 func sliceContainsKeyPrefix(s []string, prefix string) bool {
 	for _, v := range s {
 		if strings.HasPrefix(v, prefix) {

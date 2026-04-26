@@ -413,6 +413,18 @@ func serve() {
 	r.Get("/api/nodes/server-binary", nodeH.ServerBinaryDownload)
 	r.Get("/api/nodes/ca-cert", nodeH.CACert)
 
+	// ── Storage Object API — service key auth (X-Storage-Key), no JWT required ───
+	// Services (containers) call these endpoints using their per-service API key.
+	// The admin management endpoints (/api/storages/*) still require JWT above.
+	r.Get("/api/storage/{storageId}/list", storageH.ObjectList)
+	r.Get("/api/storage/{storageId}/objects/*", storageH.ObjectGet)
+	r.Put("/api/storage/{storageId}/objects/*", storageH.ObjectPut)
+	r.Delete("/api/storage/{storageId}/objects/*", storageH.ObjectDelete)
+	r.Post("/api/storage/{storageId}/multipart/init", storageH.MultipartInit)
+	r.Put("/api/storage/{storageId}/multipart/{uploadId}/part/{partNumber}", storageH.MultipartUploadPart)
+	r.Post("/api/storage/{storageId}/multipart/{uploadId}/complete", storageH.MultipartComplete)
+	r.Delete("/api/storage/{storageId}/multipart/{uploadId}", storageH.MultipartAbort)
+
 	// ─── Authenticated routes (with 30s request timeout) ─────────────────────────
 	// SSE streaming routes are registered in a separate group below WITHOUT this
 	// timeout so long-running builds don't get killed at 30s.
@@ -463,16 +475,21 @@ func serve() {
 		// ── Storages (admin + superadmin) ────────────────────────────────
 		r.Group(func(r chi.Router) {
 			r.Use(mw.RequireRole(model.RoleSuperAdmin, model.RoleAdmin))
+			// Bucket management
 			r.Get("/api/storages", storageH.List)
 			r.Post("/api/storages", storageH.Create)
 			r.Get("/api/storages/{storageId}", storageH.Get)
 			r.Delete("/api/storages/{storageId}", storageH.Delete)
-			r.Post("/api/storages/{storageId}/rotate-key", storageH.RotateKey)
+			// Service access management
 			r.Get("/api/storages/{storageId}/access", storageH.ListAccess)
 			r.Post("/api/storages/{storageId}/access", storageH.GrantAccess)
+			r.Patch("/api/storages/{storageId}/access/{serviceId}", storageH.UpdateAccess)
 			r.Delete("/api/storages/{storageId}/access/{serviceId}", storageH.RevokeAccess)
-			r.Get("/api/storages/{storageId}/kv", storageH.ListKeys)
-			r.Delete("/api/storages/{storageId}/kv/{key}", storageH.AdminDeleteKey)
+			r.Post("/api/storages/{storageId}/access/{serviceId}/rotate-key", storageH.RotateServiceKey)
+			// Admin file browser & stats
+			r.Get("/api/storages/{storageId}/browse", storageH.Browse)
+			r.Delete("/api/storages/{storageId}/objects", storageH.AdminDeleteObject)
+			r.Get("/api/storages/{storageId}/stats", storageH.Stats)
 		})
 
 		// ── Superadmin: platform settings ─────────────────────────────────
