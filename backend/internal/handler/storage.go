@@ -1093,7 +1093,7 @@ func listObjects(storageID int64, prefix string) ([]objectEntry, error) {
 	if err := os.MkdirAll(root, 0750); err != nil {
 		return nil, err
 	}
-	var out []objectEntry
+	out := make([]objectEntry, 0)
 	err := filepath.Walk(root, func(path string, info os.FileInfo, walkerr error) error {
 		if walkerr != nil || info.IsDir() {
 			return nil

@@ -110,10 +110,11 @@ function FileBrowser({ storageId }: { storageId: number }) {
   const [prefix, setPrefix] = useState('')
   const fileInputRef = useRef<HTMLInputElement>(null)
 
-  const { data: objects = [], isLoading, refetch } = useQuery({
+  const { data, isLoading, refetch } = useQuery({
     queryKey: ['storage-browse', storageId, prefix],
     queryFn: () => storageApi.browse(storageId, prefix || undefined),
   })
+  const objects = Array.isArray(data) ? data : []
 
   const deleteObjectMutation = useMutation({
     mutationFn: (path: string) => storageApi.adminDeleteObject(storageId, path),
