@@ -28,6 +28,7 @@ import { formatDateFull } from '@/lib/dateFormat'
 
 const STATUS_CFG = {
   connected: { label: 'Connected', icon: CheckCircle2, cls: 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border-emerald-300/30' },
+  awaiting_approval: { label: 'Awaiting Approval', icon: Clock, cls: 'bg-blue-500/15 text-blue-600 dark:text-blue-400 border-blue-300/30' },
   pending:   { label: 'Pending',   icon: Clock,        cls: 'bg-amber-500/15 text-amber-600 dark:text-amber-400 border-amber-300/30' },
   offline:   { label: 'Offline',   icon: WifiOff,      cls: 'bg-slate-500/10 text-slate-600 dark:text-slate-400 border-slate-300/30' },
   error:     { label: 'Error',     icon: AlertCircle,  cls: 'bg-red-500/15 text-red-600 dark:text-red-400 border-red-300/30' },
@@ -230,6 +231,35 @@ export function NodesPage() {
     onError: () => toast.error('Failed to remove node.'),
   })
 
+  const approveMutation = useMutation({
+    mutationFn: (id: number) => nodesApi.approve(id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['nodes'] })
+      toast.success('Node approved and connected.')
+    },
+    onError: () => toast.error('Failed to approve node.'),
+  })
+
+  const rejectMutation = useMutation({
+    mutationFn: (id: number) => nodesApi.reject(id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['nodes'] })
+      toast.success('Node connection rejected.')
+    },
+    onError: () => toast.error('Failed to reject node.'),
+  })
+
+  const regenerateMutation = useMutation({
+    mutationFn: (id: number) => nodesApi.regenerateToken(id),
+    onSuccess: (data) => {
+      qc.invalidateQueries({ queryKey: ['nodes'] })
+      setJoinResult(data)
+      setAddOpen(true)
+      toast.success('Token regenerated.')
+    },
+    onError: () => toast.error('Failed to regenerate token.'),
+  })
+
   // ── Render ─────────────────────────────────────────────────────────────────
   if (!canManage) {
     return (
@@ -365,13 +395,21 @@ export function NodesPage() {
                 return (
                   <tr key={node.id} className={idx !== nodes.length - 1 ? 'border-b' : ''}>
                     <td className="px-4 py-3">
-                      <div className="flex items-center gap-2">
-                        <span className="font-medium">{node.name}</span>
-                        {isBrain && (
-                          <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 border border-amber-300/30 px-2 py-0.5 text-xs font-medium text-amber-600 dark:text-amber-400">
-                            <Crown className="h-3 w-3" />
-                            Brain
-                          </span>
+                      <div className="flex flex-col gap-0.5">
+                        <div className="flex items-center gap-2">
+                          <span className="font-medium">{node.name}</span>
+                          {isBrain && (
+                            <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 border border-amber-300/30 px-2 py-0.5 text-xs font-medium text-amber-600 dark:text-amber-400">
+                              <Crown className="h-3 w-3" />
+                              Brain
+                            </span>
+                          )}
+                        </div>
+                        {node.hostname && (
+                          <div className="text-[10px] text-muted-foreground flex items-center gap-1">
+                            <span className="opacity-70">Host:</span> {node.hostname}
+                            {node.os_info && <span className="opacity-40">| {node.os_info}</span>}
+                          </div>
                         )}
                       </div>
                     </td>
@@ -393,6 +431,45 @@ export function NodesPage() {
                       {node.rqlite_addr || <span className="italic opacity-50">—</span>}
                     </td>
                     <td className="px-4 py-3 flex items-center gap-1">
+                      {node.status === 'awaiting_approval' && (
+                        <>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="h-8 text-emerald-600 hover:text-emerald-700 hover:bg-emerald-50 dark:hover:bg-emerald-500/10"
+                            onClick={() => {
+                              if (confirm(`Allow node "${node.name}" (${node.ip}) to join the cluster?`)) {
+                                approveMutation.mutate(node.id)
+                              }
+                            }}
+                          >
+                            Allow
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-8 text-muted-foreground hover:text-destructive"
+                            onClick={() => {
+                              if (confirm(`Reject connection from "${node.name}" (${node.ip})?`)) {
+                                rejectMutation.mutate(node.id)
+                              }
+                            }}
+                          >
+                            Reject
+                          </Button>
+                        </>
+                      )}
+                      {node.status === 'pending' && (
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-8 w-8"
+                          title="Regenerate Join Command"
+                          onClick={() => regenerateMutation.mutate(node.id)}
+                        >
+                          <RefreshCw className={`h-4 w-4 ${regenerateMutation.isPending ? 'animate-spin' : ''}`} />
+                        </Button>
+                      )}
                       <SSHCommandDialog node={node} />
                       <Button
                         variant="ghost"

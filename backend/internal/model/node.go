@@ -6,10 +6,11 @@ import "time"
 type NodeStatus string
 
 const (
-	NodeStatusPending   NodeStatus = "pending"
-	NodeStatusConnected NodeStatus = "connected"
-	NodeStatusOffline   NodeStatus = "offline"
-	NodeStatusError     NodeStatus = "error"
+	NodeStatusPending          NodeStatus = "pending"
+	NodeStatusAwaitingApproval NodeStatus = "awaiting_approval"
+	NodeStatusConnected        NodeStatus = "connected"
+	NodeStatusOffline          NodeStatus = "offline"
+	NodeStatusError            NodeStatus = "error"
 )
 
 // Node is a remote worker server connected to the main FeatherDeploy instance
@@ -21,6 +22,8 @@ type Node struct {
 	IP             string     `json:"ip"`
 	Port           int        `json:"port"` // mTLS API port (default 7443)
 	Status         NodeStatus `json:"status"`
+	Hostname       string     `json:"hostname"`
+	OSInfo         string     `json:"os_info"`
 	JoinToken      string     `json:"join_token,omitempty"`
 	TokenExpiresAt *time.Time `json:"token_expires_at,omitempty"`
 	NodeCertPEM    string     `json:"-"`           // not exposed to clients
@@ -37,6 +40,8 @@ type NodeSummary struct {
 	IP         string     `json:"ip"`
 	Port       int        `json:"port"`
 	Status     NodeStatus `json:"status"`
+	Hostname   string     `json:"hostname"`
+	OSInfo     string     `json:"os_info"`
 	RqliteAddr string     `json:"rqlite_addr"`
 	LastSeen   *time.Time `json:"last_seen"`
 	CreatedAt  time.Time  `json:"created_at"`

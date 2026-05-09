@@ -215,7 +215,9 @@ CREATE TABLE IF NOT EXISTS nodes (
     ip               TEXT     NOT NULL,
     port             INTEGER  NOT NULL DEFAULT 7443,           -- mTLS API port on the node
     status           TEXT     NOT NULL DEFAULT 'pending'
-                              CHECK(status IN ('pending','connected','offline','error')),
+                              CHECK(status IN ('pending','awaiting_approval','connected','offline','error')),
+    hostname         TEXT     NOT NULL DEFAULT '',
+    os_info          TEXT     NOT NULL DEFAULT '',
     join_token       TEXT     UNIQUE,                          -- single-use registration token
     token_expires_at DATETIME,
     node_cert_pem    TEXT     NOT NULL DEFAULT '',             -- TLS cert signed by our CA
@@ -263,6 +265,8 @@ ALTER TABLE nodes ADD COLUMN disk_used    INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE nodes ADD COLUMN disk_total   INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE nodes ADD COLUMN last_stats_at DATETIME;
 ALTER TABLE nodes ADD COLUMN node_id      TEXT    NOT NULL DEFAULT '';  -- hostname used as election ID
+ALTER TABLE nodes ADD COLUMN hostname      TEXT    NOT NULL DEFAULT '';
+ALTER TABLE nodes ADD COLUMN os_info       TEXT    NOT NULL DEFAULT '';
 
 -- 015: system_settings — key-value store for branding and panel-wide configuration
 -- Note: column is named setting_key (not key) because key is reserved in rqlite.

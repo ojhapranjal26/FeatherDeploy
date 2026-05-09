@@ -110,6 +110,8 @@ func (h *NodeHandler) List(w http.ResponseWriter, r *http.Request) {
 			t, _ := time.Parse(time.RFC3339, lastSeen.String)
 			n.LastSeen = &t
 		}
+		// Load hostname and OS info
+		h.db.QueryRowContext(r.Context(), `SELECT hostname, os_info FROM nodes WHERE id=?`, n.ID).Scan(&n.Hostname, &n.OSInfo)
 		nodes = append(nodes, n)
 	}
 	writeJSON(w, http.StatusOK, nodes)
@@ -150,6 +152,38 @@ func (h *NodeHandler) Add(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]interface{}{
 		"id":               id,
 		"name":             req.Name,
+		"join_token":       token,
+		"token_expires_at": expires,
+		"join_command":     h.joinCommand(token),
+	})
+}
+
+// POST /api/nodes/{nodeID}/token — regenerate join token for a pending node
+func (h *NodeHandler) RegenerateToken(w http.ResponseWriter, r *http.Request) {
+	nodeID, err := strconv.ParseInt(chi.URLParam(r, "nodeID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errMap("invalid node ID"))
+		return
+	}
+
+	token := randomHex20()
+	expires := time.Now().Add(24 * time.Hour)
+
+	res, err := h.db.ExecContext(r.Context(),
+		`UPDATE nodes SET join_token=?, token_expires_at=?, status='pending' WHERE id=?`,
+		token, expires.Format(time.RFC3339), nodeID,
+	)
+	if err != nil {
+		slog.Error("regenerate token", "err", err)
+		writeJSON(w, http.StatusInternalServerError, errMap("internal error"))
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		writeJSON(w, http.StatusNotFound, errMap("node not found"))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"join_token":       token,
 		"token_expires_at": expires,
 		"join_command":     h.joinCommand(token),
@@ -259,10 +293,28 @@ func (h *NodeHandler) CompleteJoin(w http.ResponseWriter, r *http.Request) {
 
 	var payload struct {
 		RqliteAddr string `json:"rqlite_addr"` // host:port for rqlite Raft
+		Hostname   string `json:"hostname"`
+		OSInfo     string `json:"os_info"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		writeJSON(w, http.StatusBadRequest, errMap("invalid JSON"))
 		return
+	}
+
+	// Detect actual IP
+	nodeIP := r.Header.Get("X-Forwarded-For")
+	if nodeIP == "" {
+		nodeIP = r.Header.Get("X-Real-IP")
+	}
+	if nodeIP == "" {
+		nodeIP, _, _ = net.SplitHostPort(r.RemoteAddr)
+	}
+	if nodeIP == "" {
+		nodeIP = r.RemoteAddr
+	}
+	// If it's a comma-separated list from X-Forwarded-For, take the first one
+	if idx := strings.Index(nodeIP, ","); idx >= 0 {
+		nodeIP = strings.TrimSpace(nodeIP[:idx])
 	}
 
 	// Load node info
@@ -282,15 +334,14 @@ func (h *NodeHandler) CompleteJoin(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, errMap("CA not available"))
 		return
 	}
-	nodeCert, err := pki.SignNodeCert(ca, node.Name, node.IP)
+	nodeCert, err := pki.SignNodeCert(ca, node.Name, nodeIP)
 	if err != nil {
 		slog.Error("complete-join: sign cert", "err", err)
 		writeJSON(w, http.StatusInternalServerError, errMap("cert signing failed"))
 		return
 	}
 
-	// Encrypt env vars using the join token as passphrase (AES-256-GCM,
-	// key derived via SHA-256 from the token — same as existing crypto package)
+	// Encrypt env vars using the join token as passphrase
 	envVars := h.readEnvFile()
 	encryptedEnv, err := crypto.Encrypt(envVars, token)
 	if err != nil {
@@ -299,12 +350,12 @@ func (h *NodeHandler) CompleteJoin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Update node record: mark connected, save cert, clear join token
+	// Update node record: mark awaiting_approval, save cert, clear join token, save real IP
 	_, err = h.db.ExecContext(r.Context(),
-		`UPDATE nodes SET status='connected', node_cert_pem=?, rqlite_addr=?,
+		`UPDATE nodes SET status='awaiting_approval', ip=?, hostname=?, os_info=?, node_id=?, node_cert_pem=?, rqlite_addr=?,
 		 join_token=NULL, token_expires_at=NULL, last_seen=datetime('now'),
 		 updated_at=datetime('now') WHERE id=?`,
-		nodeCert.CertPEM, payload.RqliteAddr, node.ID,
+		nodeIP, payload.Hostname, payload.OSInfo, payload.Hostname, nodeCert.CertPEM, payload.RqliteAddr, node.ID,
 	)
 	if err != nil {
 		slog.Error("complete-join: update node", "err", err)
@@ -323,6 +374,52 @@ func (h *NodeHandler) CompleteJoin(w http.ResponseWriter, r *http.Request) {
 		"rqlite_main":    "127.0.0.1:4002", // main Raft addr to join
 		"ssh_public_key": sshPubKey,        // add to /root/.ssh/authorized_keys
 	})
+}
+
+// POST /api/nodes/{nodeID}/approve — approve a node that is awaiting approval
+func (h *NodeHandler) Approve(w http.ResponseWriter, r *http.Request) {
+	nodeID, err := strconv.ParseInt(chi.URLParam(r, "nodeID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errMap("invalid node ID"))
+		return
+	}
+
+	res, err := h.db.ExecContext(r.Context(),
+		`UPDATE nodes SET status='connected', updated_at=datetime('now') WHERE id=? AND status='awaiting_approval'`,
+		nodeID,
+	)
+	if err != nil {
+		slog.Error("approve node", "err", err)
+		writeJSON(w, http.StatusInternalServerError, errMap("internal error"))
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		writeJSON(w, http.StatusNotFound, errMap("node not found or not awaiting approval"))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"ok": "1"})
+}
+
+// POST /api/nodes/{nodeID}/reject — reject a node that is awaiting approval
+func (h *NodeHandler) Reject(w http.ResponseWriter, r *http.Request) {
+	nodeID, err := strconv.ParseInt(chi.URLParam(r, "nodeID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errMap("invalid node ID"))
+		return
+	}
+
+	// We simply delete the node record if rejected
+	res, err := h.db.ExecContext(r.Context(), `DELETE FROM nodes WHERE id=? AND status='awaiting_approval'`, nodeID)
+	if err != nil {
+		slog.Error("reject node", "err", err)
+		writeJSON(w, http.StatusInternalServerError, errMap("internal error"))
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		writeJSON(w, http.StatusNotFound, errMap("node not found or not awaiting approval"))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"ok": "1"})
 }
 
 // POST /api/nodes/{nodeID}/ping — node heartbeat + stats
@@ -556,12 +653,19 @@ install_rqlite() {
 	command -v rqlited >/dev/null 2>&1 && { echo "  rqlited already installed"; return; }
 	echo "==> Installing rqlite ${RQLITE_VER}..."
 	local TAR="rqlite-v${RQLITE_VER}-linux-amd64.tar.gz"
-	curl -fsSL "https://github.com/rqlite/rqlite/releases/download/v${RQLITE_VER}/${TAR}" -o "/tmp/${TAR}"
-	local DIR; DIR=$(tar -tzf "/tmp/${TAR}" | head -1 | cut -f1 -d"/")
-	tar -xzf "/tmp/${TAR}" -C /tmp/
-	install -m 755 "/tmp/${DIR}/rqlited" /usr/local/bin/rqlited
-	install -m 755 "/tmp/${DIR}/rqlite"  /usr/local/bin/rqlite
-	rm -rf "/tmp/${TAR}" "/tmp/${DIR}"
+	local TMP_DIR="/tmp/rqlite-install"
+	mkdir -p "$TMP_DIR"
+	if ! curl -fsSL "https://github.com/rqlite/rqlite/releases/download/v${RQLITE_VER}/${TAR}" -o "$TMP_DIR/${TAR}"; then
+		echo "ERROR: Failed to download rqlite." >&2; exit 1
+	fi
+	tar -xzf "$TMP_DIR/${TAR}" -C "$TMP_DIR"
+	local BIN_DIR; BIN_DIR=$(find "$TMP_DIR" -maxdepth 1 -type d -name "rqlite-v*" | head -1)
+	if [ -z "$BIN_DIR" ]; then
+		BIN_DIR="$TMP_DIR/rqlite-v${RQLITE_VER}-linux-amd64"
+	fi
+	install -m 755 "$BIN_DIR/rqlited" /usr/local/bin/rqlited
+	install -m 755 "$BIN_DIR/rqlite"  /usr/local/bin/rqlite
+	rm -rf "$TMP_DIR"
 	echo "  rqlited installed"
 }
 

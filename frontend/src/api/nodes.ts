@@ -1,6 +1,6 @@
 import client from './client'
 
-export type NodeStatus = 'pending' | 'connected' | 'offline' | 'error'
+export type NodeStatus = 'pending' | 'awaiting_approval' | 'connected' | 'offline' | 'error'
 
 export interface Node {
   id: number
@@ -8,6 +8,8 @@ export interface Node {
   ip: string
   port: number
   status: NodeStatus
+  hostname: string
+  os_info: string
   rqlite_addr: string
   last_seen: string | null
   created_at: string
@@ -52,6 +54,13 @@ export const nodesApi = {
     client.post<AddNodeResponse>('/nodes', data).then((r) => r.data),
 
   delete: (id: number) => client.delete(`/nodes/${id}`),
+
+  approve: (id: number) => client.post(`/nodes/${id}/approve`),
+
+  reject: (id: number) => client.post(`/nodes/${id}/reject`),
+
+  regenerateToken: (id: number) =>
+    client.post<AddNodeResponse>(`/nodes/${id}/token`).then((r) => r.data),
 
   sshCommand: (id: number) =>
     client.get<{ command: string; key_path: string; note: string }>(`/nodes/${id}/ssh-command`).then((r) => r.data),

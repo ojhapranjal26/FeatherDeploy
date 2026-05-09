@@ -83,7 +83,12 @@ func runJoin(args []string) {
 	must(os.MkdirAll(rqliteData, 0700))
 
 	// POST /api/nodes/{token}/complete-join
-	body, _ := json.Marshal(map[string]string{"rqlite_addr": nodeAddr})
+	payload := map[string]string{
+		"rqlite_addr": nodeAddr,
+		"hostname":    hostname(),
+		"os_info":     getOSInfo(),
+	}
+	body, _ := json.Marshal(payload)
 	resp, err := http.Post(mainURL+"/api/nodes/"+token+"/complete-join",
 		"application/json", bytes.NewReader(body))
 	if err != nil {
@@ -144,12 +149,6 @@ func runJoin(args []string) {
 	runCmd("systemctl", "enable", "--now", "rqlite-node")
 	waitForRqlite(60)
 
-	// Connect to local rqlite to update our node record with the node_id.
-	// We identify the row by join_token — that is the credential this node used to join.
-	if db, err := appDb.OpenRqlite("http://" + rqliteHTTP); err == nil {
-		db.Exec(`UPDATE nodes SET node_id=? WHERE join_token=?`, nodeID, token)
-		db.Close()
-	}
 
 	// Write and enable featherdeploy-node serve service
 	writeNodeServeService()
@@ -506,5 +505,13 @@ func readEnvFileVar(path, key string) string {
 		}
 	}
 	return ""
+}
+
+func getOSInfo() string {
+	out, err := exec.Command("uname", "-snrvm").Output()
+	if err != nil {
+		return "Linux"
+	}
+	return strings.TrimSpace(string(out))
 }
 
