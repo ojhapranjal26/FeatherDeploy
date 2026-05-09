@@ -946,9 +946,6 @@ func setupIPTablesProtection() {
 	rules := []rule{
 		{"featherdeploy service ports", 10000, 14999},
 		{"featherdeploy database ports", 15000, 29999},
-		{"featherdeploy fdnet cluster ports", 30000, 59999},
-		{"rqlite raft", 4002, 4002},
-		{"rqlite http", 4001, 4001},
 	}
 
 	// ── Remove legacy bare DROP rules (without --ctstate NEW) ─────────────────
@@ -1014,6 +1011,15 @@ func setupIPTablesProtection() {
 
 	// Persist rules so they survive reboots.
 	persistIPTables()
+
+	// ── Ensure cluster ports are open ────────────────────────────────────────
+	fmt.Println("\n── Opening cluster ports (4001, 4002, 2379, 2380) ──────────")
+	clusterPorts := []string{"4001", "4002", "2379", "2380"}
+	for _, p := range clusterPorts {
+		if runSilent(iptablesPath, "-C", "INPUT", "-p", "tcp", "--dport", p, "-j", "ACCEPT") != nil {
+			mustRun(iptablesPath, "-I", "INPUT", "1", "-p", "tcp", "--dport", p, "-j", "ACCEPT")
+		}
+	}
 }
 
 // setEphemeralPortRange shifts the kernel's local (ephemeral) port range to
