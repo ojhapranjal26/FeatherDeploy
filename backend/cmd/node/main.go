@@ -36,7 +36,7 @@ const (
 	nodeIDFile = configDir + "/node.id"
 	rqliteUnit = "/etc/systemd/system/rqlite-node.service"
 	rqliteData = dataDir + "/rqlite-data"
-	rqliteHTTP = "127.0.0.1:4001"
+	rqliteHTTP = "0.0.0.0:4001"
 	rqliteRaft = "0.0.0.0:4002"
 )
 
@@ -142,9 +142,12 @@ func runJoin(args []string) {
 	// Write and start rqlite service (join main Raft cluster)
 	// Determine main IP from mainURL for Raft join address
 	mainIP := extractHost(mainURL)
-	rqliteJoinAddr := mainIP + ":4002"
+	rqliteJoinAddr := "http://" + mainIP + ":4001"
 	if reply.RqliteMain != "" {
-		rqliteJoinAddr = mainIP + ":" + strings.Split(reply.RqliteMain, ":")[1]
+		// If server explicitly provided a different port, honor it
+		parts := strings.Split(reply.RqliteMain, ":")
+		port := parts[len(parts)-1]
+		rqliteJoinAddr = "http://" + mainIP + ":" + port
 	}
 	writeRqliteService(nodeID, rqliteJoinAddr)
 	runCmd("systemctl", "daemon-reload")
@@ -359,6 +362,7 @@ User=root
 ExecStart=/usr/local/bin/rqlited \
   -node-id=%s \
   -http-addr=%s \
+  -http-adv-addr=%s:4001 \
   -raft-addr=%s \
   -raft-adv-addr=%s:4002 \
   -join=%s \
@@ -373,7 +377,7 @@ WantedBy=multi-user.target
 func writeRqliteService(nodeID, mainRaft string) {
 	myIP := localIP()
 	content := fmt.Sprintf(rqliteServiceTmpl,
-		nodeID, rqliteHTTP, rqliteRaft, myIP, mainRaft, rqliteData)
+		nodeID, rqliteHTTP, myIP, rqliteRaft, myIP, mainRaft, rqliteData)
 	writeFile(rqliteUnit, content, 0644)
 }
 
