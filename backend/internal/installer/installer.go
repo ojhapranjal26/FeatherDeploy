@@ -122,7 +122,6 @@ func Run() {
 	if err := installPackages(); err != nil {
 		die("package installation failed: %v", err)
 	}
-	installRqlite()
 	configureCrun()
 
 	// ── Step 4: Create service OS user + directories ─────────────────────────
@@ -1789,6 +1788,11 @@ func RunUpdate() {
 	// This must be called on every update so new config keys are always present.
 	configureCrun()
 	ensureNetworkingBackend(svcUser, homedir)
+
+	// ── Install/Update binaries ──────────────────────────────────────────────
+	fmt.Println("\n── Updating rqlite and etcd binaries ───────────────────────────")
+	installRqlite()
+	installEtcd()
 
 	// ── Restart rqlite + etcd + featherdeploy ────────────────────────────────
 	fmt.Println("\n── Restarting services ─────────────────────────────────────────")
