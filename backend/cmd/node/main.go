@@ -149,6 +149,31 @@ func runJoin(args []string) {
 		port := parts[len(parts)-1]
 		rqliteJoinAddr = "http://" + mainIP + ":" + port
 	}
+
+	// Connectivity check: ensure we can reach the main server's rqlite port
+	// This helps diagnose firewall/network issues before we start the service.
+	fmt.Printf("==> Checking connectivity to main rqlite at %s...\n", rqliteJoinAddr)
+	{
+		client := &http.Client{Timeout: 10 * time.Second}
+		// Check HTTP port (4001)
+		if resp, err := client.Get(rqliteJoinAddr + "/readyz"); err != nil {
+			fmt.Printf("  WARNING: cannot reach main rqlite HTTP API: %v\n", err)
+			fmt.Println("  Ensure port 4001 is open in your cloud firewall (Security Groups).")
+		} else {
+			resp.Body.Close()
+			fmt.Println("  ✓ HTTP connectivity confirmed")
+		}
+		// Check Raft port (4002) - simple TCP dial
+		raftAddr := mainIP + ":4002"
+		if conn, err := net.DialTimeout("tcp", raftAddr, 5*time.Second); err != nil {
+			fmt.Printf("  WARNING: cannot reach main rqlite Raft port at %s: %v\n", raftAddr, err)
+			fmt.Println("  Ensure port 4002 is open in your cloud firewall (Security Groups).")
+		} else {
+			conn.Close()
+			fmt.Println("  ✓ Raft connectivity confirmed")
+		}
+	}
+
 	writeRqliteService(nodeID, rqliteJoinAddr)
 	runCmd("systemctl", "daemon-reload")
 	runCmd("systemctl", "enable", "--now", "rqlite-node")
@@ -410,11 +435,17 @@ func waitForRqlite(maxSecs int) {
 		if resp, err := http.Get(url); err == nil && resp.StatusCode == 200 {
 			resp.Body.Close()
 			slog.Info("rqlite ready")
-			return
+			return nil
 		}
 		time.Sleep(time.Second)
 	}
-	slog.Warn("rqlite did not become ready in time")
+	fmt.Println("\nWARN: rqlite did not become ready in time")
+	fmt.Println("This node may have failed to join the Raft cluster.")
+	fmt.Println("Troubleshooting:")
+	fmt.Println("  1. Check node logs:  sudo journalctl -u rqlite-node -n 100 --no-pager")
+	fmt.Println("  2. Check server logs: sudo journalctl -u rqlite -n 100 --no-pager")
+	fmt.Println("  3. Ensure ports 4001 and 4002 are open in your cloud console.")
+	return fmt.Errorf("timeout")
 }
 
 func hostname() string {
