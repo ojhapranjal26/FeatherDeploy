@@ -44,7 +44,7 @@ type ClusterBrain struct {
 
 // StartBrain starts a goroutine that writes the brain heartbeat every
 // HeartbeatInterval.  stats() is called each tick to collect current metrics.
-func StartBrain(ctx context.Context, db *sql.DB, brainID, brainAddr string, stats func() BrainStats) {
+func StartBrain(ctx context.Context, db *sql.DB, brainID, brainAddr string, stats func() BrainStats, failoverCallback func(nodeID string)) {
 	go func() {
 		writeBrain(db, brainID, brainAddr, stats())
 		ticker := time.NewTicker(HeartbeatInterval)
@@ -53,11 +53,37 @@ func StartBrain(ctx context.Context, db *sql.DB, brainID, brainAddr string, stat
 			select {
 			case <-ticker.C:
 				writeBrain(db, brainID, brainAddr, stats())
+				// Run node health check every tick
+				checkNodeHealth(db, failoverCallback)
 			case <-ctx.Done():
 				return
 			}
 		}
 	}()
+}
+
+func checkNodeHealth(db *sql.DB, failoverCallback func(nodeID string)) {
+	// Find nodes that were 'connected' but haven't been seen for 60 seconds
+	rows, err := db.Query(`
+		SELECT node_id FROM nodes
+		WHERE status='connected'
+		  AND last_seen <= datetime('now', '-60 seconds')`)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var nid string
+		if err := rows.Scan(&nid); err == nil {
+			slog.Warn("node health check: node appears offline, triggering failover", "node_id", nid)
+			// Mark node as offline first to avoid multiple failover triggers
+			db.Exec(`UPDATE nodes SET status='offline' WHERE node_id=?`, nid)
+			if failoverCallback != nil {
+				go failoverCallback(nid)
+			}
+		}
+	}
 }
 
 func writeBrain(db *sql.DB, brainID, brainAddr string, s BrainStats) {

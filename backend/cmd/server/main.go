@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io/fs"
@@ -29,6 +31,7 @@ import (
 	mw "github.com/ojhapranjal26/featherdeploy/backend/internal/middleware"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/model"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/netdaemon"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/pki"
 	"github.com/ojhapranjal26/featherdeploy/backend/web"
 )
 
@@ -315,8 +318,31 @@ func serve() {
 	}
 	heartbeat.StartBrain(context.Background(), db, "main", brainAddr, func() heartbeat.BrainStats {
 		return collectServerStats()
+	}, func(deadNodeID string) {
+		slog.Info("failover: migrating services from dead node", "node_id", deadNodeID)
+		rows, err := db.Query(`SELECT id FROM services WHERE node_id=?`, deadNodeID)
+		if err != nil {
+			return
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var svcID int64
+			if err := rows.Scan(&svcID); err == nil {
+				// Trigger a new deployment with target_node_id='auto'
+				res, err := db.Exec(`INSERT INTO deployments 
+					(service_id, triggered_by, deploy_type, status, target_node_id, deploy_log, created_at)
+					VALUES (?, 1, 'git', 'pending', 'auto', 'Failover: migrating from dead node', datetime('now'))`, svcID)
+				if err == nil {
+					depID, _ := res.LastInsertId()
+					deploy.Enqueue(db, *jwtSecret, depID, svcID, 1)
+				}
+			}
+		}
 	})
-	slog.Info("brain heartbeat started")
+	slog.Info("brain heartbeat started with failover monitor")
+
+	// Start weekly mTLS certificate rotation
+	startWeeklyCertRotation(context.Background(), db, *jwtSecret)
 
 	// ─── Handlers ─────────────────────────────────────────────────────────────
 	smtpPortInt, _ := strconv.Atoi(*smtpPort)
@@ -1276,4 +1302,97 @@ func startStatsCollector(db *sql.DB) {
 			rollupAndPrune()
 		}
 	}
+}
+
+func startWeeklyCertRotation(ctx context.Context, db *sql.DB, jwtSecret string) {
+	go func() {
+		// Initial check on startup
+		rotateCerts(db, jwtSecret)
+
+		ticker := time.NewTicker(24 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				rotateCerts(db, jwtSecret)
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+}
+
+func rotateCerts(db *sql.DB, jwtSecret string) {
+	// Find nodes needing rotation (rotated more than 7 days ago, or never rotated)
+	rows, err := db.Query(`SELECT id, name, ip, port FROM nodes WHERE status='connected' AND (last_rotated_at IS NULL OR last_rotated_at <= datetime('now', '-7 days'))`)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+
+	var caCertPEM, encCAKeyPEM string
+	err = db.QueryRow(`SELECT cert_pem, key_pem FROM pki_ca WHERE id=1`).Scan(&caCertPEM, &encCAKeyPEM)
+	if err != nil {
+		return
+	}
+	caKeyPEM, _ := pki.DecryptKey(encCAKeyPEM, jwtSecret)
+	ca := &pki.CA{CertPEM: caCertPEM, KeyPEM: caKeyPEM}
+
+	for rows.Next() {
+		var id int64
+		var name, ip string
+		var port int
+		if err := rows.Scan(&id, &name, &ip, &port); err != nil {
+			continue
+		}
+
+		slog.Info("pki: rotating certificate for node", "name", name, "ip", ip)
+		nodeCert, err := pki.SignNodeCert(ca, name, ip)
+		if err != nil {
+			slog.Error("pki: failed to sign new cert", "node", name, "err", err)
+			continue
+		}
+
+		if err := pushCertToNode(ip, port, nodeCert, caCertPEM); err != nil {
+			slog.Error("pki: failed to push cert to node", "node", name, "err", err)
+			continue
+		}
+
+		// Update last_rotated_at
+		db.Exec(`UPDATE nodes SET last_rotated_at=datetime('now'), node_cert_pem=? WHERE id=?`, nodeCert.CertPEM, id)
+	}
+}
+
+func pushCertToNode(ip string, port int, cert *pki.NodeCert, caPEM string) error {
+	payload := map[string]string{
+		"cert_pem": cert.CertPEM,
+		"key_pem":  cert.KeyPEM,
+		"ca_pem":   caPEM,
+	}
+	body, _ := json.Marshal(payload)
+
+	// Build mTLS client using existing certs
+	caFile, _ := os.ReadFile("/etc/featherdeploy/ca.crt")
+	certFile, _ := os.ReadFile("/etc/featherdeploy/node.crt")
+	keyFile, _ := os.ReadFile("/etc/featherdeploy/node.key")
+
+	tlsCfg, err := pki.TLSConfig(string(certFile), string(keyFile), string(caFile))
+	if err != nil {
+		return err
+	}
+	client := &http.Client{
+		Transport: &http.Transport{TLSClientConfig: tlsCfg},
+		Timeout:   10 * time.Second,
+	}
+
+	url := fmt.Sprintf("https://%s:%d/api/node/rotate-cert", ip, port)
+	resp, err := client.Post(url, "application/json", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("status %d", resp.StatusCode)
+	}
+	return nil
 }

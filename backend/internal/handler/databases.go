@@ -88,7 +88,8 @@ func (h *DatabaseHandler) List(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, err := h.db.QueryContext(r.Context(),
 		`SELECT id, project_id, name, db_type, db_version, db_name, db_user, db_password,
-		        COALESCE(host_port, 0), COALESCE(cluster_port, 0), status, container_id, network_public, last_error, created_at, updated_at
+		        COALESCE(host_port, 0), COALESCE(cluster_port, 0), status, container_id, network_public, last_error,
+		        node_id, target_node_id, created_at, updated_at
 		 FROM databases WHERE project_id=? ORDER BY created_at DESC`, projectID)
 	if err != nil {
 		slog.Error("list databases", "err", err)
@@ -104,7 +105,7 @@ func (h *DatabaseHandler) List(w http.ResponseWriter, r *http.Request) {
 		if err := rows.Scan(
 			&d.ID, &d.ProjectID, &d.Name, &d.DBType, &d.DBVersion,
 			&d.DBName, &d.DBUser, &encPass, &d.HostPort, &d.ClusterPort, &d.Status, &d.ContainerID,
-			&npInt, &d.LastError, &d.CreatedAt, &d.UpdatedAt,
+			&npInt, &d.LastError, &d.NodeID, &d.TargetNodeID, &d.CreatedAt, &d.UpdatedAt,
 		); err == nil {
 			d.NetworkPublic = npInt == 1
 			d.EnvVarName = deploy.DBEnvKey(d.Name) + "_URL"
@@ -198,10 +199,10 @@ func (h *DatabaseHandler) Create(w http.ResponseWriter, r *http.Request) {
 
 	res, err := h.db.ExecContext(r.Context(),
 		`INSERT INTO databases
-		  (project_id, name, db_type, db_version, db_name, db_user, db_password, network_public)
-		 VALUES (?,?,?,?,?,?,?,0)`,
+		  (project_id, name, db_type, db_version, db_name, db_user, db_password, network_public, target_node_id)
+		 VALUES (?,?,?,?,?,?,?,0,?)`,
 		projectID, req.Name, req.DBType, req.DBVersion,
-		req.DBName, req.DBUser, encPass)
+		req.DBName, req.DBUser, encPass, req.TargetNodeID)
 	if err != nil {
 		if isUnique(err) {
 			writeJSON(w, http.StatusConflict, errMap("database name already exists in project"))
@@ -448,7 +449,7 @@ func (h *DatabaseHandler) Update(w http.ResponseWriter, r *http.Request) {
 		version = currentVersion
 	}
 
-	if err := deploy.UpdateDatabase(h.db, dbID, version); err != nil {
+	if err := deploy.UpdateDatabase(h.db, dbID, version, req.TargetNodeID); err != nil {
 		slog.Error("update database", "err", err)
 		writeJSON(w, http.StatusInternalServerError, errMap("internal error"))
 		return
@@ -920,11 +921,13 @@ func (h *DatabaseHandler) getByID(w http.ResponseWriter, r *http.Request, projec
 	var encPass string
 	err := h.db.QueryRowContext(r.Context(),
 		`SELECT id, project_id, name, db_type, db_version, db_name, db_user, db_password,
-		        COALESCE(host_port, 0), COALESCE(cluster_port, 0), status, container_id, network_public, last_error, created_at, updated_at
+		        COALESCE(host_port, 0), COALESCE(cluster_port, 0), status, container_id, network_public, last_error,
+		        node_id, target_node_id, created_at, updated_at
 		 FROM databases WHERE id=? AND project_id=?`, dbID, projectID,
 	).Scan(
 		&d.ID, &d.ProjectID, &d.Name, &d.DBType, &d.DBVersion, &d.DBName, &d.DBUser, &encPass,
-		&d.HostPort, &d.ClusterPort, &d.Status, &d.ContainerID, &npInt, &d.LastError, &d.CreatedAt, &d.UpdatedAt,
+		&d.HostPort, &d.ClusterPort, &d.Status, &d.ContainerID, &npInt, &d.LastError,
+		&d.NodeID, &d.TargetNodeID, &d.CreatedAt, &d.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
 		writeJSON(w, http.StatusNotFound, errMap("database not found"))

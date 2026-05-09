@@ -35,6 +35,7 @@ import (
 	"time"
 
 	appCrypto "github.com/ojhapranjal26/featherdeploy/backend/internal/crypto"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/pki"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/caddy"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/detect"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/netdaemon"
@@ -268,12 +269,17 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 	var projectID int64
 	var appPort int
 	var hostPortNull sql.NullInt64
+	var targetNodeID string
+	var oldNodeIDNull, oldCIDNull sql.NullString
+
 	err := db.QueryRow(
-		`SELECT project_id, name, repo_url, repo_branch, repo_folder, framework, build_command, start_command,
-		        app_port, host_port
-		 FROM services WHERE id=?`, svcID,
+		`SELECT s.project_id, s.name, s.repo_url, s.repo_branch, s.repo_folder, s.framework, s.build_command, s.start_command,
+		        s.app_port, s.host_port, d.target_node_id, s.node_id, s.container_id
+		 FROM services s
+		 JOIN deployments d ON d.service_id = s.id
+		 WHERE d.id=?`, depID,
 	).Scan(&projectID, &svcName, &repoURL, &repoBranch, &repoFolder, &framework, &buildCmd, &startCmd,
-		&appPort, &hostPortNull)
+		&appPort, &hostPortNull, &targetNodeID, &oldNodeIDNull, &oldCIDNull)
 	if err != nil {
 		log.add("ERROR: could not load service config: %v", err)
 		markFailed(db, depID, svcID, log.text())
@@ -287,6 +293,49 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 	}
 	if repoBranch == "" {
 		repoBranch = "main"
+	}
+
+	// ── 1a. Select Node ──────────────────────────────────────────────────────
+	// Only the Brain (local host) should perform scheduling.
+	// If we are already running on a worker, we skip this.
+	myID, _ := os.Hostname()
+	// Check if this node is the intended target
+	actualNodeID, schedErr := SelectTargetNode(db, targetNodeID)
+	if schedErr != nil {
+		log.add("ERROR: scheduling failed: %v", schedErr)
+		markFailed(db, depID, svcID, log.text())
+		return
+	}
+
+	// If the selected node is NOT us, dispatch to it and exit
+	if actualNodeID != "main" && actualNodeID != myID {
+		log.add("[scheduler] dispatching deployment to node %q", actualNodeID)
+		if err := dispatchToNode(db, actualNodeID, depID, svcID, userID, jwtSecret); err != nil {
+			log.add("ERROR: dispatch failed: %v", err)
+			markFailed(db, depID, svcID, log.text())
+			return
+		}
+		return
+	}
+
+	db.Exec(`UPDATE deployments SET node_id=? WHERE id=?`, actualNodeID, depID)
+	db.Exec(`UPDATE services SET node_id=? WHERE id=?`, actualNodeID, svcID)
+	log.add("[scheduler] deploying locally on node %q", actualNodeID)
+
+	// ── 1b. Stop existing container (possibly on another node) ───────────────
+	oldCID := oldCIDNull.String
+	oldNodeID := oldNodeIDNull.String
+
+	if oldCID != "" {
+		if oldNodeID != "" && oldNodeID != actualNodeID {
+			log.add("[orchestrator] migration detected: stopping container %s on old node %s...", oldCID[:12], oldNodeID)
+			if err := stopContainerOnNode(db, oldNodeID, oldCID); err != nil {
+				log.add("[orchestrator] warning: could not stop old container: %v", err)
+			}
+		} else {
+			log.add("[podman] stopping existing local container %s...", oldCID[:12])
+			removeContainerIfExists(oldCID)
+		}
 	}
 
 	// ── 1b. Fetch deployment-level deploy_type and artifact_path ─────────────
@@ -390,21 +439,30 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 	// the user left blank (framework, build_command, start_command, app_port)
 	// are filled with sensible defaults derived from the actual repo content.
 	if !repoHasDockerfile {
-		detected := detect.Detect(workDir)
-		if framework == "" && detected.Framework != "" && detected.Framework != "unknown" {
-			framework = detected.Framework
-			log.add("[detect] auto-detected framework: %s", framework)
-		}
-		if strings.TrimSpace(buildCmd) == "" && detected.BuildCommand != "" {
-			buildCmd = detected.BuildCommand
-		}
-		if strings.TrimSpace(startCmd) == "" && detected.StartCommand != "" {
-			startCmd = detected.StartCommand
-		}
-		if appPort <= 0 && detected.AppPort > 0 {
-			appPort = detected.AppPort
+		// Only run detection if key fields are missing.
+		if framework == "" || strings.TrimSpace(startCmd) == "" {
+			detected := detect.Detect(workDir)
+			if framework == "" && detected.Framework != "" && detected.Framework != "unknown" {
+				framework = detected.Framework
+				log.add("[detect] auto-detected framework: %s", framework)
+			}
+			if strings.TrimSpace(buildCmd) == "" && detected.BuildCommand != "" {
+				buildCmd = detected.BuildCommand
+			}
+			if strings.TrimSpace(startCmd) == "" && detected.StartCommand != "" {
+				startCmd = detected.StartCommand
+			}
+			if appPort <= 0 && detected.AppPort > 0 {
+				appPort = detected.AppPort
+			}
 		}
 	}
+
+	// ── 4a. Persist configuration ───────────────────────────────────────────
+	// Save the effective configuration back to the service record.
+	// This ensures future deploys use these settings, and changes are visible in the UI.
+	db.Exec(`UPDATE services SET framework=?, build_command=?, start_command=?, app_port=? WHERE id=?`,
+		framework, buildCmd, startCmd, appPort, svcID)
 
 	// ── 5. Host build step (only when repo ships its own Dockerfile) ──────────
 	// Package-manager commands (pip install, npm install, cargo build, …) must
@@ -991,6 +1049,17 @@ func collectStorageEnvArgs(db *sql.DB, svcID int64, jwtSecret string) []string {
 	}
 	defer rows.Close()
 	var args []string
+	// Get the current brain address for the storage endpoint
+	var brainAddr string
+	db.QueryRow(`SELECT brain_addr FROM cluster_state WHERE id=1`).Scan(&brainAddr)
+	if brainAddr == "" {
+		brainAddr = "http://127.0.0.1:8080"
+	}
+	// Ensure it has /api/storage suffix
+	if strings.HasSuffix(brainAddr, "/") {
+		brainAddr = brainAddr[:len(brainAddr)-1]
+	}
+
 	for rows.Next() {
 		var stID int64
 		var stName, encSvcKey string
@@ -1002,10 +1071,20 @@ func collectStorageEnvArgs(db *sql.DB, svcID int64, jwtSecret string) []string {
 			continue
 		}
 		upper := storageEnvVarName(stName)
+
+		// The endpoint should be reachable from within the container.
+		// If brainAddr is localhost/127.0.0.1, we must use 10.0.2.2 (slirp4netns gateway).
+		endpoint := brainAddr + fmt.Sprintf("/api/storage/%d", stID)
+		if strings.Contains(endpoint, "127.0.0.1") || strings.Contains(endpoint, "localhost") {
+			// Replace with gateway
+			endpoint = strings.Replace(endpoint, "127.0.0.1", "10.0.2.2", 1)
+			endpoint = strings.Replace(endpoint, "localhost", "10.0.2.2", 1)
+		}
+
 		args = append(args,
 			"-e", fmt.Sprintf("STORAGE_%s_KEY=%s", upper, plainKey),
 			"-e", fmt.Sprintf("STORAGE_%s_BUCKET=%s", upper, stName),
-			"-e", fmt.Sprintf("STORAGE_%s_ENDPOINT=http://10.0.2.2:8080/api/storage/%d", upper, stID),
+			"-e", fmt.Sprintf("STORAGE_%s_ENDPOINT=%s", upper, endpoint),
 		)
 	}
 	return args
@@ -1788,17 +1867,53 @@ func startDatabaseRetrying(db *sql.DB, jwtSecret string, dbID int64, attempt int
 	var projectID int64
 	var name, dbType, dbVersion, dbName, dbUser, encPass string
 	var hostPortNull sql.NullInt64
+	var oldNodeID, targetNodeID string
 	err := db.QueryRow(
 		`SELECT project_id, name, db_type, db_version, db_name, db_user, db_password,
-		        host_port
+		        host_port, node_id, target_node_id
 		 FROM databases WHERE id=?`, dbID,
 	).Scan(&projectID, &name, &dbType, &dbVersion, &dbName, &dbUser, &encPass,
-		&hostPortNull)
+		&hostPortNull, &oldNodeID, &targetNodeID)
 	if err != nil {
 		return fmt.Errorf("load database config: %w", err)
 	}
 
 	log := newDBLog(db, dbID)
+
+	// ─── Scheduler ───────────────────────────────────────────────────────────
+	h, _ := os.Hostname()
+	actualNodeID := h
+	if targetNodeID == "auto" {
+		targetNodeID, _ = SelectTargetNode(db, "auto")
+		db.Exec(`UPDATE databases SET target_node_id=? WHERE id=?`, targetNodeID, dbID)
+	}
+	if targetNodeID == "" {
+		targetNodeID = "main"
+	}
+
+	if targetNodeID != actualNodeID && targetNodeID != "main" {
+		log.add("[scheduler] dispatching database to node %q", targetNodeID)
+		if err := dispatchDatabaseToNode(db, jwtSecret, targetNodeID, dbID); err != nil {
+			log.add("ERROR: dispatch failed: %v", err)
+			db.Exec(`UPDATE databases SET status='error', last_error=? WHERE id=?`, err.Error(), dbID)
+			return err
+		}
+		return nil
+	}
+
+	log.add("[scheduler] starting locally on node %q", actualNodeID)
+	db.Exec(`UPDATE databases SET node_id=? WHERE id=?`, actualNodeID, dbID)
+
+	// ─── Migration ───────────────────────────────────────────────────────────
+	if oldNodeID != "" && oldNodeID != actualNodeID && oldNodeID != "main" {
+		log.add("[orchestrator] migration detected: pulling database data from old node %s...", oldNodeID)
+		if err := migrateDatabaseData(db, jwtSecret, oldNodeID, dbID); err != nil {
+			log.add("[orchestrator] warning: migration failed: %v", err)
+			// Continue anyway? Or fail? Usually better to fail if data is critical.
+			log.add("[orchestrator] database may start with empty data!")
+		}
+	}
+
 	log.add("[db-start] starting database id=%d name=%q type=%s version=%s", dbID, name, dbType, dbVersion)
 
 	// activeDBEngine is the container image engine to use. For MySQL databases
@@ -2388,10 +2503,10 @@ func GetDatabaseLogs(dbID int64) (string, error) {
 
 // UpdateDatabase persists configuration changes (db_version) for a database
 // record. A restart is required for the new version to take effect.
-func UpdateDatabase(db *sql.DB, dbID int64, dbVersion string) error {
+func UpdateDatabase(db *sql.DB, dbID int64, dbVersion, targetNodeID string) error {
 	_, err := db.Exec(
-		`UPDATE databases SET db_version=?, updated_at=datetime('now') WHERE id=?`,
-		dbVersion, dbID)
+		`UPDATE databases SET db_version=?, target_node_id=?, updated_at=datetime('now') WHERE id=?`,
+		dbVersion, targetNodeID, dbID)
 	return err
 }
 
@@ -3197,4 +3312,175 @@ func extractTarGz(archivePath, destDir string, log *logBuf) error {
 		}
 	}
 	return nil
+}
+
+func dispatchToNode(db *sql.DB, nodeID string, depID, svcID, userID int64, secret string) error {
+	var ip string
+	var port int
+	err := db.QueryRow(`SELECT ip, port FROM nodes WHERE node_id=?`, nodeID).Scan(&ip, &port)
+	if err != nil {
+		return fmt.Errorf("node %q not found in DB: %w", nodeID, err)
+	}
+
+	// Prepare payload
+	payload := map[string]any{
+		"dep_id":     depID,
+		"svc_id":     svcID,
+		"user_id":    userID,
+		"jwt_secret": secret,
+	}
+	body, _ := json.Marshal(payload)
+
+	// Build mTLS client
+	caPEM, _ := os.ReadFile("/etc/featherdeploy/ca.crt")
+	certPEM, _ := os.ReadFile("/etc/featherdeploy/node.crt")
+	keyPEM, _ := os.ReadFile("/etc/featherdeploy/node.key")
+
+	tlsCfg, err := pki.TLSConfig(string(certPEM), string(keyPEM), string(caPEM))
+	if err != nil {
+		return fmt.Errorf("tls config: %w", err)
+	}
+	client := &http.Client{
+		Transport: &http.Transport{TLSClientConfig: tlsCfg},
+		Timeout:   30 * time.Second,
+	}
+
+	url := fmt.Sprintf("https://%s:%d/api/node/deploy", ip, port)
+	resp, err := client.Post(url, "application/json", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("post to node: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusAccepted {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("node rejected deploy (%d): %s", resp.StatusCode, b)
+	}
+
+	return nil
+}
+
+func stopContainerOnNode(db *sql.DB, nodeID, containerID string) error {
+	var ip string
+	var port int
+	err := db.QueryRow(`SELECT ip, port FROM nodes WHERE node_id=?`, nodeID).Scan(&ip, &port)
+	if err != nil {
+		return fmt.Errorf("node %q not found: %w", nodeID, err)
+	}
+
+	payload := map[string]any{"container_id": containerID}
+	body, _ := json.Marshal(payload)
+
+	caPEM, _ := os.ReadFile("/etc/featherdeploy/ca.crt")
+	certPEM, _ := os.ReadFile("/etc/featherdeploy/node.crt")
+	keyPEM, _ := os.ReadFile("/etc/featherdeploy/node.key")
+
+	tlsCfg, err := pki.TLSConfig(string(certPEM), string(keyPEM), string(caPEM))
+	if err != nil {
+		return fmt.Errorf("tls config: %w", err)
+	}
+	client := &http.Client{
+		Transport: &http.Transport{TLSClientConfig: tlsCfg},
+		Timeout:   10 * time.Second,
+	}
+
+	url := fmt.Sprintf("https://%s:%d/api/node/stop", ip, port)
+	resp, err := client.Post(url, "application/json", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("post to node: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("node rejected stop (%d): %s", resp.StatusCode, b)
+	}
+
+	return nil
+}
+
+func dispatchDatabaseToNode(db *sql.DB, secret, nodeID string, dbID int64) error {
+	var ip string
+	var port int
+	err := db.QueryRow(`SELECT ip, port FROM nodes WHERE node_id=?`, nodeID).Scan(&ip, &port)
+	if err != nil {
+		return fmt.Errorf("node %q not found", nodeID)
+	}
+
+	payload := map[string]any{
+		"db_id":      dbID,
+		"jwt_secret": secret,
+	}
+	body, _ := json.Marshal(payload)
+
+	caFile, _ := os.ReadFile("/etc/featherdeploy/ca.crt")
+	certFile, _ := os.ReadFile("/etc/featherdeploy/node.crt")
+	keyFile, _ := os.ReadFile("/etc/featherdeploy/node.key")
+	tlsCfg, _ := pki.TLSConfig(string(certFile), string(keyFile), string(caFile))
+	client := &http.Client{
+		Transport: &http.Transport{TLSClientConfig: tlsCfg},
+		Timeout:   30 * time.Second,
+	}
+
+	url := fmt.Sprintf("https://%s:%d/api/node/db-start", ip, port)
+	resp, err := client.Post(url, "application/json", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("node rejected db-start (%d): %s", resp.StatusCode, b)
+	}
+	return nil
+}
+
+func migrateDatabaseData(db *sql.DB, secret, oldNodeID string, dbID int64) error {
+	var ip string
+	var port int
+	err := db.QueryRow(`SELECT ip, port FROM nodes WHERE node_id=?`, oldNodeID).Scan(&ip, &port)
+	if err != nil {
+		return fmt.Errorf("old node %q not found", oldNodeID)
+	}
+
+	caFile, _ := os.ReadFile("/etc/featherdeploy/ca.crt")
+	certFile, _ := os.ReadFile("/etc/featherdeploy/node.crt")
+	keyFile, _ := os.ReadFile("/etc/featherdeploy/node.key")
+	tlsCfg, _ := pki.TLSConfig(string(certFile), string(keyFile), string(caFile))
+	client := &http.Client{
+		Transport: &http.Transport{TLSClientConfig: tlsCfg},
+		Timeout:   2 * time.Minute,
+	}
+
+	// 1. Trigger backup on old node
+	payload := map[string]any{
+		"db_id":      dbID,
+		"jwt_secret": secret,
+	}
+	body, _ := json.Marshal(payload)
+	url := fmt.Sprintf("https://%s:%d/api/node/db-backup", ip, port)
+	resp, err := client.Post(url, "application/json", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("backup request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("backup failed (%d): %s", resp.StatusCode, b)
+	}
+
+	// 2. Save to temp file
+	tmp, err := os.CreateTemp("", "db-mig-*.tar")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := io.Copy(tmp, resp.Body); err != nil {
+		tmp.Close()
+		return err
+	}
+	tmp.Close()
+
+	// 3. Restore locally
+	return RestoreDatabaseBackup(db, secret, dbID, tmp.Name())
 }

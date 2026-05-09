@@ -23,7 +23,9 @@ type Database struct {
 	ClusterPort int       `json:"cluster_port,omitempty"` // fdnet proxy port bound on 0.0.0.0 — use for public access
 	Status      string    `json:"status"`               // stopped|starting|running|error
 	ContainerID string    `json:"container_id,omitempty"`
-	NetworkPublic bool    `json:"network_public"` // always false — databases are internal-only
+	NetworkPublic bool    `json:"network_public"`
+	NodeID       string    `json:"node_id"`
+	TargetNodeID string    `json:"target_node_id"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 
@@ -43,18 +45,20 @@ type Database struct {
 
 // CreateDatabaseRequest is the body for POST /api/projects/{id}/databases.
 type CreateDatabaseRequest struct {
-	Name       string `json:"name"       validate:"required,min=2,max=63,slug"`
-	DBType     string `json:"db_type"    validate:"required,oneof=postgres mysql sqlite"`
-	DBVersion  string `json:"db_version" validate:"omitempty,max=32"`
-	DBName     string `json:"db_name"    validate:"omitempty,max=64"`
-	DBUser     string `json:"db_user"    validate:"omitempty,max=64"`
-	DBPassword string `json:"db_password" validate:"omitempty,max=256"`
+	Name         string `json:"name"           validate:"required,min=2,max=63,slug"`
+	DBType       string `json:"db_type"        validate:"required,oneof=postgres mysql sqlite"`
+	DBVersion    string `json:"db_version"     validate:"omitempty,max=32"`
+	DBName       string `json:"db_name"        validate:"omitempty,max=64"`
+	DBUser       string `json:"db_user"        validate:"omitempty,max=64"`
+	DBPassword   string `json:"db_password"    validate:"omitempty,max=256"`
+	TargetNodeID string `json:"target_node_id" validate:"omitempty,max=64"`
 }
 
 // UpdateDatabaseRequest is the body for PUT /api/projects/{id}/databases/{id}.
 // Only the version can be changed; a restart is required for the new image to be used.
 type UpdateDatabaseRequest struct {
-	DBVersion string `json:"db_version" validate:"omitempty,max=32"`
+	DBVersion    string `json:"db_version"     validate:"omitempty,max=32"`
+	TargetNodeID string `json:"target_node_id" validate:"omitempty,max=64"`
 }
 
 // ChangePasswordRequest is the body for POST /api/projects/{id}/databases/{id}/password.

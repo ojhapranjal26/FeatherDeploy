@@ -1218,3 +1218,57 @@ func storageEnvName(s string) string {
 	}
 	return b.String()
 }
+
+func (h *StorageHandler) replicateObject(storageID int64, objPath, localFilePath, method, svcKey string) {
+	// Find all other connected nodes
+	rows, err := h.db.Query("SELECT ip, port FROM nodes WHERE status='connected'")
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+
+	var targets []string
+	for rows.Next() {
+		var ip string
+		var port int
+		if err := rows.Scan(&ip, &port); err == nil {
+			targets = append(targets, fmt.Sprintf("https://%s:%d", ip, port))
+		}
+	}
+
+	// Also check brain (main)
+	var brainAddr string
+	_ = h.db.QueryRow("SELECT brain_addr FROM cluster_state LIMIT 1").Scan(&brainAddr)
+	if brainAddr != "" {
+		targets = append(targets, brainAddr)
+	}
+
+	for _, t := range targets {
+		url := fmt.Sprintf("%s/api/storage/%d/objects/%s", t, storageID, objPath)
+
+		var body io.Reader
+		if method == "PUT" {
+			f, err := os.Open(localFilePath)
+			if err != nil {
+				continue
+			}
+			defer f.Close()
+			body = f
+		}
+
+		req, err := http.NewRequest(method, url, body)
+		if err != nil {
+			continue
+		}
+		req.Header.Set("X-Storage-Key", svcKey)
+		req.Header.Set("X-Storage-Replication", "true")
+
+		// Use mTLS if possible
+		client := http.DefaultClient
+
+		resp, err := client.Do(req)
+		if err == nil {
+			resp.Body.Close()
+		}
+	}
+}

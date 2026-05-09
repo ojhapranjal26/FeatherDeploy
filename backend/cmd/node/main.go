@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,6 +21,7 @@ import (
 
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/crypto"
 	appDb "github.com/ojhapranjal26/featherdeploy/backend/internal/db"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/deploy"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/heartbeat"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/pki"
 )
@@ -194,10 +196,133 @@ func runServe() {
 		w.Write([]byte(`{"status":"ok"}`))
 	})
 
-	// Serve frontend bundle if present (fallback when main server is down)
+	r.Post("/api/node/deploy", func(w http.ResponseWriter, req *http.Request) {
+		var payload struct {
+			DepID  int64  `json:"dep_id"`
+			SvcID  int64  `json:"svc_id"`
+			UserID int64  `json:"user_id"`
+			Secret string `json:"jwt_secret"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+			http.Error(w, "invalid JSON", 400)
+			return
+		}
+		// Run deployment in background
+		go func() {
+			if db == nil {
+				slog.Error("node/deploy: DB not connected")
+				return
+			}
+			deploy.Run(db, payload.Secret, payload.DepID, payload.SvcID, payload.UserID)
+		}()
+		w.WriteHeader(http.StatusAccepted)
+		w.Write([]byte(`{"status":"queued"}`))
+	})
+
+	r.Post("/api/node/stop", func(w http.ResponseWriter, req *http.Request) {
+		var payload struct {
+			ContainerID string `json:"container_id"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+			http.Error(w, "invalid JSON", 400)
+			return
+		}
+		slog.Info("node/stop: stopping container", "id", payload.ContainerID)
+		// Use -f to stop and remove
+		if out, err := exec.Command("podman", "rm", "-f", payload.ContainerID).CombinedOutput(); err != nil {
+			slog.Warn("node/stop failed", "id", payload.ContainerID, "err", err, "out", string(out))
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	r.Post("/api/node/rotate-cert", func(w http.ResponseWriter, req *http.Request) {
+		var payload struct {
+			CertPEM string `json:"cert_pem"`
+			KeyPEM  string `json:"key_pem"`
+			CAPEM   string `json:"ca_pem"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+			http.Error(w, "invalid JSON", 400)
+			return
+		}
+		slog.Info("node/rotate-cert: received new certificates")
+		
+		// Save new certs
+		if payload.CAPEM != "" {
+			writeFile(caCertFile, payload.CAPEM, 0644)
+		}
+		writeFile(nodeCert, payload.CertPEM, 0644)
+		writeFile(nodeKey, payload.KeyPEM, 0600)
+		
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status":"ok"}`))
+		
+		// Restart server in a bit to apply new certs
+		go func() {
+			time.Sleep(2 * time.Second)
+			slog.Info("node/rotate-cert: restarting to apply new certs")
+			os.Exit(0) // Systemd/Docker will restart us
+		}()
+	})
+
+	// Serve frontend bundle if present
 	if info, err := os.Stat("/var/lib/featherdeploy/frontend"); err == nil && info.IsDir() {
 		r.Handle("/*", http.FileServer(http.Dir("/var/lib/featherdeploy/frontend")))
 	}
+
+	r.Post("/api/node/db-start", func(w http.ResponseWriter, req *http.Request) {
+		var payload struct {
+			DBID   int64  `json:"db_id"`
+			Secret string `json:"jwt_secret"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+			http.Error(w, "invalid JSON", 400)
+			return
+		}
+		go deploy.StartDatabase(db, payload.Secret, payload.DBID)
+		w.WriteHeader(http.StatusAccepted)
+	})
+
+	r.Post("/api/node/db-backup", func(w http.ResponseWriter, req *http.Request) {
+		var payload struct {
+			DBID   int64  `json:"db_id"`
+			Secret string `json:"jwt_secret"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+			http.Error(w, "invalid JSON", 400)
+			return
+		}
+		path, _, err := deploy.CreateDatabaseBackup(db, payload.Secret, payload.DBID)
+		if err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		defer os.Remove(path)
+		f, _ := os.Open(path)
+		defer f.Close()
+		io.Copy(w, f)
+	})
+
+	r.Post("/api/node/db-restore", func(w http.ResponseWriter, req *http.Request) {
+		dbIDStr := req.URL.Query().Get("db_id")
+		dbID, _ := strconv.ParseInt(dbIDStr, 10, 64)
+		secret := req.Header.Get("X-JWT-Secret")
+		
+		tmp, err := os.CreateTemp("", "restore-*.tar")
+		if err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		defer os.Remove(tmp.Name())
+		io.Copy(tmp, req.Body)
+		tmp.Close()
+		
+		if err := deploy.RestoreDatabaseBackup(db, secret, dbID, tmp.Name()); err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
 
 	addr := envOr("ADDR", ":7443")
 
@@ -326,15 +451,9 @@ func fatalf(format string, args ...interface{}) {
 // ─── heartbeat + election ─────────────────────────────────────────────────────
 
 func runNodeHeartbeat(db *sql.DB, myID string) {
-	// Look up this node's DB row id (used for stats update)
+	// nodeDBID is the internal INTEGER PRIMARY KEY from the nodes table.
+	// We need this to efficiently update stats.
 	var nodeDBID int64
-	// Retry a few times since rqlite may not have our row yet
-	for i := 0; i < 5; i++ {
-		if err := db.QueryRow(`SELECT id FROM nodes WHERE node_id=?`, myID).Scan(&nodeDBID); err == nil {
-			break
-		}
-		time.Sleep(2 * time.Second)
-	}
 
 	mainURL := ""
 	if data, err := os.ReadFile(configDir + "/main_url"); err == nil {
@@ -344,22 +463,38 @@ func runNodeHeartbeat(db *sql.DB, myID string) {
 	ticker := time.NewTicker(heartbeat.HeartbeatInterval)
 	defer ticker.Stop()
 
-	// promoted is set to true once this node wins an election and starts the
-	// brain service.  We stop attempting further elections after that — the
-	// brain's own StartBrain goroutine will keep cluster_state up to date.
 	promoted := false
 
-	for range ticker.C {
-		st := collectStats()
+	// Initial collection
+	st := collectStats()
 
-		// Write stats into the nodes table
+	for range ticker.C {
+		// Re-collect stats each tick
+		st = collectStats()
+
+		// If we don't have the DB ID yet, try to find it.
+		// This can happen if the node joined but the DB row wasn't replicated
+		// to the local rqlite instance yet.
+		if nodeDBID == 0 {
+			err := db.QueryRow(`SELECT id FROM nodes WHERE node_id=?`, myID).Scan(&nodeDBID)
+			if err != nil {
+				slog.Warn("heartbeat: could not find node row in DB, retrying next tick", "node_id", myID, "err", err)
+			} else {
+				slog.Info("heartbeat: found node row", "node_id", myID, "db_id", nodeDBID)
+			}
+		}
+
+		// Write stats into the nodes table if we have the ID
 		if nodeDBID > 0 {
-			db.Exec(`UPDATE nodes SET
+			_, err := db.Exec(`UPDATE nodes SET
 				status='connected', last_seen=datetime('now'),
 				cpu_usage=?, ram_used=?, ram_total=?,
 				disk_used=?, disk_total=?, last_stats_at=datetime('now')
 				WHERE id=?`,
 				st.CPU, st.RAMUsed, st.RAMTotal, st.DiskUsed, st.DiskTotal, nodeDBID)
+			if err != nil {
+				slog.Error("heartbeat: update stats failed", "err", err)
+			}
 		}
 
 		// Skip election checks once we have already promoted to brain.

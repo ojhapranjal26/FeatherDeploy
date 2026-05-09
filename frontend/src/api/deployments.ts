@@ -12,6 +12,8 @@ export interface Deployment {
   branch?: string
   artifact_path?: string
   status: DeploymentStatus
+  target_node_id: string
+  node_id: string
   error_message?: string
   started_at?: string
   finished_at?: string
@@ -30,6 +32,7 @@ export interface TriggerDeploymentPayload {
   branch?: string
   commit_sha?: string
   artifact_path?: string
+  target_node_id?: string
 }
 
 export const deploymentsApi = {

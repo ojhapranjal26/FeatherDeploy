@@ -103,9 +103,11 @@ func caddyBin() string {
 func buildConfig(db *sql.DB) (string, error) {
 	rows, err := db.Query(`
 		SELECT d.domain, d.tls,
-		       COALESCE(s.cluster_port, s.host_port) AS proxy_port
+		       COALESCE(s.cluster_port, s.host_port) AS proxy_port,
+		       n.ip AS node_ip
 		FROM   domains d
 		JOIN   services s ON s.id = d.service_id
+		LEFT JOIN nodes n ON n.node_id = s.node_id
 		WHERE  s.host_port > 0
 		  AND  s.status    = 'running'
 		  AND  d.verified  = 1
@@ -122,18 +124,25 @@ func buildConfig(db *sql.DB) (string, error) {
 	for rows.Next() {
 		var domain string
 		var tlsInt, hostPort int
-		if rows.Scan(&domain, &tlsInt, &hostPort) != nil {
+		var nodeIP sql.NullString
+		if rows.Scan(&domain, &tlsInt, &hostPort, &nodeIP) != nil {
 			continue
 		}
 		domain = strings.TrimSpace(strings.ToLower(domain))
 		if domain == "" || hostPort <= 0 {
 			continue
 		}
+
+		targetIP := "127.0.0.1"
+		if nodeIP.Valid && nodeIP.String != "" {
+			targetIP = nodeIP.String
+		}
+
 		if tlsInt == 1 {
 			// No scheme prefix → Caddy auto-provisions HTTPS via Let's Encrypt
-			fmt.Fprintf(&sb, "\n%s {\n\tlog {\n\t\toutput stdout\n\t}\n\treverse_proxy 127.0.0.1:%d\n}\n", domain, hostPort)
+			fmt.Fprintf(&sb, "\n%s {\n\tlog {\n\t\toutput stdout\n\t}\n\treverse_proxy %s:%d\n}\n", domain, targetIP, hostPort)
 		} else {
-			fmt.Fprintf(&sb, "\nhttp://%s {\n\tlog {\n\t\toutput stdout\n\t}\n\treverse_proxy 127.0.0.1:%d\n}\n", domain, hostPort)
+			fmt.Fprintf(&sb, "\nhttp://%s {\n\tlog {\n\t\toutput stdout\n\t}\n\treverse_proxy %s:%d\n}\n", domain, targetIP, hostPort)
 		}
 	}
 	return sb.String(), nil

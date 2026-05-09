@@ -270,7 +270,7 @@ function downloadBlob(blob: Blob, filename: string) {
   window.setTimeout(() => window.URL.revokeObjectURL(url), 1000)
 }
 
-function DatabaseCard({ database, projectId, canEdit }: { database: DatabaseRecord; projectId: string; canEdit: boolean }) {
+function DatabaseCard({ database, projectId, canEdit, nodes }: { database: DatabaseRecord; projectId: string; canEdit: boolean; nodes: any[] }) {
   const qc = useQueryClient()
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [logsOpen, setLogsOpen] = useState(false)
@@ -281,6 +281,7 @@ function DatabaseCard({ database, projectId, canEdit }: { database: DatabaseReco
   const [showPrivateUrl, setShowPrivateUrl] = useState(false)
   const [showPublicUrl, setShowPublicUrl] = useState(false)
   const [restoreFile, setRestoreFile] = useState<File | null>(null)
+  const [editTargetNode, setEditTargetNode] = useState(database.target_node_id)
 
 
   const copyToClipboard = (text: string, label: string) => {
@@ -426,7 +427,11 @@ function DatabaseCard({ database, projectId, canEdit }: { database: DatabaseReco
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
                 {!isSQLite && (
-                  <DropdownMenuItem onClick={() => { setEditVersion(database.db_version); setEditOpen(true) }}>
+                  <DropdownMenuItem onClick={() => {
+                    setEditVersion(database.db_version)
+                    setEditTargetNode(database.target_node_id)
+                    setEditOpen(true)
+                  }}>
                     <Settings2 className="mr-2 h-3.5 w-3.5" /> Edit configuration
                   </DropdownMenuItem>
                 )}
@@ -634,13 +639,37 @@ function DatabaseCard({ database, projectId, canEdit }: { database: DatabaseReco
                 className="font-mono"
               />
             </div>
+
+            <div className="space-y-1.5">
+              <Label htmlFor="edit-db-target-node">Target Node</Label>
+              <Select value={editTargetNode} onValueChange={setEditTargetNode}>
+                <SelectTrigger id="edit-db-target-node">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="auto">Auto (Least Loaded)</SelectItem>
+                  <SelectItem value="main">Main Server</SelectItem>
+                  {(nodes ?? []).filter(n => n.status === 'online').map(node => (
+                    <SelectItem key={node.node_id} value={node.node_id}>
+                      {node.name} ({node.ip})
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-[10px] text-muted-foreground">
+                Changing the target node will trigger a migration on the next restart.
+              </p>
+            </div>
           </div>
           <DialogFooter className="gap-2">
             <Button variant="ghost" size="sm" onClick={() => setEditOpen(false)} disabled={updateMutation.isPending}>Cancel</Button>
             <Button
               size="sm"
               disabled={updateMutation.isPending}
-              onClick={() => updateMutation.mutate({ db_version: editVersion })}
+              onClick={() => updateMutation.mutate({
+                db_version: editVersion,
+                target_node_id: editTargetNode,
+              })}
             >
               {updateMutation.isPending ? 'Saving…' : 'Save changes'}
             </Button>
@@ -956,6 +985,7 @@ export function ProjectPage() {
   const [newDbDatabaseName, setNewDbDatabaseName] = useState('')
   const [newDbUser, setNewDbUser] = useState('')
   const [newDbPassword, setNewDbPassword] = useState('')
+  const [newDbTargetNode, setNewDbTargetNode] = useState('auto')
   const searchRef = useRef<HTMLDivElement>(null)
 
   const { data: project, isLoading: projLoading } = useQuery({
@@ -1028,6 +1058,12 @@ export function ProjectPage() {
     refetchInterval: 5000,
   })
 
+  const { data: nodes } = useQuery({
+    queryKey: ['nodes'],
+    queryFn: () => nodesApi.list(),
+    enabled: !!projectId,
+  })
+
   const [newSvcName, setNewSvcName] = useState('')
 
   function resetNewDatabaseForm() {
@@ -1059,6 +1095,7 @@ export function ProjectPage() {
       db_name: newDbDatabaseName || undefined,
       db_user: newDbType === 'sqlite' ? undefined : (newDbUser || undefined),
       db_password: newDbType === 'sqlite' ? undefined : (newDbPassword || undefined),
+      target_node_id: newDbTargetNode,
     }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['databases', projectId] })
@@ -1230,7 +1267,7 @@ export function ProjectPage() {
           ) : (
             <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
               {(databases ?? []).map((database) => (
-                <DatabaseCard key={database.id} database={database} projectId={projectId!} canEdit={canEditProject} />
+                <DatabaseCard key={database.id} database={database} projectId={projectId!} canEdit={canEditProject} nodes={nodes ?? []} />
               ))}
             </div>
           )}
@@ -1542,6 +1579,24 @@ export function ProjectPage() {
                 </div>
               </>
             )}
+
+            <div>
+              <Label htmlFor="db-target-node">Target Node</Label>
+              <Select value={newDbTargetNode} onValueChange={setNewDbTargetNode}>
+                <SelectTrigger id="db-target-node" className="mt-1.5">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="auto">Auto (Least Loaded)</SelectItem>
+                  <SelectItem value="main">Main Server</SelectItem>
+                  {(nodes ?? []).filter(n => n.status === 'online').map(node => (
+                    <SelectItem key={node.node_id} value={node.node_id}>
+                      {node.name} ({node.ip})
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
 
             {newDbType === 'sqlite' && (
               <p className="rounded-md border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">

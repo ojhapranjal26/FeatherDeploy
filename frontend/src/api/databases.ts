@@ -16,6 +16,8 @@ export interface DatabaseRecord {
   container_id?: string
   network_public: boolean
   last_error?: string
+  node_id: string
+  target_node_id: string
   created_at: string
   updated_at: string
   connection_url?: string
@@ -30,10 +32,12 @@ export interface CreateDatabasePayload {
   db_name?: string
   db_user?: string
   db_password?: string
+  target_node_id?: string
 }
 
 export interface UpdateDatabasePayload {
   db_version?: string
+  target_node_id?: string
 }
 
 export interface DatabaseLogsResponse {

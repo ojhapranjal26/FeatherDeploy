@@ -44,7 +44,7 @@ func (h *DeploymentHandler) List(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, err := h.db.QueryContext(r.Context(),
 		`SELECT id, service_id, triggered_by, deploy_type, repo_url, commit_sha, branch,
-		        artifact_path, status, error_message, started_at, finished_at, created_at
+		        artifact_path, status, target_node_id, node_id, error_message, started_at, finished_at, created_at
 		 FROM deployments WHERE service_id=? ORDER BY created_at DESC, id DESC LIMIT ?`,
 		svcID, limit)
 	if err != nil {
@@ -82,14 +82,18 @@ func (h *DeploymentHandler) Trigger(w http.ResponseWriter, r *http.Request) {
 		branch = req.RepoBranch
 	}
 
+	targetNodeID := req.TargetNodeID
+	if targetNodeID == "" {
+		targetNodeID = "auto"
+	}
+
 	// Insert deployment record with 'pending' status.
-	// The worker pool will transition it to 'running' when a worker picks it up.
 	res, err := h.db.ExecContext(r.Context(),
 		`INSERT INTO deployments
-		  (service_id, triggered_by, deploy_type, repo_url, commit_sha, branch, artifact_path, status)
-		 VALUES (?,?,?,?,?,?,?,?)`,
+		  (service_id, triggered_by, deploy_type, repo_url, commit_sha, branch, artifact_path, status, target_node_id)
+		 VALUES (?,?,?,?,?,?,?,?,?)`,
 		svcID, claims.UserID, req.DeployType, req.RepoURL, req.CommitSHA, branch, req.ArtifactPath,
-		"pending")
+		"pending", targetNodeID)
 	if err != nil {
 		slog.Error("trigger deployment", "err", err)
 		writeJSON(w, http.StatusInternalServerError, errMap("internal error"))
@@ -111,7 +115,7 @@ func (h *DeploymentHandler) Get(w http.ResponseWriter, r *http.Request) {
 	}
 	row := h.db.QueryRowContext(r.Context(),
 		`SELECT id, service_id, triggered_by, deploy_type, repo_url, commit_sha, branch,
-		        artifact_path, status, error_message, started_at, finished_at, created_at
+		        artifact_path, status, target_node_id, node_id, error_message, started_at, finished_at, created_at
 		 FROM deployments WHERE id=?`, depID)
 	var d model.Deployment
 	if err := scanDeploymentRow(row, &d); err == sql.ErrNoRows {
@@ -380,6 +384,7 @@ func scanDeployment(row scanner, d *model.Deployment) error {
 	var createdAt flexTime
 	err := row.Scan(&d.ID, &d.ServiceID, &d.TriggeredBy, &d.DeployType,
 		&d.RepoURL, &d.CommitSHA, &d.Branch, &d.ArtifactPath, &d.Status,
+		&d.TargetNodeID, &d.NodeID,
 		&d.ErrorMessage, &startedAt, &finishedAt, &createdAt)
 	if err != nil {
 		return err
@@ -404,6 +409,7 @@ func scanDeploymentRow(row *sql.Row, d *model.Deployment) error {
 	var createdAt flexTime
 	err := row.Scan(&d.ID, &d.ServiceID, &d.TriggeredBy, &d.DeployType,
 		&d.RepoURL, &d.CommitSHA, &d.Branch, &d.ArtifactPath, &d.Status,
+		&d.TargetNodeID, &d.NodeID,
 		&d.ErrorMessage, &startedAt, &finishedAt, &createdAt)
 	if err != nil {
 		return err

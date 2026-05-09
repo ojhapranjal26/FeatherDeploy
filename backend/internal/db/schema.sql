@@ -207,6 +207,9 @@ ALTER TABLE services    ADD COLUMN last_image   TEXT    NOT NULL DEFAULT '';
 ALTER TABLE services    ADD COLUMN repo_folder  TEXT    NOT NULL DEFAULT '';
 ALTER TABLE services    ADD COLUMN auto_deploy  INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE deployments ADD COLUMN branch       TEXT    NOT NULL DEFAULT '';
+ALTER TABLE services    ADD COLUMN node_id      TEXT    NOT NULL DEFAULT 'main'; -- where service is currently running
+ALTER TABLE deployments ADD COLUMN target_node_id TEXT NOT NULL DEFAULT 'main'; -- 'main', node_id, or 'auto'
+ALTER TABLE deployments ADD COLUMN node_id      TEXT    NOT NULL DEFAULT 'main'; -- where this specific deployment ran
 
 -- 011: nodes — worker nodes connected to this main server via mTLS
 CREATE TABLE IF NOT EXISTS nodes (
@@ -222,8 +225,9 @@ CREATE TABLE IF NOT EXISTS nodes (
     token_expires_at DATETIME,
     node_cert_pem    TEXT     NOT NULL DEFAULT '',             -- TLS cert signed by our CA
     rqlite_addr      TEXT     NOT NULL DEFAULT '',             -- host:port for rqlite Raft join
-    last_seen        DATETIME,
-    created_at       DATETIME NOT NULL DEFAULT (datetime('now')),
+    last_stats_at   DATETIME,
+    last_rotated_at DATETIME, -- track mTLS cert rotation
+    created_at      DATETIME NOT NULL DEFAULT (datetime('now')),
     updated_at       DATETIME NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -333,6 +337,10 @@ ALTER TABLE services ADD COLUMN cluster_port INTEGER DEFAULT NULL;
 -- 022: add cluster_port to databases so the fdnet proxy port (0.0.0.0 binding)
 -- is persisted and used in public connection URLs, surviving process restarts.
 ALTER TABLE databases ADD COLUMN cluster_port INTEGER DEFAULT NULL;
+
+-- 023: add node tracking to databases for multi-node support
+ALTER TABLE databases ADD COLUMN node_id        TEXT NOT NULL DEFAULT 'main';
+ALTER TABLE databases ADD COLUMN target_node_id TEXT NOT NULL DEFAULT 'main';
 
 -- 023: storages — disk-backed encrypted object stores with per-service access control
 -- Files written to STORAGE_DATA_DIR/{id}/{path}, encrypted with AES-256-CTR.

@@ -11,6 +11,7 @@ import { GitHubRepoSelector, type RepoSelection } from '@/components/GitHubRepoS
 import { useContainerLogs } from '@/hooks/useContainerLogs'
 import { useContainerStatsSSE } from '@/hooks/useContainerStatsSSE'
 import { deploymentsApi } from '@/api/deployments'
+import { nodesApi } from '@/api/nodes'
 import { envApi, type UpsertEnvPayload } from '@/api/env'
 import { ServiceStatusBadge } from '@/components/ServiceStatusBadge'
 import { DeploymentStatusBadge } from '@/components/DeploymentStatusBadge'
@@ -178,6 +179,9 @@ export function ServicePage() {
   const [artifactDialogOpen, setArtifactDialogOpen] = useState(false)
   const [artifactFile, setArtifactFile] = useState<File | null>(null)
 
+  // Target node state
+  const [targetNodeID, setTargetNodeID] = useState<string>('auto')
+
   // Overview source connector (shown when no source has been configured yet)
   const [overviewSourceType, setOverviewSourceType] = useState<'git' | 'artifact'>('git')
   const [overviewRepo, setOverviewRepo] = useState<RepoSelection | null>(null)
@@ -232,6 +236,11 @@ export function ServicePage() {
     enabled: !!projectId && !!serviceId,
   })
 
+  const { data: nodes } = useQuery({
+    queryKey: ['nodes'],
+    queryFn: () => nodesApi.list(),
+  })
+
   const updateMutation = useMutation({
     mutationFn: (data: Parameters<typeof servicesApi.update>[2]) =>
       servicesApi.update(projectId!, serviceId!, data),
@@ -278,6 +287,7 @@ export function ServicePage() {
         repo_url: service?.repo_url,
         repo_branch: service?.repo_branch,
         branch: service?.repo_branch,
+        target_node_id: targetNodeID,
       }),
     onSuccess: (data) => {
       toast.success('Deployment queued.')
@@ -296,6 +306,7 @@ export function ServicePage() {
       return deploymentsApi.trigger(projectId!, serviceId!, {
         deploy_type: 'artifact',
         artifact_path,
+        target_node_id: targetNodeID,
       })
     },
     onSuccess: (data) => {
@@ -538,6 +549,25 @@ export function ServicePage() {
                 : <><RotateCcw className="h-3.5 w-3.5" /> Restart</>}
             </Button>
           )}
+
+          {/* Node selection */}
+          <div className="flex items-center gap-2 border rounded-md px-2 py-1 bg-muted/50">
+            <Cpu className="h-3.5 w-3.5 text-muted-foreground" />
+            <select
+              className="bg-transparent border-none text-xs focus:ring-0 cursor-pointer pr-4"
+              value={targetNodeID}
+              onChange={(e) => setTargetNodeID(e.target.value)}
+            >
+              <option value="auto">Auto (Least loaded)</option>
+              <option value="main">Main (Internal)</option>
+              {nodes?.filter(n => n.status === 'connected').map(n => (
+                <option key={n.id} value={n.node_id || n.hostname}>
+                  {n.name} ({n.hostname})
+                </option>
+              ))}
+            </select>
+          </div>
+
           <Button
             className="gap-1.5"
             onClick={handleDeployClick}

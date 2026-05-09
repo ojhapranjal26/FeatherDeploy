@@ -61,6 +61,7 @@ type Service struct {
 	Status       string    `json:"status"` // inactive | deploying | running | error | stopped
 	ContainerID  string    `json:"container_id,omitempty"`
 	AutoDeploy   bool      `json:"auto_deploy"`
+	NodeID       string    `json:"node_id"` // 'main' or node hostname
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
 }
@@ -76,8 +77,10 @@ type Deployment struct {
 	Branch       string     `json:"branch,omitempty"`
 	ArtifactPath string     `json:"artifact_path,omitempty"`
 	Status       string     `json:"status"` // pending | running | success | failed
+	TargetNodeID string     `json:"target_node_id"`
+	NodeID       string     `json:"node_id"`
 	ErrorMessage string     `json:"error_message,omitempty"`
-	StartedAt    *time.Time `json:"started_at,omitempty"`  // nil when deployment is queued/pending
+	StartedAt    *time.Time `json:"started_at,omitempty"` // nil when deployment is queued/pending
 	FinishedAt   *time.Time `json:"finished_at,omitempty"`
 	CreatedAt    time.Time  `json:"created_at"`
 }
@@ -171,6 +174,7 @@ type TriggerDeployRequest struct {
 	CommitSHA    string `json:"commit_sha"    validate:"omitempty,hexadecimal,max=64"`
 	ArtifactPath string `json:"artifact_path" validate:"omitempty,max=512"`
 	Branch       string `json:"branch"        validate:"omitempty,max=255"`
+	TargetNodeID string `json:"target_node_id" validate:"omitempty,max=64"` // 'main', 'auto', or node_id
 }
 
 type UpsertEnvVarRequest struct {
