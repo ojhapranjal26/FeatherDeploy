@@ -12,6 +12,7 @@ import { projectsApi, usersApi, type ProjectMember } from '@/api/projects'
 import { servicesApi } from '@/api/services'
 import { databasesApi, type DatabaseRecord, type DatabaseStatus, type DatabaseType, type UpdateDatabasePayload } from '@/api/databases'
 import { deploymentsApi } from '@/api/deployments'
+import { nodesApi, type Node as ApiNode } from '@/api/nodes'
 import type { Service } from '@/api/services'
 import { ServiceStatusBadge } from '@/components/ServiceStatusBadge'
 import { Button } from '@/components/ui/button'
@@ -270,7 +271,7 @@ function downloadBlob(blob: Blob, filename: string) {
   window.setTimeout(() => window.URL.revokeObjectURL(url), 1000)
 }
 
-function DatabaseCard({ database, projectId, canEdit, nodes }: { database: DatabaseRecord; projectId: string; canEdit: boolean; nodes: any[] }) {
+function DatabaseCard({ database, projectId, canEdit, nodes }: { database: DatabaseRecord; projectId: string; canEdit: boolean; nodes: ApiNode[] }) {
   const qc = useQueryClient()
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [logsOpen, setLogsOpen] = useState(false)
@@ -642,14 +643,14 @@ function DatabaseCard({ database, projectId, canEdit, nodes }: { database: Datab
 
             <div className="space-y-1.5">
               <Label htmlFor="edit-db-target-node">Target Node</Label>
-              <Select value={editTargetNode} onValueChange={setEditTargetNode}>
+              <Select value={editTargetNode} onValueChange={(v) => setEditTargetNode(v ?? 'auto')}>
                 <SelectTrigger id="edit-db-target-node">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="auto">Auto (Least Loaded)</SelectItem>
                   <SelectItem value="main">Main Server</SelectItem>
-                  {(nodes ?? []).filter(n => n.status === 'online').map(node => (
+                  {(nodes ?? []).filter((n: ApiNode) => n.status === 'connected').map((node: ApiNode) => (
                     <SelectItem key={node.node_id} value={node.node_id}>
                       {node.name} ({node.ip})
                     </SelectItem>
@@ -1582,14 +1583,14 @@ export function ProjectPage() {
 
             <div>
               <Label htmlFor="db-target-node">Target Node</Label>
-              <Select value={newDbTargetNode} onValueChange={setNewDbTargetNode}>
+              <Select value={newDbTargetNode} onValueChange={(v) => setNewDbTargetNode(v ?? 'auto')}>
                 <SelectTrigger id="db-target-node" className="mt-1.5">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="auto">Auto (Least Loaded)</SelectItem>
                   <SelectItem value="main">Main Server</SelectItem>
-                  {(nodes ?? []).filter(n => n.status === 'online').map(node => (
+                  {(nodes ?? []).filter((n: ApiNode) => n.status === 'connected').map((node: ApiNode) => (
                     <SelectItem key={node.node_id} value={node.node_id}>
                       {node.name} ({node.ip})
                     </SelectItem>
