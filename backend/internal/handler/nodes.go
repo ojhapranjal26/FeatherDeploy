@@ -397,7 +397,7 @@ func (h *NodeHandler) CompleteJoin(w http.ResponseWriter, r *http.Request) {
 		"node_cert_pem":  nodeCert.CertPEM,
 		"node_key_pem":   nodeCert.KeyPEM,  // node key sent only once
 		"encrypted_env":  encryptedEnv,     // decrypt with join token
-		"rqlite_main":    "127.0.0.1:4002", // main Raft addr to join
+		"rqlite_main":    "127.0.0.1:4001", // main HTTP addr to join
 		"etcd_main":      etcdMain,         // etcd initial cluster
 		"ssh_public_key": sshPubKey,        // add to /root/.ssh/authorized_keys
 	})

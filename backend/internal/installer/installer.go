@@ -1379,6 +1379,7 @@ func downloadHTTP(url, destPath string) error {
 	if err != nil {
 		return err
 	}
+	fmt.Printf("  ✓ downloaded %d bytes\n", len(data))
 	return os.WriteFile(destPath, data, 0644)
 }
 
