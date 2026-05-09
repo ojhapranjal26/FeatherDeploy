@@ -9,6 +9,8 @@ backend/*.exe
 *.exe
 *.test
 *.out
+featherdeploy
+featherdeploy-node
 
 # ── Node / npm ────────────────────────────────────────────────────────────────
 node_modules/

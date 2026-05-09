@@ -161,7 +161,17 @@ func Run() {
 	}
 
 	// ── Step 5a: Write + start rqlite service ───────────────────────────────
-	fmt.Println("\n── Configuring rqlite ──────────────────────────────────────────")
+	fmt.Println("\n── Configuring rqlite and etcd ───────────────────────────")
+	installRqlite()
+	installEtcd()
+	writeRqliteService(svcUser)
+	writeEtcdService(svcUser)
+	mustRun("systemctl", "daemon-reload")
+	mustRun("systemctl", "enable", "rqlite")
+	mustRun("systemctl", "enable", "etcd")
+	mustRun("systemctl", "restart", "rqlite")
+	mustRun("systemctl", "restart", "etcd")
+
 	// On a fresh install, always wipe any leftover Raft state so rqlite
 	// bootstraps cleanly. Old data (from a failed install, partial uninstall,
 	// or version mismatch) causes rqlite to exit status=1 immediately.
@@ -174,9 +184,6 @@ func Run() {
 	if err := os.MkdirAll(rqliteDataDir, 0755); err == nil {
 		exec.Command("chown", "-R", svcUser+":"+svcUser, rqliteDataDir).Run() //nolint
 	}
-	writeRqliteService(svcUser)
-	mustRun("systemctl", "daemon-reload")
-	mustRun("systemctl", "enable", "rqlite")
 	mustRun("systemctl", "start", "rqlite")
 	fmt.Println("  Waiting for rqlite to be ready...")
 	if err := waitForRqlite(60 * time.Second); err != nil {
@@ -1139,7 +1146,9 @@ var pkgManagers = map[string]pkgCmd{
 }
 
 const rqliteVer = "8.36.5"
+const etcdVer = "3.5.13"
 const rqliteSystemdUnit = "/etc/systemd/system/rqlite.service"
+const etcdSystemdUnit = "/etc/systemd/system/etcd.service"
 
 // configureCrun sets up crun as the default Podman OCI runtime and forces
 // cgroupfs cgroup management.
@@ -1300,6 +1309,37 @@ func installRqlite() {
 	fmt.Println("  ✓ rqlited installed")
 }
 
+func installEtcd() {
+	if path, err := exec.LookPath("etcd"); err == nil {
+		if out, verErr := exec.Command(path, "--version").CombinedOutput(); verErr == nil && len(out) > 0 {
+			fmt.Println("  etcd already installed — skipping")
+			return
+		}
+		os.Remove(path)
+		os.Remove("/usr/local/bin/etcdctl")
+	}
+	fmt.Printf("  Downloading etcd v%s...\n", etcdVer)
+	tarName := fmt.Sprintf("etcd-v%s-linux-amd64.tar.gz", etcdVer)
+	dlURL := fmt.Sprintf("https://github.com/etcd-io/etcd/releases/download/v%s/%s", etcdVer, tarName)
+	tmpTar := filepath.Join("/tmp", tarName)
+	if err := downloadHTTP(dlURL, tmpTar); err != nil {
+		fmt.Printf("  WARNING: cannot download etcd: %v — install manually\n", err)
+		return
+	}
+	dirName := fmt.Sprintf("etcd-v%s-linux-amd64", etcdVer)
+	mustRun("tar", "-xzf", tmpTar, "-C", "/tmp/")
+	for _, bin := range []string{"etcd", "etcdctl"} {
+		src := filepath.Join("/tmp", dirName, bin)
+		if _, err := os.Stat(src); err == nil {
+			copyFile(src, "/usr/local/bin/"+bin)
+			mustRun("chmod", "+x", "/usr/local/bin/"+bin)
+		}
+	}
+	os.RemoveAll(filepath.Join("/tmp", dirName))
+	os.Remove(tmpTar)
+	fmt.Println("  ✓ etcd installed")
+}
+
 // downloadHTTP downloads url to destPath.
 func downloadHTTP(url, destPath string) error {
 	resp, err := http.Get(url) //nolint:gosec — URL is constructed from a constant version
@@ -1385,6 +1425,44 @@ func writeRqliteService(svcUser string) {
 	tmpl.Execute(&buf, struct{ User, DataDir, PublicIP string }{svcUser, dataDir, publicIP})
 	writeFile(rqliteSystemdUnit, buf.String(), 0644)
 	fmt.Printf("  ✓ wrote %s\n", rqliteSystemdUnit)
+}
+
+const etcdServiceTmpl = `[Unit]
+Description=etcd Key-Value Store
+After=network.target
+
+[Service]
+Type=notify
+User={{.User}}
+Group={{.User}}
+ExecStartPre=/bin/bash -c 'mkdir -p {{.DataDir}}/etcd-data && chown -R {{.User}}:{{.User}} {{.DataDir}}/etcd-data'
+ExecStart=/usr/local/bin/etcd \
+  --name=main \
+  --data-dir={{.DataDir}}/etcd-data \
+  --listen-client-urls=http://0.0.0.0:2379 \
+  --advertise-client-urls=http://{{.PublicIP}}:2379 \
+  --listen-peer-urls=http://0.0.0.0:2380 \
+  --initial-advertise-peer-urls=http://{{.PublicIP}}:2380 \
+  --initial-cluster=main=http://{{.PublicIP}}:2380 \
+  --initial-cluster-token=etcd-cluster-1 \
+  --initial-cluster-state=new
+Restart=always
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
+`
+
+func writeEtcdService(svcUser string) {
+	publicIP := installerDetectPublicIP()
+	if publicIP == "" {
+		publicIP = "127.0.0.1"
+	}
+	tmpl := template.Must(template.New("etcd").Parse(etcdServiceTmpl))
+	var buf strings.Builder
+	tmpl.Execute(&buf, struct{ User, DataDir, PublicIP string }{svcUser, dataDir, publicIP})
+	writeFile(etcdSystemdUnit, buf.String(), 0644)
+	fmt.Printf("  ✓ wrote %s\n", etcdSystemdUnit)
 }
 
 func installPackages() error {
@@ -1645,6 +1723,7 @@ func RunUpdate() {
 	}
 	writeSystemdService(svcUser)
 	writeRqliteService(svcUser)
+	writeEtcdService(svcUser)
 	fmt.Printf("  ✓ systemd units updated (User=%s)\n", svcUser)
 
 	// Re-enable linger for the service user so /run/user/<uid> is created
@@ -1685,10 +1764,12 @@ func RunUpdate() {
 	configureCrun()
 	ensureNetworkingBackend(svcUser, homedir)
 
-	// ── Restart rqlite + featherdeploy ───────────────────────────────────────
+	// ── Restart rqlite + etcd + featherdeploy ────────────────────────────────
 	fmt.Println("\n── Restarting services ─────────────────────────────────────────")
 	mustRun("systemctl", "daemon-reload")
 	mustRun("systemctl", "restart", "rqlite")
+	mustRun("systemctl", "restart", "etcd")
+	fmt.Println("  Waiting for rqlite to be ready...")
 	if err := waitForRqlite(45 * time.Second); err != nil {
 		slog.Warn("rqlite did not respond after restart", "err", err)
 	} else {

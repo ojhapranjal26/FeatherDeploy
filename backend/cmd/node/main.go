@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -24,6 +25,7 @@ import (
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/deploy"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/heartbeat"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/pki"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/coordination"
 )
 
 const (
@@ -108,6 +110,7 @@ func runJoin(args []string) {
 		NodeKeyPEM   string `json:"node_key_pem"`
 		EncryptedEnv string `json:"encrypted_env"`
 		RqliteMain   string `json:"rqlite_main"` // main Raft addr to join
+		EtcdMain     string `json:"etcd_main"`   // etcd initial cluster
 		SSHPublicKey string `json:"ssh_public_key"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&reply); err != nil {
@@ -175,8 +178,11 @@ func runJoin(args []string) {
 	}
 
 	writeRqliteService(nodeID, rqliteJoinAddr)
+	writeEtcdService(nodeID, reply.EtcdMain)
+
 	runCmd("systemctl", "daemon-reload")
 	runCmd("systemctl", "enable", "--now", "rqlite-node")
+	runCmd("systemctl", "enable", "--now", "etcd-node")
 	waitForRqlite(60)
 
 
@@ -212,6 +218,23 @@ func runServe() {
 	// Start node heartbeat + brain-election goroutine
 	if db != nil {
 		go runNodeHeartbeat(db, myID)
+	}
+
+	// ─── etcd Coordination Layer ──────────────────────────────────────────────
+	// Initialize etcd client for real-time coordination
+	etcdClient, err := coordination.NewClient([]string{"http://127.0.0.1:2379"})
+	if err != nil {
+		slog.Warn("could not connect to local etcd, real-time coordination disabled", "err", err)
+	} else {
+		defer etcdClient.Close()
+		// Start real-time heartbeat in etcd
+		go func() {
+			slog.Info("etcd: registering node heartbeat", "id", myID)
+			_, err := etcdClient.RegisterNode(context.Background(), myID, 15)
+			if err != nil {
+				slog.Error("etcd: node registration failed", "err", err)
+			}
+		}()
 	}
 
 	r := chi.NewRouter()
@@ -406,6 +429,39 @@ func writeRqliteService(nodeID, mainRaft string) {
 	writeFile(rqliteUnit, content, 0644)
 }
 
+const etcdServiceTmpl = `[Unit]
+Description=etcd Key-Value Store (Node)
+After=network.target
+Before=featherdeploy-node.service
+
+[Service]
+Type=notify
+User=root
+ExecStartPre=/bin/bash -c 'mkdir -p %s/etcd-data && chown -R root:root %s/etcd-data'
+ExecStart=/usr/local/bin/etcd \
+  --name=%s \
+  --data-dir=%s/etcd-data \
+  --listen-client-urls=http://0.0.0.0:2379 \
+  --advertise-client-urls=http://%s:2379 \
+  --listen-peer-urls=http://0.0.0.0:2380 \
+  --initial-advertise-peer-urls=http://%s:2380 \
+  --initial-cluster=%s,%s=http://%s:2380 \
+  --initial-cluster-token=etcd-cluster-1 \
+  --initial-cluster-state=existing
+Restart=always
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
+`
+
+func writeEtcdService(nodeID, etcdMain string) {
+	myIP := localIP()
+	content := fmt.Sprintf(etcdServiceTmpl,
+		dataDir, dataDir, nodeID, dataDir, myIP, myIP, etcdMain, nodeID, myIP)
+	writeFile("/etc/systemd/system/etcd-node.service", content, 0644)
+}
+
 // ─── featherdeploy-node serve service ────────────────────────────────────────
 
 const nodeServeServiceTmpl = `[Unit]
@@ -429,7 +485,7 @@ func writeNodeServeService() {
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
-func waitForRqlite(maxSecs int) {
+func waitForRqlite(maxSecs int) error {
 	url := "http://" + rqliteHTTP + "/readyz"
 	for i := 0; i < maxSecs; i++ {
 		if resp, err := http.Get(url); err == nil && resp.StatusCode == 200 {

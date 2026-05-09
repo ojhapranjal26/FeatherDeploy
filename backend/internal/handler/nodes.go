@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"text/template"
@@ -368,8 +369,28 @@ func (h *NodeHandler) CompleteJoin(w http.ResponseWriter, r *http.Request) {
 	// Trigger firewall reconciliation to allow this node IP
 	go deploy.ReconcileNodeRqliteIPTables(h.db)
 
+	// Add node to etcd cluster
+	nodeID := payload.Hostname
+	if nodeID == "" {
+		nodeID = "node-" + randomHex20()[:8]
+	}
+	etcdPeerURL := fmt.Sprintf("http://%s:2380", nodeIP)
+	go func() {
+		// etcdctl member add <name> --peer-urls=<url>
+		// We use sudo because etcd is usually root-owned or requires specific perms
+		exec.Command("sudo", "etcdctl", "member", "add", nodeID, "--peer-urls="+etcdPeerURL).Run()
+	}()
+
 	// Fetch SSH public key so the node can add it to authorized_keys
 	sshPubKey := heartbeat.GetSSHPublicKey(h.db)
+
+	// Determine etcd initial cluster (self + registered nodes)
+	// For simplicity, we just return the main server's peer URL and let etcd figure it out
+	serverIP := os.Getenv("SERVER_IP")
+	if serverIP == "" {
+		serverIP = "127.0.0.1"
+	}
+	etcdMain := fmt.Sprintf("main=http://%s:2380", serverIP)
 
 	writeJSON(w, http.StatusOK, map[string]string{
 		"ca_cert_pem":    ca.CertPEM,
@@ -377,6 +398,7 @@ func (h *NodeHandler) CompleteJoin(w http.ResponseWriter, r *http.Request) {
 		"node_key_pem":   nodeCert.KeyPEM,  // node key sent only once
 		"encrypted_env":  encryptedEnv,     // decrypt with join token
 		"rqlite_main":    "127.0.0.1:4002", // main Raft addr to join
+		"etcd_main":      etcdMain,         // etcd initial cluster
 		"ssh_public_key": sshPubKey,        // add to /root/.ssh/authorized_keys
 	})
 }
@@ -542,6 +564,7 @@ JOIN_TOKEN="{{.Token}}"
 NODE_BINARY="/usr/local/bin/featherdeploy-node"
 SERVER_BINARY="/usr/local/bin/featherdeploy"
 RQLITE_VER="8.36.5"
+ETCD_VER="3.5.13"
 SVC_USER="featherdeploy"
 CA_CERT='{{.CACert}}'
 SSH_PUB_KEY='{{.SSHPubKey}}'
@@ -567,7 +590,7 @@ run_as_user_session() {
 
 reset_host() {
 	echo "==> Resetting previous FeatherDeploy/node state..."
-	for svc in featherdeploy featherdeploy-node featherdeploy-brain rqlite rqlite-node; do
+	for svc in featherdeploy featherdeploy-node featherdeploy-brain rqlite rqlite-node etcd etcd-node; do
 		systemctl stop "$svc" 2>/dev/null || true
 		systemctl disable "$svc" 2>/dev/null || true
 	done
@@ -591,13 +614,17 @@ reset_host() {
 	rm -f /etc/systemd/system/featherdeploy-brain.service
 	rm -f /etc/systemd/system/rqlite.service
 	rm -f /etc/systemd/system/rqlite-node.service
+	rm -f /etc/systemd/system/etcd.service
+	rm -f /etc/systemd/system/etcd-node.service
 	systemctl daemon-reload
-	systemctl reset-failed featherdeploy featherdeploy-node featherdeploy-brain rqlite rqlite-node 2>/dev/null || true
+	systemctl reset-failed featherdeploy featherdeploy-node featherdeploy-brain rqlite rqlite-node etcd etcd-node 2>/dev/null || true
 	rm -f /usr/local/bin/featherdeploy
 	rm -f /usr/local/bin/featherdeploy-node
 	rm -f /usr/local/bin/featherdeploy-update
 	rm -f /usr/local/bin/rqlite
 	rm -f /usr/local/bin/rqlited
+	rm -f /usr/local/bin/etcd
+	rm -f /usr/local/bin/etcdctl
 	rm -rf /etc/featherdeploy /var/lib/featherdeploy /home/featherdeploy /run/featherdeploy-runtime
 	rm -rf /etc/containers /var/lib/containers /var/cache/libpod
 	sed -i "/^${SVC_USER}:/d" /etc/subuid 2>/dev/null || true
@@ -627,6 +654,23 @@ install_rqlite() {
 	install -m 755 "$BIN_DIR/rqlite"  /usr/local/bin/rqlite
 	rm -rf "$TMP_DIR"
 	echo "  rqlited installed"
+}
+
+install_etcd() {
+	command -v etcd >/dev/null 2>&1 && { echo "  etcd already installed"; return; }
+	echo "==> Installing etcd ${ETCD_VER}..."
+	local TAR="etcd-v${ETCD_VER}-linux-amd64.tar.gz"
+	local TMP_DIR="/tmp/etcd-install"
+	mkdir -p "$TMP_DIR"
+	if ! curl -fsSL "https://github.com/etcd-io/etcd/releases/download/v${ETCD_VER}/${TAR}" -o "$TMP_DIR/${TAR}"; then
+		echo "ERROR: Failed to download etcd." >&2; exit 1
+	fi
+	tar -xzf "$TMP_DIR/${TAR}" -C "$TMP_DIR"
+	local BIN_DIR; BIN_DIR=$(find "$TMP_DIR" -maxdepth 1 -type d -name "etcd-v*" | head -1)
+	install -m 755 "$BIN_DIR/etcd" /usr/local/bin/etcd
+	install -m 755 "$BIN_DIR/etcdctl" /usr/local/bin/etcdctl
+	rm -rf "$TMP_DIR"
+	echo "  etcd installed"
 }
 
 configure_crun() {
@@ -710,6 +754,7 @@ elif command -v apk >/dev/null 2>&1; then
 fi
 
 install_rqlite
+install_etcd
 configure_crun
 ensure_service_user
 configure_rootless_podman
