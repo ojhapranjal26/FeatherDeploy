@@ -2,7 +2,6 @@ package deploy
 
 import (
 	"database/sql"
-	"fmt"
 	"log/slog"
 	"os/exec"
 	"strings"
