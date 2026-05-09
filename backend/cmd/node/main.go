@@ -180,6 +180,13 @@ func runJoin(args []string) {
 	writeRqliteService(nodeID, rqliteJoinAddr)
 	writeEtcdService(nodeID, reply.EtcdMain)
 
+	// Verify binaries before starting
+	for _, bin := range []string{"rqlited", "etcd"} {
+		if _, err := exec.LookPath(bin); err != nil {
+			fatalf("required binary not found: %s. Install failed?", bin)
+		}
+	}
+
 	runCmd("systemctl", "daemon-reload")
 	runCmd("systemctl", "enable", "--now", "rqlite-node")
 	runCmd("systemctl", "enable", "--now", "etcd-node")

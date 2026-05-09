@@ -892,6 +892,7 @@ func copyFile(src, dst string) {
 	if err := os.WriteFile(dst, data, 0755); err != nil {
 		die("cannot write %s: %v", dst, err)
 	}
+	os.Chmod(dst, 0755) // Ensure executable even if file existed with different perms
 }
 
 func writeFile(path, content string, perm os.FileMode) {
@@ -1295,16 +1296,20 @@ func installRqlite() {
 		fmt.Printf("  WARNING: cannot download rqlite: %v — install manually\n", err)
 		return
 	}
-	dirName := fmt.Sprintf("rqlite-v%s-linux-amd64", rqliteVer)
 	mustRun("tar", "-xzf", tmpTar, "-C", "/tmp/")
+	matches, _ := filepath.Glob("/tmp/rqlite-v*-linux-amd64/rqlited")
+	if len(matches) == 0 {
+		fmt.Printf("  WARNING: could not find rqlited in extracted tarball — extraction may have failed\n")
+		return
+	}
+	srcDir := filepath.Dir(matches[0])
 	for _, bin := range []string{"rqlited", "rqlite"} {
-		src := filepath.Join("/tmp", dirName, bin)
+		src := filepath.Join(srcDir, bin)
 		if _, err := os.Stat(src); err == nil {
 			copyFile(src, "/usr/local/bin/"+bin)
-			mustRun("chmod", "+x", "/usr/local/bin/"+bin)
 		}
 	}
-	os.RemoveAll(filepath.Join("/tmp", dirName))
+	os.RemoveAll(srcDir)
 	os.Remove(tmpTar)
 	fmt.Println("  ✓ rqlited installed")
 }
@@ -1326,16 +1331,20 @@ func installEtcd() {
 		fmt.Printf("  WARNING: cannot download etcd: %v — install manually\n", err)
 		return
 	}
-	dirName := fmt.Sprintf("etcd-v%s-linux-amd64", etcdVer)
 	mustRun("tar", "-xzf", tmpTar, "-C", "/tmp/")
+	matches, _ := filepath.Glob("/tmp/etcd-v*-linux-amd64/etcd")
+	if len(matches) == 0 {
+		fmt.Printf("  WARNING: could not find etcd in extracted tarball — extraction may have failed\n")
+		return
+	}
+	srcDir := filepath.Dir(matches[0])
 	for _, bin := range []string{"etcd", "etcdctl"} {
-		src := filepath.Join("/tmp", dirName, bin)
+		src := filepath.Join(srcDir, bin)
 		if _, err := os.Stat(src); err == nil {
 			copyFile(src, "/usr/local/bin/"+bin)
-			mustRun("chmod", "+x", "/usr/local/bin/"+bin)
 		}
 	}
-	os.RemoveAll(filepath.Join("/tmp", dirName))
+	os.RemoveAll(srcDir)
 	os.Remove(tmpTar)
 	fmt.Println("  ✓ etcd installed")
 }
@@ -1767,11 +1776,16 @@ func RunUpdate() {
 	// ── Restart rqlite + etcd + featherdeploy ────────────────────────────────
 	fmt.Println("\n── Restarting services ─────────────────────────────────────────")
 	mustRun("systemctl", "daemon-reload")
+	mustRun("systemctl", "enable", "rqlite")
+	mustRun("systemctl", "enable", "etcd")
 	mustRun("systemctl", "restart", "rqlite")
 	mustRun("systemctl", "restart", "etcd")
-	fmt.Println("  Waiting for rqlite to be ready...")
+	fmt.Println("  Waiting for rqlite and etcd to be ready...")
 	if err := waitForRqlite(45 * time.Second); err != nil {
 		slog.Warn("rqlite did not respond after restart", "err", err)
+	}
+	if runSilent("systemctl", "is-active", "--quiet", "etcd") != nil {
+		fmt.Println("  WARNING: etcd failed to start. Check 'journalctl -u etcd'")
 	} else {
 		fmt.Println("  ✓ rqlite ready (leader elected)")
 	}
