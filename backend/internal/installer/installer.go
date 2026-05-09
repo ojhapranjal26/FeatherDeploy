@@ -1311,7 +1311,14 @@ func installRqlite() {
 	}
 	os.RemoveAll(srcDir)
 	os.Remove(tmpTar)
-	fmt.Println("  ✓ rqlited installed")
+
+	// Verify
+	if out, err := exec.Command("/usr/local/bin/rqlited", "-version").CombinedOutput(); err != nil {
+		fmt.Printf("  WARNING: rqlited verification failed: %v\n", err)
+		fmt.Printf("  Output: %s\n", string(out))
+	} else {
+		fmt.Println("  ✓ rqlited installed and verified")
+	}
 }
 
 func installEtcd() {
@@ -1346,7 +1353,17 @@ func installEtcd() {
 	}
 	os.RemoveAll(srcDir)
 	os.Remove(tmpTar)
-	fmt.Println("  ✓ etcd installed")
+
+	// Verify
+	if out, err := exec.Command("/usr/local/bin/etcd", "--version").CombinedOutput(); err != nil {
+		fmt.Printf("  WARNING: etcd verification failed: %v\n", err)
+		fmt.Printf("  Output: %s\n", string(out))
+		// Also check file info
+		info, _ := exec.Command("ls", "-l", "/usr/local/bin/etcd").CombinedOutput()
+		fmt.Printf("  File info: %s\n", string(info))
+	} else {
+		fmt.Println("  ✓ etcd installed and verified")
+	}
 }
 
 // downloadHTTP downloads url to destPath.
