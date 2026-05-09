@@ -284,6 +284,7 @@ func serve() {
 	// iptables rules are in-memory and lost on every server restart/update,
 	// so we need to restore them from the database state each time we start.
 	go reconcilePublicDBIPTables(db)
+	go deploy.ReconcileNodeRqliteIPTables(db)
 
 	// Reload Caddy after every process restart so the domain→port mapping in
 	// /etc/caddy/featherdeploy-services.caddy is always current with the DB.

@@ -360,6 +360,7 @@ ExecStart=/usr/local/bin/rqlited \
   -node-id=%s \
   -http-addr=%s \
   -raft-addr=%s \
+  -raft-adv-addr=%s:4002 \
   -join=%s \
   %s
 Restart=always
@@ -370,8 +371,9 @@ WantedBy=multi-user.target
 `
 
 func writeRqliteService(nodeID, mainRaft string) {
+	myIP := localIP()
 	content := fmt.Sprintf(rqliteServiceTmpl,
-		nodeID, rqliteHTTP, rqliteRaft, mainRaft, rqliteData)
+		nodeID, rqliteHTTP, rqliteRaft, myIP, mainRaft, rqliteData)
 	writeFile(rqliteUnit, content, 0644)
 }
 
@@ -596,6 +598,16 @@ func installSSHKey(pubKey string) {
 
 // localIP returns the first non-loopback IPv4 address.
 func localIP() string {
+	// Try to detect the IP used to reach the internet (UDP trick)
+	conn, err := net.DialTimeout("udp", "1.1.1.1:80", 2*time.Second)
+	if err == nil {
+		defer conn.Close()
+		if addr, ok := conn.LocalAddr().(*net.UDPAddr); ok {
+			return addr.IP.String()
+		}
+	}
+
+	// Fallback to first non-loopback IPv4
 	addrs, err := net.InterfaceAddrs()
 	if err != nil {
 		return "127.0.0.1"

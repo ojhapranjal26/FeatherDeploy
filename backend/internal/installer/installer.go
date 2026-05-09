@@ -940,6 +940,8 @@ func setupIPTablesProtection() {
 		{"featherdeploy service ports", 10000, 14999},
 		{"featherdeploy database ports", 15000, 29999},
 		{"featherdeploy fdnet cluster ports", 30000, 59999},
+		{"rqlite raft", 4002, 4002},
+		{"rqlite http", 4001, 4001},
 	}
 
 	// ── Remove legacy bare DROP rules (without --ctstate NEW) ─────────────────
@@ -1358,8 +1360,8 @@ ExecStartPre=/bin/bash -c 'mkdir -p {{.DataDir}}/rqlite-data && chown -R {{.User
 ExecStart=/usr/local/bin/rqlited \
   -node-id=main \
   -http-addr=127.0.0.1:4001 \
-  -raft-addr=127.0.0.1:4002 \
-  -raft-adv-addr=127.0.0.1:4002 \
+  -raft-addr=0.0.0.0:4002 \
+  -raft-adv-addr={{.PublicIP}}:4002 \
   -bootstrap-expect=1 \
   {{.DataDir}}/rqlite-data
 Restart=always
@@ -1373,9 +1375,13 @@ WantedBy=multi-user.target
 `
 
 func writeRqliteService(svcUser string) {
+	publicIP := installerDetectPublicIP()
+	if publicIP == "" {
+		publicIP = "127.0.0.1"
+	}
 	tmpl := template.Must(template.New("rqlite").Parse(rqliteServiceTmpl))
 	var buf strings.Builder
-	tmpl.Execute(&buf, struct{ User, DataDir string }{svcUser, dataDir})
+	tmpl.Execute(&buf, struct{ User, DataDir, PublicIP string }{svcUser, dataDir, publicIP})
 	writeFile(rqliteSystemdUnit, buf.String(), 0644)
 	fmt.Printf("  ✓ wrote %s\n", rqliteSystemdUnit)
 }
@@ -1637,7 +1643,8 @@ func RunUpdate() {
 		}
 	}
 	writeSystemdService(svcUser)
-	fmt.Printf("  ✓ systemd unit updated (User=%s)\n", svcUser)
+	writeRqliteService(svcUser)
+	fmt.Printf("  ✓ systemd units updated (User=%s)\n", svcUser)
 
 	// Re-enable linger for the service user so /run/user/<uid> is created
 	// and maintained by systemd-logind (required for the new unit's

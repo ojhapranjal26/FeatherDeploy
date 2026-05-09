@@ -19,6 +19,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/heartbeat"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/deploy"
 	crypto "github.com/ojhapranjal26/featherdeploy/backend/internal/crypto"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/middleware"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/model"
@@ -363,6 +364,9 @@ func (h *NodeHandler) CompleteJoin(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, errMap("DB update failed"))
 		return
 	}
+
+	// Trigger firewall reconciliation to allow this node IP
+	go deploy.ReconcileNodeRqliteIPTables(h.db)
 
 	// Fetch SSH public key so the node can add it to authorized_keys
 	sshPubKey := heartbeat.GetSSHPublicKey(h.db)
