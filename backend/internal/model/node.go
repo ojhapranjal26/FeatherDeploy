@@ -6,11 +6,10 @@ import "time"
 type NodeStatus string
 
 const (
-	NodeStatusPending          NodeStatus = "pending"
-	NodeStatusAwaitingApproval NodeStatus = "awaiting_approval"
-	NodeStatusConnected        NodeStatus = "connected"
-	NodeStatusOffline          NodeStatus = "offline"
-	NodeStatusError            NodeStatus = "error"
+	NodeStatusPending   NodeStatus = "pending"
+	NodeStatusConnected NodeStatus = "connected"
+	NodeStatusOffline   NodeStatus = "offline"
+	NodeStatusError     NodeStatus = "error"
 )
 
 // Node is a remote worker server connected to the main FeatherDeploy instance

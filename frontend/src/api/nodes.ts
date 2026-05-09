@@ -1,6 +1,6 @@
 import client from './client'
 
-export type NodeStatus = 'pending' | 'awaiting_approval' | 'connected' | 'offline' | 'error'
+export type NodeStatus = 'pending' | 'connected' | 'offline' | 'error'
 
 export interface Node {
   id: number
@@ -54,10 +54,6 @@ export const nodesApi = {
     client.post<AddNodeResponse>('/nodes', data).then((r) => r.data),
 
   delete: (id: number) => client.delete(`/nodes/${id}`),
-
-  approve: (id: number) => client.post(`/nodes/${id}/approve`),
-
-  reject: (id: number) => client.post(`/nodes/${id}/reject`),
 
   regenerateToken: (id: number) =>
     client.post<AddNodeResponse>(`/nodes/${id}/token`).then((r) => r.data),

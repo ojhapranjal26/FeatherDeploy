@@ -351,9 +351,9 @@ func (h *NodeHandler) CompleteJoin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Update node record: mark awaiting_approval, save cert, clear join token, save real IP
+	// Update node record: mark connected, save cert, clear join token, save real IP
 	_, err = h.db.ExecContext(r.Context(),
-		`UPDATE nodes SET status='awaiting_approval', ip=?, hostname=?, os_info=?, node_id=?, node_cert_pem=?, rqlite_addr=?,
+		`UPDATE nodes SET status='connected', ip=?, hostname=?, os_info=?, node_id=?, node_cert_pem=?, rqlite_addr=?,
 		 join_token=NULL, token_expires_at=NULL, last_seen=datetime('now'),
 		 updated_at=datetime('now') WHERE id=?`,
 		nodeIP, payload.Hostname, payload.OSInfo, payload.Hostname, nodeCert.CertPEM, payload.RqliteAddr, node.ID,
@@ -377,51 +377,6 @@ func (h *NodeHandler) CompleteJoin(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// POST /api/nodes/{nodeID}/approve — approve a node that is awaiting approval
-func (h *NodeHandler) Approve(w http.ResponseWriter, r *http.Request) {
-	nodeID, err := strconv.ParseInt(chi.URLParam(r, "nodeID"), 10, 64)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errMap("invalid node ID"))
-		return
-	}
-
-	res, err := h.db.ExecContext(r.Context(),
-		`UPDATE nodes SET status='connected', updated_at=datetime('now') WHERE id=? AND status='awaiting_approval'`,
-		nodeID,
-	)
-	if err != nil {
-		slog.Error("approve node", "err", err)
-		writeJSON(w, http.StatusInternalServerError, errMap("internal error"))
-		return
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		writeJSON(w, http.StatusNotFound, errMap("node not found or not awaiting approval"))
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"ok": "1"})
-}
-
-// POST /api/nodes/{nodeID}/reject — reject a node that is awaiting approval
-func (h *NodeHandler) Reject(w http.ResponseWriter, r *http.Request) {
-	nodeID, err := strconv.ParseInt(chi.URLParam(r, "nodeID"), 10, 64)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errMap("invalid node ID"))
-		return
-	}
-
-	// We simply delete the node record if rejected
-	res, err := h.db.ExecContext(r.Context(), `DELETE FROM nodes WHERE id=? AND status='awaiting_approval'`, nodeID)
-	if err != nil {
-		slog.Error("reject node", "err", err)
-		writeJSON(w, http.StatusInternalServerError, errMap("internal error"))
-		return
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		writeJSON(w, http.StatusNotFound, errMap("node not found or not awaiting approval"))
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"ok": "1"})
-}
 
 // POST /api/nodes/{nodeID}/ping — node heartbeat + stats
 func (h *NodeHandler) Ping(w http.ResponseWriter, r *http.Request) {

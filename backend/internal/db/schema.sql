@@ -215,7 +215,7 @@ CREATE TABLE IF NOT EXISTS nodes (
     ip               TEXT     NOT NULL,
     port             INTEGER  NOT NULL DEFAULT 7443,           -- mTLS API port on the node
     status           TEXT     NOT NULL DEFAULT 'pending'
-                              CHECK(status IN ('pending','awaiting_approval','connected','offline','error')),
+                              CHECK(status IN ('pending','connected','offline','error')),
     hostname         TEXT     NOT NULL DEFAULT '',
     os_info          TEXT     NOT NULL DEFAULT '',
     join_token       TEXT     UNIQUE,                          -- single-use registration token
