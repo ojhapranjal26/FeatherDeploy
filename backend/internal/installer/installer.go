@@ -1441,7 +1441,7 @@ Description=etcd Key-Value Store
 After=network.target
 
 [Service]
-Type=notify
+Type=simple
 User={{.User}}
 Group={{.User}}
 ExecStartPre=/bin/bash -c 'mkdir -p {{.DataDir}}/etcd-data && chown -R {{.User}}:{{.User}} {{.DataDir}}/etcd-data'
@@ -1785,7 +1785,9 @@ func RunUpdate() {
 		slog.Warn("rqlite did not respond after restart", "err", err)
 	}
 	if runSilent("systemctl", "is-active", "--quiet", "etcd") != nil {
-		fmt.Println("  WARNING: etcd failed to start. Check 'journalctl -u etcd'")
+		fmt.Println("  WARNING: etcd failed to start. Last 20 lines of logs:")
+		out, _ := exec.Command("journalctl", "-u", "etcd", "-n", "20", "--no-pager").CombinedOutput()
+		fmt.Println(string(out))
 	} else {
 		fmt.Println("  ✓ rqlite ready (leader elected)")
 	}
