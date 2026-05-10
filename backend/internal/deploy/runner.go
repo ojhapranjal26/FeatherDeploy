@@ -666,7 +666,11 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 	// Cluster discovery registration (Etcd)
 	if EtcdClient != nil {
 		nodeIP := detectNodeIP(db)
-		go EtcdClient.RegisterService(context.Background(), projectID, svcName, nodeIP, hostPort)
+		if err := EtcdClient.RegisterService(context.Background(), projectID, svcName, nodeIP, hostPort); err != nil {
+			log.add("[etcd] warning: could not register service for discovery: %v", err)
+		} else {
+			log.add("[etcd] service registered successfully for discovery (ip=%s, port=%d)", nodeIP, hostPort)
+		}
 	}
 
 	// Wait for the container's published host port to accept TCP connections
@@ -3512,7 +3516,7 @@ func migrateDatabaseData(db *sql.DB, secret, oldNodeID string, dbID int64) error
 	return RestoreDatabaseBackup(db, secret, dbID, tmp.Name())
 }
 func detectNodeIP(db *sql.DB) string {
-	// 1. Check SERVER_IP environment variable
+	// 1. Check SERVER_IP environment variable (most reliable)
 	if ip := os.Getenv("SERVER_IP"); ip != "" && !isPrivateIP(ip) {
 		return ip
 	}
@@ -3527,13 +3531,33 @@ func detectNodeIP(db *sql.DB) string {
 		}
 	}
 
-	// 3. Fallback to UDP routing trick
-	ip := "127.0.0.1"
-	if conn, err := net.DialTimeout("udp", "1.1.1.1:80", 2*time.Second); err == nil {
-		ip = conn.LocalAddr().(*net.UDPAddr).IP.String()
-		conn.Close()
+	// 3. Try external discovery (same as installer)
+	urls := []string{"https://ident.me", "https://ifconfig.me/ip", "https://api.ipify.org"}
+	for _, u := range urls {
+		client := http.Client{Timeout: 3 * time.Second}
+		if resp, err := client.Get(u); err == nil {
+			if body, err := io.ReadAll(resp.Body); err == nil {
+				extIP := strings.TrimSpace(string(body))
+				if net.ParseIP(extIP) != nil && !isPrivateIP(extIP) {
+					resp.Body.Close()
+					return extIP
+				}
+			}
+			resp.Body.Close()
+		}
 	}
-	return ip
+
+	// 4. Fallback to UDP routing trick
+	if conn, err := net.DialTimeout("udp", "1.1.1.1:80", 2*time.Second); err == nil {
+		ip := conn.LocalAddr().(*net.UDPAddr).IP.String()
+		conn.Close()
+		if ip != "" && !isPrivateIP(ip) {
+			return ip
+		}
+	}
+
+	slog.Warn("detectNodeIP: could not find a public IP, falling back to 127.0.0.1")
+	return "127.0.0.1"
 }
 
 func isPrivateIP(ipStr string) bool {

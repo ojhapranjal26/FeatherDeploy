@@ -16,11 +16,17 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
+
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/coordination"
 )
 
-var EtcdClient *coordination.Client
+var (
+	EtcdClient *coordination.Client
+	reloadMu   sync.Mutex
+	reloadTimer *time.Timer
+)
 
 func SetEtcdClient(c *coordination.Client) { EtcdClient = c }
 
@@ -31,11 +37,23 @@ const (
 )
 
 // Reload regenerates the services Caddyfile from the DB and signals Caddy to
-// reload.  It is intentionally fire-and-forget friendly: all errors are logged
-// but never returned so callers don't need to handle them.
+// reload. It uses a mutex to prevent concurrent writes and a 500ms debounce
+// timer to collapse rapid sequential requests (e.g. from a bulk deploy).
 func Reload(db *sql.DB) {
-	// Skip when Caddy is not installed (dev / CI) — check both common paths
-	// and PATH so we don't miss it when the service user has a restricted PATH.
+	reloadMu.Lock()
+	defer reloadMu.Unlock()
+
+	if reloadTimer != nil {
+		reloadTimer.Stop()
+	}
+
+	reloadTimer = time.AfterFunc(500*time.Millisecond, func() {
+		performReload(db)
+	})
+}
+
+func performReload(db *sql.DB) {
+	// Skip when Caddy is not installed (dev / CI)
 	if !caddyInstalled() {
 		return
 	}
@@ -43,6 +61,11 @@ func Reload(db *sql.DB) {
 	content, err := buildConfig(db)
 	if err != nil {
 		slog.Warn("caddy: build config", "err", err)
+		return
+	}
+
+	if content == "" {
+		slog.Info("caddy: skipping reload, no active sites generated")
 		return
 	}
 
@@ -157,13 +180,23 @@ func buildConfig(db *sql.DB) (string, error) {
 
 		// Try to resolve from Etcd for live endpoint metadata (highest priority)
 		if EtcdClient != nil {
-			if ip, port, err := EtcdClient.DiscoverService(context.Background(), projectID, svcName); err == nil {
-				targetIP = ip
-				hostPort = port
-				// Again, prefer loopback if it's us
-				if serverIP != "" && targetIP == serverIP {
-					targetIP = "127.0.0.1"
+			// Use a 2-second timeout for discovery to prevent a hung etcd from
+			// blocking the entire Caddy reload.
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			if ip, port, err := EtcdClient.DiscoverService(ctx, projectID, svcName); err == nil {
+				cancel()
+				// Basic validation: ensure we didn't get empty/zero data that would
+				// result in a broken 'reverse_proxy :0' config.
+				if ip != "" && port > 0 {
+					targetIP = ip
+					hostPort = port
+					// Again, prefer loopback if it's us
+					if serverIP != "" && targetIP == serverIP {
+						targetIP = "127.0.0.1"
+					}
 				}
+			} else {
+				cancel()
 			}
 		}
 
