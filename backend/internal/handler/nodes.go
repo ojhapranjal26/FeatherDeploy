@@ -83,6 +83,54 @@ func (h *NodeHandler) loadCA() (*pki.CA, error) {
 	return &pki.CA{CertPEM: certPEM, KeyPEM: keyPEM}, nil
 }
 
+// EnsureLocalPKI ensures that /etc/featherdeploy contains ca.crt, node.crt, and node.key.
+// These are required for the main server to communicate with worker nodes via mTLS.
+func (h *NodeHandler) EnsureLocalPKI() error {
+	ca, err := h.loadCA()
+	if err != nil {
+		return err
+	}
+
+	confDir := "/etc/featherdeploy"
+	caFile := confDir + "/ca.crt"
+	nodeCertFile := confDir + "/node.crt"
+	nodeKeyFile := confDir + "/node.key"
+
+	// Write CA cert
+	if err := os.WriteFile(caFile, []byte(ca.CertPEM), 0644); err != nil {
+		return fmt.Errorf("write ca.crt: %w", err)
+	}
+
+	// If node cert/key missing, generate them for the "main" server
+	if _, err := os.Stat(nodeCertFile); os.IsNotExist(err) {
+		serverIP := os.Getenv("SERVER_IP")
+		if serverIP == "" {
+			serverIP = "127.0.0.1"
+		}
+		// Try to detect real IP if default is loopback
+		if serverIP == "127.0.0.1" {
+			if conn, err := net.DialTimeout("udp", "1.1.1.1:80", 2*time.Second); err == nil {
+				serverIP = conn.LocalAddr().(*net.UDPAddr).IP.String()
+				conn.Close()
+			}
+		}
+
+		nodeCert, err := pki.SignNodeCert(ca, "main", serverIP)
+		if err != nil {
+			return fmt.Errorf("sign main cert: %w", err)
+		}
+		if err := os.WriteFile(nodeCertFile, []byte(nodeCert.CertPEM), 0644); err != nil {
+			return fmt.Errorf("write node.crt: %w", err)
+		}
+		if err := os.WriteFile(nodeKeyFile, []byte(nodeCert.KeyPEM), 0600); err != nil {
+			return fmt.Errorf("write node.key: %w", err)
+		}
+		slog.Info("nodes: generated local mTLS certs for main server", "ip", serverIP)
+	}
+
+	return nil
+}
+
 // GET /api/nodes — list all nodes (superadmin/admin only)
 func (h *NodeHandler) List(w http.ResponseWriter, r *http.Request) {
 	rows, err := h.db.QueryContext(r.Context(),
@@ -320,6 +368,14 @@ func (h *NodeHandler) CompleteJoin(w http.ResponseWriter, r *http.Request) {
 		nodeIP = strings.TrimSpace(nodeIP[:idx])
 	}
 
+	// Verify we didn't get an internal IP if the server is public.
+	// If we got '127.0.0.1' but the node is external, this detection failed.
+	// We'll trust the payload's hostname/ip if the remote addr is a proxy.
+	if nodeIP == "127.0.0.1" || nodeIP == "::1" || strings.HasPrefix(nodeIP, "10.") || strings.HasPrefix(nodeIP, "192.168.") {
+		// Attempt fallback detection if the node reported its own perceived IP
+		// (this would require updating the Join payload, which we might do later)
+	}
+
 	// Load node info
 	var node model.Node
 	err := h.db.QueryRowContext(r.Context(),
@@ -399,10 +455,28 @@ func (h *NodeHandler) CompleteJoin(w http.ResponseWriter, r *http.Request) {
 		serverIP = "127.0.0.1"
 	}
 	publicIP := serverIP
-	if publicIP == "127.0.0.1" || publicIP == "" {
+	if publicIP == "127.0.0.1" || publicIP == "" || isPrivateIP(publicIP) {
 		if conn, err := net.DialTimeout("udp", "1.1.1.1:80", 2*time.Second); err == nil {
 			publicIP = conn.LocalAddr().(*net.UDPAddr).IP.String()
 			conn.Close()
+		}
+		// Fallback to external lookup if still private
+		if isPrivateIP(publicIP) {
+			urls := []string{"https://ident.me", "https://ifconfig.me/ip"}
+			for _, u := range urls {
+				client := http.Client{Timeout: 2 * time.Second}
+				if resp, err := client.Get(u); err == nil {
+					if body, err := io.ReadAll(resp.Body); err == nil {
+						extIP := strings.TrimSpace(string(body))
+						if net.ParseIP(extIP) != nil {
+							publicIP = extIP
+							resp.Body.Close()
+							break
+						}
+					}
+					resp.Body.Close()
+				}
+			}
 		}
 	}
 
@@ -423,6 +497,27 @@ func (h *NodeHandler) CompleteJoin(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+
+func isPrivateIP(ipStr string) bool {
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return true
+	}
+	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		return true
+	}
+	if ip4 := ip.To4(); ip4 != nil {
+		switch {
+		case ip4[0] == 10:
+			return true
+		case ip4[0] == 172 && ip4[1] >= 16 && ip4[1] <= 31:
+			return true
+		case ip4[0] == 192 && ip4[1] == 168:
+			return true
+		}
+	}
+	return false
+}
 
 // POST /api/nodes/{nodeID}/ping — node heartbeat + stats
 func (h *NodeHandler) Ping(w http.ResponseWriter, r *http.Request) {

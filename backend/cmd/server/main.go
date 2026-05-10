@@ -394,6 +394,9 @@ func serve() {
 	if err := nodeH.EnsureCA(); err != nil {
 		slog.Warn("CA init warning", "err", err)
 	}
+	if err := nodeH.EnsureLocalPKI(); err != nil {
+		slog.Warn("Local PKI init warning", "err", err)
+	}
 	settingsH := handler.NewSettingsHandler(db, cfgStore)
 	statsH := handler.NewStatsHandler(db)
 	containerStatsH := handler.NewContainerStatsHandler()

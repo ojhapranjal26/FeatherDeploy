@@ -1014,8 +1014,8 @@ func setupIPTablesProtection() {
 	persistIPTables()
 
 	// ── Ensure cluster ports are open ────────────────────────────────────────
-	fmt.Println("\n── Opening cluster ports (4001, 4002, 2379, 2380) ──────────")
-	clusterPorts := []string{"4001", "4002", "2379", "2380"}
+	fmt.Println("\n── Opening cluster ports (4001, 4002, 2379, 2380, 7443) ────────")
+	clusterPorts := []string{"4001", "4002", "2379", "2380", "7443"}
 	for _, p := range clusterPorts {
 		if runSilent(iptablesPath, "-C", "INPUT", "-p", "tcp", "--dport", p, "-j", "ACCEPT") != nil {
 			mustRun(iptablesPath, "-I", "INPUT", "1", "-p", "tcp", "--dport", p, "-j", "ACCEPT")
@@ -1091,17 +1091,57 @@ func randomHex(n int) string {
 	return hex.EncodeToString(b)
 }
 
-// installerDetectPublicIP uses a UDP routing trick to find the server's
-// public-facing IP without sending any traffic.
-// The OS picks the outbound interface for reaching 1.1.1.1 and LocalAddr()
-// returns that interface's IP — which is the server's public/routable IP.
+// installerDetectPublicIP uses a UDP routing trick followed by a web-based
+// fallback to find the server's public-facing IP.
 func installerDetectPublicIP() string {
-	conn, err := net.DialTimeout("udp", "1.1.1.1:80", 3*time.Second)
-	if err != nil {
-		return ""
+	// Try UDP routing trick first (fast, no external traffic)
+	ip := ""
+	if conn, err := net.DialTimeout("udp", "1.1.1.1:80", 2*time.Second); err == nil {
+		ip = conn.LocalAddr().(*net.UDPAddr).IP.String()
+		conn.Close()
 	}
-	defer conn.Close()
-	return conn.LocalAddr().(*net.UDPAddr).IP.String()
+
+	// If we got a private IP or no IP, use external lookup services
+	if ip == "" || isPrivateIP(ip) {
+		urls := []string{"https://ident.me", "https://ifconfig.me/ip", "https://api.ipify.org"}
+		for _, u := range urls {
+			client := http.Client{Timeout: 3 * time.Second}
+			if resp, err := client.Get(u); err == nil {
+				if body, err := io.ReadAll(resp.Body); err == nil {
+					extIP := strings.TrimSpace(string(body))
+					if net.ParseIP(extIP) != nil {
+						ip = extIP
+						resp.Body.Close()
+						break
+					}
+				}
+				resp.Body.Close()
+			}
+		}
+	}
+	return ip
+}
+
+func isPrivateIP(ipStr string) bool {
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return true
+	}
+	// Check for RFC1918 and other private ranges
+	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		return true
+	}
+	if ip4 := ip.To4(); ip4 != nil {
+		switch {
+		case ip4[0] == 10:
+			return true
+		case ip4[0] == 172 && ip4[1] >= 16 && ip4[1] <= 31:
+			return true
+		case ip4[0] == 192 && ip4[1] == 168:
+			return true
+		}
+	}
+	return false
 }
 
 // ─── Package installation ─────────────────────────────────────────────────────

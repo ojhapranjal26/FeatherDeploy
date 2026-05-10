@@ -661,11 +661,7 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 
 	// Cluster discovery registration (Etcd)
 	if EtcdClient != nil {
-		nodeIP := "127.0.0.1"
-		if conn, err := net.DialTimeout("udp", "1.1.1.1:80", 2*time.Second); err == nil {
-			nodeIP = conn.LocalAddr().(*net.UDPAddr).IP.String()
-			conn.Close()
-		}
+		nodeIP := detectNodeIP(db)
 		go EtcdClient.RegisterService(context.Background(), projectID, svcName, nodeIP, hostPort)
 	}
 
@@ -2131,11 +2127,7 @@ func startDatabaseRetrying(db *sql.DB, jwtSecret string, dbID int64, attempt int
 
 	// Cluster discovery registration (Etcd)
 	if EtcdClient != nil {
-		nodeIP := "127.0.0.1"
-		if conn, err := net.DialTimeout("udp", "1.1.1.1:80", 2*time.Second); err == nil {
-			nodeIP = conn.LocalAddr().(*net.UDPAddr).IP.String()
-			conn.Close()
-		}
+		nodeIP := detectNodeIP(db)
 		go EtcdClient.RegisterDatabase(context.Background(), projectID, dbName, nodeIP, hostPort)
 	}
 	log.add("[db-start] ✓ database is running — waiting for engine to initialize (this can take 10–30s for first-run)")
@@ -3514,4 +3506,49 @@ func migrateDatabaseData(db *sql.DB, secret, oldNodeID string, dbID int64) error
 
 	// 3. Restore locally
 	return RestoreDatabaseBackup(db, secret, dbID, tmp.Name())
+}
+func detectNodeIP(db *sql.DB) string {
+	// 1. Check SERVER_IP environment variable
+	if ip := os.Getenv("SERVER_IP"); ip != "" && !isPrivateIP(ip) {
+		return ip
+	}
+
+	// 2. Try to look up our IP from the nodes table using our hostname
+	if db != nil {
+		h, _ := os.Hostname()
+		var ip string
+		err := db.QueryRow(`SELECT ip FROM nodes WHERE hostname=? OR node_id=?`, h, h).Scan(&ip)
+		if err == nil && ip != "" && !isPrivateIP(ip) {
+			return ip
+		}
+	}
+
+	// 3. Fallback to UDP routing trick
+	ip := "127.0.0.1"
+	if conn, err := net.DialTimeout("udp", "1.1.1.1:80", 2*time.Second); err == nil {
+		ip = conn.LocalAddr().(*net.UDPAddr).IP.String()
+		conn.Close()
+	}
+	return ip
+}
+
+func isPrivateIP(ipStr string) bool {
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return true
+	}
+	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		return true
+	}
+	if ip4 := ip.To4(); ip4 != nil {
+		switch {
+		case ip4[0] == 10:
+			return true
+		case ip4[0] == 172 && ip4[1] >= 16 && ip4[1] <= 31:
+			return true
+		case ip4[0] == 192 && ip4[1] == 168:
+			return true
+		}
+	}
+	return false
 }
