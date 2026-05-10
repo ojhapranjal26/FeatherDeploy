@@ -30,6 +30,18 @@ func ReconcileClusterFirewall(db *sql.DB) {
 		}
 	}
 
+	// 1b. Allow our own public IP (detected)
+	myIP := detectNodeIP(db)
+	if myIP != "" && myIP != "127.0.0.1" {
+		for _, port := range clusterPorts {
+			ruleSpec := []string{"-p", "tcp", "--dport", port, "-s", myIP,
+				"-m", "comment", "--comment", "featherdeploy brain public ip", "-j", "ACCEPT"}
+			if iptCmd(append([]string{"-C", "INPUT"}, ruleSpec...)...).Run() != nil {
+				iptCmd(append([]string{"-I", "INPUT", "1"}, ruleSpec...)...).Run()
+			}
+		}
+	}
+
 	// 2. Allow all registered nodes (connected or pending)
 	rows, err := db.Query(`SELECT ip FROM nodes WHERE ip != ''`)
 	if err != nil {

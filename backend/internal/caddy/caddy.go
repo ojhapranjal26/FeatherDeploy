@@ -25,6 +25,7 @@ import (
 var (
 	EtcdClient *coordination.Client
 	reloadMu   sync.Mutex
+	executionMu sync.Mutex
 	reloadTimer *time.Timer
 )
 
@@ -47,12 +48,15 @@ func Reload(db *sql.DB) {
 		reloadTimer.Stop()
 	}
 
-	reloadTimer = time.AfterFunc(500*time.Millisecond, func() {
+	reloadTimer = time.AfterFunc(1000*time.Millisecond, func() {
 		performReload(db)
 	})
 }
 
 func performReload(db *sql.DB) {
+	executionMu.Lock()
+	defer executionMu.Unlock()
+
 	// Skip when Caddy is not installed (dev / CI)
 	if !caddyInstalled() {
 		return

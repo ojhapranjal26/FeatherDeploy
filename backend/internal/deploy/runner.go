@@ -203,33 +203,61 @@ func InitQueue(concurrency int) {
 		// Buffer 512 pending jobs; beyond that Enqueue fails the deployment immediately
 		jobCh = make(chan deployJob, 512)
 		for i := 0; i < concurrency; i++ {
-			go deployWorker()
+			go safeDeployWorker()
 		}
 		slog.Info("deployment queue started", "workers", concurrency)
 	})
 }
 
-func deployWorker() {
+func safeDeployWorker() {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("deploy worker panic recovered — respawning", "panic", r)
+			go safeDeployWorker() // respawn
+		}
+	}()
+
 	for job := range jobCh {
 		// Transition: pending → running
 		job.db.Exec( //nolint
 			`UPDATE deployments SET status='running', started_at=datetime('now') WHERE id=?`, job.depID)
 		job.db.Exec( //nolint
 			`UPDATE services SET status='deploying', updated_at=datetime('now') WHERE id=?`, job.svcID)
-		Run(job.db, job.jwtSecret, job.depID, job.svcID, job.userID)
+		
+		// Each deployment has a global timeout of 30 minutes to prevent a hung
+		// build or clone from blocking a worker indefinitely.
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		Run(ctx, job.db, job.jwtSecret, job.depID, job.svcID, job.userID)
+		cancel()
 	}
+}
+
+// isAlreadyBuilding returns true if the service has any other deployment
+// currently pending or running.
+func isAlreadyBuilding(db *sql.DB, svcID, excludeDepID int64) bool {
+	var count int
+	_ = db.QueryRow(
+		`SELECT COUNT(*) FROM deployments WHERE service_id=? AND status IN ('pending', 'running') AND id != ?`,
+		svcID, excludeDepID,
+	).Scan(&count)
+	return count > 0
 }
 
 // Enqueue queues a deployment for execution. The deployment must already exist in
 // the DB with status='pending'. A worker transitions it to 'running' when it is
 // picked up. If the queue channel is full, the deployment is failed immediately.
 func Enqueue(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
+	if isAlreadyBuilding(db, svcID, depID) {
+		markFailed(db, depID, svcID, "A deployment for this service is already in progress.")
+		return
+	}
+
 	if jobCh == nil {
 		// Fallback: queue not initialised — run directly in a goroutine
 		go func() {
 			db.Exec(`UPDATE deployments SET status='running', started_at=datetime('now') WHERE id=?`, depID) //nolint
 			db.Exec(`UPDATE services SET status='deploying', updated_at=datetime('now') WHERE id=?`, svcID) //nolint
-			Run(db, jwtSecret, depID, svcID, userID)
+			Run(context.Background(), db, jwtSecret, depID, svcID, userID)
 		}()
 		return
 	}
@@ -249,7 +277,7 @@ func Enqueue(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 // ─── Public entry point ───────────────────────────────────────────────────────
 
 // Run executes a real deployment asynchronously. Call from a goroutine.
-func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
+func Run(ctx context.Context, db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 	log := &logBuf{}
 
 	// Flush log buffer to DB every 500 ms so the SSE log stream shows real-time
@@ -339,7 +367,7 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 			}
 		} else {
 			log.add("[podman] stopping existing local container %s...", oldCID[:12])
-			removeContainerIfExists(oldCID)
+			removeContainerIfExistsCtx(ctx, oldCID)
 		}
 	}
 
@@ -394,14 +422,20 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 
 		// ── 2c. Clone ────────────────────────────────────────────────────────────
 		log.add("[clone] git clone --depth 1 --branch %s %s", repoBranch, maskURL(repoURL))
-		cloneErr := gitClone(workDir, sshKeyFile, repoURL, repoBranch, log)
+		cloneErr := gitClone(ctx, workDir, sshKeyFile, repoURL, repoBranch, log)
 		if cloneErr != nil {
+			// Check if we were cancelled by the global timeout
+			if ctx.Err() != nil {
+				log.add("ERROR: deployment timed out during git clone")
+				markFailed(db, depID, svcID, log.text())
+				return
+			}
 			// Retry without explicit branch (use repo default)
 			log.add("[clone] branch %q not found — retrying with default branch", repoBranch)
 			os.RemoveAll(workDir)
 			workDir2, _ := os.MkdirTemp(buildTmpDir(), fmt.Sprintf("fd-dep-%d-*", depID))
 			workDir = workDir2
-			if err2 := gitCloneDefault(workDir, sshKeyFile, repoURL, log); err2 != nil {
+			if err2 := gitCloneDefault(ctx, workDir, sshKeyFile, repoURL, log); err2 != nil {
 				log.add("ERROR: git clone failed: %v", err2)
 				markFailed(db, depID, svcID, log.text())
 				return
@@ -409,7 +443,7 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 		}
 
 		// Capture the actual commit SHA and update the deployment record
-		if sha, err := gitRevParse(workDir); err == nil && sha != "" {
+		if sha, err := gitRevParse(ctx, workDir); err == nil && sha != "" {
 			db.Exec(`UPDATE deployments SET commit_sha=? WHERE id=?`, sha, depID) //nolint
 			log.add("[clone] commit %s", sha)
 		}
@@ -478,7 +512,7 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 	// ships its own Dockerfile, where the user may rely on host-built artefacts.
 	if strings.TrimSpace(buildCmd) != "" && repoHasDockerfile {
 		log.add("[build] %s", buildCmd)
-		if err := runShell(workDir, sshKeyFile, buildCmd, log); err != nil {
+		if err := runShell(ctx, workDir, sshKeyFile, buildCmd, log); err != nil {
 			log.add("ERROR: build command failed: %v", err)
 			markFailed(db, depID, svcID, log.text())
 			return
@@ -518,14 +552,19 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 	imageName := fmt.Sprintf("featherdeploy/svc-%d:dep-%d", svcID, depID)
 	stableImage := fmt.Sprintf("featherdeploy/svc-%d:stable", svcID)
 	log.add("[podman] building image %s", imageName)
-	buildErr := podmanBuild(workDir, log, imageName)
+	buildErr := podmanBuild(ctx, workDir, log, imageName)
 	var usingFallback bool
 	if buildErr != nil {
+		if ctx.Err() != nil {
+			log.add("ERROR: deployment timed out during podman build")
+			markFailed(db, depID, svcID, log.text())
+			return
+		}
 		log.add("ERROR: podman build failed: %v", buildErr)
 		// ── Fallback: use last stable image if available ──────────────────────
 		var lastImage string
 		db.QueryRow(`SELECT last_image FROM services WHERE id=?`, svcID).Scan(&lastImage) //nolint
-		if lastImage != "" && podmanImageExists(lastImage) {
+		if lastImage != "" && podmanImageExistsCtx(ctx, lastImage) {
 			log.add("[podman] falling back to last stable image: %s", lastImage)
 			imageName = lastImage
 			usingFallback = true
@@ -537,12 +576,12 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 
 	// ── 7. Stop / remove existing container ──────────────────────────────────
 	cName := fmt.Sprintf("fd-svc-%d", svcID)
-	if containerExists(cName) {
+	if containerExistsCtx(ctx, cName) {
 		log.add("[podman] stopping container %s (grace=10s, hard limit=20s)", cName)
-		stopCtx, stopCancel := context.WithTimeout(context.Background(), 20*time.Second)
+		stopCtx, stopCancel := context.WithTimeout(ctx, 20*time.Second)
 		podmanCmdCtx(stopCtx, "stop", "--time", "10", cName).Run() //nolint
 		stopCancel()
-		podmanCmd("rm", "-f", cName).Run() //nolint
+		podmanCmdCtx(ctx, "rm", "-f", cName).Run() //nolint
 		log.add("[podman] container %s removed", cName)
 	}
 
@@ -624,7 +663,7 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 	runArgs = append(runArgs, imageName)
 
 	log.add("[podman] podman run -d --name %s --network slirp4netns -p %d:%d -e PORT=%d %s", cName, hostPort, appPort, appPort, imageName)
-	out, err := podmanCmd(runArgs...).CombinedOutput()
+	out, err := podmanCmdCtx(ctx, runArgs...).CombinedOutput()
 	if err != nil {
 		log.add("ERROR: podman run failed: %v\n%s", err, strings.TrimSpace(string(out)))
 		markFailed(db, depID, svcID, log.text())
@@ -818,22 +857,22 @@ func SSHGitEnv(keyFile string) string {
 	)
 }
 
-func gitClone(workDir, sshKeyFile, repoURL, branch string, log *logBuf) error {
-	return runCaptureWithSSH(workDir, sshKeyFile, log, "git", "clone", "--depth", "1", "--branch", branch, "--", repoURL, workDir)
+func gitClone(ctx context.Context, workDir, sshKeyFile, repoURL, branch string, log *logBuf) error {
+	return runCaptureWithSSH(ctx, workDir, sshKeyFile, log, "git", "clone", "--depth", "1", "--branch", branch, "--", repoURL, workDir)
 }
 
-func gitCloneDefault(workDir, sshKeyFile, repoURL string, log *logBuf) error {
-	return runCaptureWithSSH(workDir, sshKeyFile, log, "git", "clone", "--depth", "1", "--", repoURL, workDir)
+func gitCloneDefault(ctx context.Context, workDir, sshKeyFile, repoURL string, log *logBuf) error {
+	return runCaptureWithSSH(ctx, workDir, sshKeyFile, log, "git", "clone", "--depth", "1", "--", repoURL, workDir)
 }
 
 // runCapture runs a command, appending its combined output to log.
-func runCapture(dir string, log *logBuf, name string, args ...string) error {
-	return runCaptureWithSSH(dir, "", log, name, args...)
+func runCapture(ctx context.Context, dir string, log *logBuf, name string, args ...string) error {
+	return runCaptureWithSSH(ctx, dir, "", log, name, args...)
 }
 
 // runCaptureWithSSH is like runCapture but also sets GIT_SSH_COMMAND.
-func runCaptureWithSSH(dir, sshKeyFile string, log *logBuf, name string, args ...string) error {
-	cmd := exec.Command(name, args...)
+func runCaptureWithSSH(ctx context.Context, dir, sshKeyFile string, log *logBuf, name string, args ...string) error {
+	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
 
 	// Copy the current environment, stripping HOME and npm_config_cache so our
@@ -867,13 +906,13 @@ func runCaptureWithSSH(dir, sshKeyFile string, log *logBuf, name string, args ..
 }
 
 // runShell runs a shell command string (like build_command) in dir.
-func runShell(dir, sshKeyFile, command string, log *logBuf) error {
-	return runCaptureWithSSH(dir, sshKeyFile, log, "/bin/sh", "-c", command)
+func runShell(ctx context.Context, dir, sshKeyFile, command string, log *logBuf) error {
+	return runCaptureWithSSH(ctx, dir, sshKeyFile, log, "/bin/sh", "-c", command)
 }
 
 // gitRevParse returns the full commit SHA (HEAD) of the cloned repo.
-func gitRevParse(workDir string) (string, error) {
-	out, err := exec.Command("git", "-C", workDir, "rev-parse", "HEAD").Output()
+func gitRevParse(ctx context.Context, workDir string) (string, error) {
+	out, err := exec.CommandContext(ctx, "git", "-C", workDir, "rev-parse", "HEAD").Output()
 	if err != nil {
 		return "", err
 	}
@@ -981,12 +1020,16 @@ func githubAppInstallToken(ctx context.Context, appID, privateKeyPEM, installID 
 	return result.Token, nil
 }
 
-func containerExists(name string) bool {
-	out, err := podmanCmd("ps", "-a", "--filter", "name=^"+name+"$", "--format", "{{.Names}}").Output()
+func containerExistsCtx(ctx context.Context, name string) bool {
+	out, err := podmanCmdCtx(ctx, "ps", "-a", "--filter", "name=^"+name+"$", "--format", "{{.Names}}").Output()
 	if err != nil {
 		return false
 	}
 	return strings.Contains(string(out), name)
+}
+
+func containerExists(name string) bool {
+	return containerExistsCtx(context.Background(), name)
 }
 
 // containerExitStatus returns (exit_code, true) when the named container has
@@ -2976,8 +3019,8 @@ func podmanCmdCtx(ctx context.Context, args ...string) *exec.Cmd {
 // already exists, and only contact the registry when the image is absent.
 // This avoids re-pulling node:20-alpine / python:3.12-slim on every build,
 // which saves bandwidth and minutes per deployment.
-func podmanBuild(dir string, log *logBuf, imageName string) error {
-	cmd := podmanCmd("build", "--pull=missing", "--network=slirp4netns:allow_host_loopback=true", "-t", imageName, ".")
+func podmanBuild(ctx context.Context, dir string, log *logBuf, imageName string) error {
+	cmd := podmanCmdCtx(ctx, "build", "--pull=missing", "--network=slirp4netns:allow_host_loopback=true", "-t", imageName, ".")
 	cmd.Dir = dir
 	var buf bytes.Buffer
 	cmd.Stdout = &buf
@@ -2992,25 +3035,33 @@ func podmanBuild(dir string, log *logBuf, imageName string) error {
 	return err
 }
 
+func podmanImageExistsCtx(ctx context.Context, image string) bool {
+	return podmanCmdCtx(ctx, "image", "exists", image).Run() == nil
+}
+
 // podmanImageExists returns true if the named image exists in the rootless podman store.
 func podmanImageExists(image string) bool {
 	return podmanCmd("image", "exists", image).Run() == nil
 }
 
-func removeContainerIfExists(name string) error {
-	if !containerExists(name) {
+func removeContainerIfExistsCtx(ctx context.Context, name string) error {
+	if !containerExistsCtx(ctx, name) {
 		return nil
 	}
 	// Best-effort graceful stop first: if the container is already stopped or
 	// in a crash-restart loop (state = exited/restarting), podman stop will
 	// return an error.  We ignore that — podman rm -f handles all states.
-	stopCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	stopCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	podmanCmdCtx(stopCtx, "stop", "--time", "10", name).Run() //nolint
-	if out, err := podmanCmd("rm", "-f", name).CombinedOutput(); err != nil {
+	if out, err := podmanCmdCtx(ctx, "rm", "-f", name).CombinedOutput(); err != nil {
 		return fmt.Errorf("remove container %s: %v — %s", name, err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+func removeContainerIfExists(name string) error {
+	return removeContainerIfExistsCtx(context.Background(), name)
 }
 
 func deleteServiceImages(svcID int64) error {
