@@ -150,21 +150,21 @@ func runJoin(args []string) {
 	// Write and start rqlite service (join main Raft cluster)
 	// Determine main IP from mainURL for Raft join address
 	mainIP := extractHost(mainURL)
-	rqliteJoinAddr := "http://" + mainIP + ":4001"
+	rqliteJoinAddr := mainIP + ":4001"
 	if reply.RqliteMain != "" {
 		// If server explicitly provided a different port, honor it
 		parts := strings.Split(reply.RqliteMain, ":")
 		port := parts[len(parts)-1]
-		rqliteJoinAddr = "http://" + mainIP + ":" + port
+		rqliteJoinAddr = mainIP + ":" + port
 	}
 
 	// Connectivity check: ensure we can reach the main server's rqlite port
 	// This helps diagnose firewall/network issues before we start the service.
-	fmt.Printf("==> Checking connectivity to main rqlite at %s...\n", rqliteJoinAddr)
+	fmt.Printf("==> Checking connectivity to main rqlite at http://%s...\n", rqliteJoinAddr)
 	{
 		client := &http.Client{Timeout: 10 * time.Second}
 		// Check HTTP port (4001)
-		if resp, err := client.Get(rqliteJoinAddr + "/readyz"); err != nil {
+		if resp, err := client.Get("http://" + rqliteJoinAddr + "/readyz"); err != nil {
 			fmt.Printf("  WARNING: cannot reach main rqlite HTTP API: %v\n", err)
 			fmt.Println("  Ensure port 4001 is open in your cloud firewall (Security Groups).")
 		} else {
