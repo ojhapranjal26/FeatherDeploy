@@ -603,8 +603,12 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 		// which may be inaccessible to the rootless featherdeploy user.
 		"--log-driver", "k8s-file",
 	}
+	if appPort <= 0 {
+		appPort = 8080
+	}
 	// Apply slirp4netns networking.
 	runArgs = append(runArgs, netdaemon.NetworkArgs()...)
+
 	// IMPORTANT: bind on 0.0.0.0 (all interfaces), NOT 127.0.0.1.
 	// rootlessport reliably binds on all interfaces; with the 127.0.0.1
 	// restriction it sometimes silently fails to bind due to nftables/netavark
@@ -612,14 +616,14 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 	// with i/o timeout instead of connection refused.
 	// External access to the host port range is blocked by iptables INPUT DROP
 	// rules installed by build.sh, so only localhost (fdnet/Caddy) can reach it.
-	runArgs = append(runArgs, "-p", fmt.Sprintf("%d:%d", hostPort, hostPort))
+	runArgs = append(runArgs, "-p", fmt.Sprintf("%d:%d", hostPort, appPort))
 	runArgs = append(runArgs, mountArgs...)
 	// Inject PORT so apps honour the allocated host port inside the container.
 	runArgs = append(runArgs, envArgs...)
-	runArgs = append(runArgs, "-e", fmt.Sprintf("PORT=%d", hostPort))
+	runArgs = append(runArgs, "-e", fmt.Sprintf("PORT=%d", appPort))
 	runArgs = append(runArgs, imageName)
 
-	log.add("[podman] podman run -d --name %s --network slirp4netns -p %d:%d PORT=%d %s", cName, hostPort, hostPort, hostPort, imageName)
+	log.add("[podman] podman run -d --name %s --network slirp4netns -p %d:%d -e PORT=%d %s", cName, hostPort, appPort, appPort, imageName)
 	out, err := podmanCmd(runArgs...).CombinedOutput()
 	if err != nil {
 		log.add("ERROR: podman run failed: %v\n%s", err, strings.TrimSpace(string(out)))
