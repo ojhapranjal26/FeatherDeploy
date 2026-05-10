@@ -206,7 +206,31 @@ func InitQueue(concurrency int) {
 			go safeDeployWorker()
 		}
 		slog.Info("deployment queue started", "workers", concurrency)
+
+		// Start a background janitor to re-enqueue orphaned 'pending' jobs.
+		// This handles cases where the server was restarted or a job was dropped.
+		go janitor(db, jwtSecret)
 	})
+}
+
+func janitor(db *sql.DB, jwtSecret string) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		rows, err := db.Query(`SELECT id, service_id, triggered_by FROM deployments 
+			WHERE status='pending' AND created_at < datetime('now', '-1 minute')`)
+		if err != nil {
+			continue
+		}
+		for rows.Next() {
+			var depID, svcID, userID int64
+			if err := rows.Scan(&depID, &svcID, &userID); err == nil {
+				// Try to enqueue it again. Enqueue() will check isAlreadyBuilding again.
+				Enqueue(db, jwtSecret, depID, svcID, userID)
+			}
+		}
+		rows.Close()
+	}
 }
 
 func safeDeployWorker() {
@@ -232,12 +256,17 @@ func safeDeployWorker() {
 	}
 }
 
-// isAlreadyBuilding returns true if the service has any other deployment
-// currently pending or running.
+// isAlreadyBuilding returns true if the service has another deployment
+// currently pending or running that is NOT 'stale' (started/created in the last 10 mins).
 func isAlreadyBuilding(db *sql.DB, svcID, excludeDepID int64) bool {
 	var count int
+	// We ignore jobs older than 10 minutes because they are likely orphaned or stuck.
+	// The 30-minute global timeout in Run() will eventually mark them as failed,
+	// but we want to allow new deployments to proceed if the previous one is clearly not progressing.
 	_ = db.QueryRow(
-		`SELECT COUNT(*) FROM deployments WHERE service_id=? AND status IN ('pending', 'running') AND id != ?`,
+		`SELECT COUNT(*) FROM deployments 
+		 WHERE service_id=? AND status IN ('pending', 'running') 
+		 AND id != ? AND created_at > datetime('now', '-10 minutes')`,
 		svcID, excludeDepID,
 	).Scan(&count)
 	return count > 0
