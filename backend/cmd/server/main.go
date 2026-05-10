@@ -266,7 +266,7 @@ func serve() {
 			workers = n
 		}
 	}
-	deploy.InitQueue(workers)
+	deploy.InitQueue(db, *jwtSecret, workers)
 	
 	// ─── Coordination: Etcd Cluster ───────────────────────────────────────────
 	etcdEndpoints := os.Getenv("ETCD_ENDPOINTS")

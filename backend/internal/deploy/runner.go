@@ -192,7 +192,7 @@ func buildTmpDir() string {
 
 // InitQueue starts the deployment worker pool. concurrency defaults to
 // runtime.NumCPU() when <= 0. Call once at server startup.
-func InitQueue(concurrency int) {
+func InitQueue(db *sql.DB, jwtSecret string, concurrency int) {
 	queueOnce.Do(func() {
 		if concurrency <= 0 {
 			concurrency = runtime.NumCPU()
