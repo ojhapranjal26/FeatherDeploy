@@ -4,12 +4,11 @@ import (
 	"database/sql"
 	"log/slog"
 	"os/exec"
-	"strings"
 )
 
-// ReconcileNodeRqliteIPTables ensures that only registered worker nodes can
-// communicate with the rqlite cluster ports (4001, 4002).
-func ReconcileNodeRqliteIPTables(db *sql.DB) {
+// ReconcileClusterFirewall ensures that only registered worker nodes and localhost can
+// communicate with the internal cluster ports (rqlite, etcd, mTLS).
+func ReconcileClusterFirewall(db *sql.DB) {
 	ipt, err := exec.LookPath("iptables")
 	if err != nil {
 		return
@@ -22,46 +21,60 @@ func ReconcileNodeRqliteIPTables(db *sql.DB) {
 		return exec.Command(ipt, args...)
 	}
 
-	rows, err := db.Query(`SELECT ip FROM nodes WHERE status='connected'`)
+	// 1. Allow localhost (always safe for internal services)
+	clusterPorts := []string{"4001", "4002", "2379", "2380", "7443"}
+	for _, port := range clusterPorts {
+		ruleSpec := []string{"-p", "tcp", "--dport", port, "-s", "127.0.0.1", "-j", "ACCEPT"}
+		if iptCmd(append([]string{"-C", "INPUT"}, ruleSpec...)...).Run() != nil {
+			iptCmd(append([]string{"-I", "INPUT", "1"}, ruleSpec...)...).Run()
+		}
+	}
+
+	// 2. Allow all registered nodes (connected or pending)
+	rows, err := db.Query(`SELECT ip FROM nodes WHERE ip != ''`)
 	if err != nil {
-		slog.Warn("ReconcileNodeRqliteIPTables: query nodes", "err", err)
+		slog.Warn("ReconcileClusterFirewall: query nodes", "err", err)
 		return
 	}
 	defer rows.Close()
 
-	count := 0
+	activeIPs := make(map[string]bool)
 	for rows.Next() {
 		var ip string
 		if rows.Scan(&ip) != nil || ip == "" {
 			continue
 		}
+		activeIPs[ip] = true
 
-		// Port 4002 (Raft)
-		ruleSpec := []string{"-p", "tcp", "--dport", "4002", "-s", ip,
-			"-m", "comment", "--comment", "featherdeploy rqlite raft from node",
-			"-j", "ACCEPT"}
-		checkArgs := append([]string{"-C", "INPUT"}, ruleSpec...)
-		if iptCmd(checkArgs...).Run() != nil {
-			insertArgs := append([]string{"-I", "INPUT", "1"}, ruleSpec...)
-			if out, runErr := iptCmd(insertArgs...).CombinedOutput(); runErr != nil {
-				slog.Warn("ReconcileNodeRqliteIPTables: could not add iptables rule for 4002",
-					"ip", ip, "err", runErr, "out", strings.TrimSpace(string(out)))
-			} else {
-				count++
+		for _, port := range clusterPorts {
+			comment := "featherdeploy cluster port " + port + " from node"
+			ruleSpec := []string{"-p", "tcp", "--dport", port, "-s", ip,
+				"-m", "comment", "--comment", comment, "-j", "ACCEPT"}
+			
+			if iptCmd(append([]string{"-C", "INPUT"}, ruleSpec...)...).Run() != nil {
+				iptCmd(append([]string{"-I", "INPUT", "1"}, ruleSpec...)...).Run()
 			}
 		}
+	}
 
-		// Port 4001 (HTTP API)
-		ruleSpecHTTP := []string{"-p", "tcp", "--dport", "4001", "-s", ip,
-			"-m", "comment", "--comment", "featherdeploy rqlite http from node",
-			"-j", "ACCEPT"}
-		checkArgsHTTP := append([]string{"-C", "INPUT"}, ruleSpecHTTP...)
-		if iptCmd(checkArgsHTTP...).Run() != nil {
-			insertArgs := append([]string{"-I", "INPUT", "1"}, ruleSpecHTTP...)
-			iptCmd(insertArgs...).Run() //nolint
+	// 3. Drop all other external traffic to these ports
+	// We use -A (append) so it's checked after the ACCEPT rules.
+	for _, port := range clusterPorts {
+		comment := "featherdeploy protect cluster port " + port
+		ruleSpec := []string{"-p", "tcp", "--dport", port,
+			"-m", "comment", "--comment", comment, "-j", "DROP"}
+		
+		// If the DROP rule doesn't exist, append it.
+		// Note: We use -C to check if it exists anywhere.
+		if iptCmd(append([]string{"-C", "INPUT"}, ruleSpec...)...).Run() != nil {
+			iptCmd(append([]string{"-A", "INPUT"}, ruleSpec...)...).Run()
 		}
 	}
-	if count > 0 {
-		slog.Info("ReconcileNodeRqliteIPTables: added iptables rules for nodes", "count", count)
-	}
+
+	slog.Info("ReconcileClusterFirewall: reconciled rules", "nodes", len(activeIPs), "ports", len(clusterPorts))
+}
+
+// Deprecated: use ReconcileClusterFirewall
+func ReconcileNodeRqliteIPTables(db *sql.DB) {
+	ReconcileClusterFirewall(db)
 }

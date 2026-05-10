@@ -242,9 +242,20 @@ func serve() {
 	//    services whose container is gone get status='error'.
 	go reconcileServiceStates(db)
 
+	// Reconcile cluster firewall: ensure internal ports are protected.
+	deploy.ReconcileClusterFirewall(db)
+
 	// Start the background stats collector: samples every running container once
 	// per minute and writes to service_stats for historical analysis.
 	go startStatsCollector(db)
+
+	// Periodically reconcile firewall (every hour)
+	go func() {
+		ticker := time.NewTicker(1 * time.Hour)
+		for range ticker.C {
+			deploy.ReconcileClusterFirewall(db)
+		}
+	}()
 	// One worker = fully sequential deployments: when two services are deployed
 	// simultaneously they queue up rather than running in parallel. This prevents
 	// the build process (npm install, podman build, …) from saturating CPU/RAM
