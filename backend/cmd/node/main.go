@@ -296,7 +296,7 @@ func runServe() {
 				slog.Error("node/deploy: DB not connected")
 				return
 			}
-			deploy.Run(db, payload.Secret, payload.DepID, payload.SvcID, payload.UserID)
+			deploy.Run(context.Background(), db, payload.Secret, payload.DepID, payload.SvcID, payload.UserID)
 		}()
 		w.WriteHeader(http.StatusAccepted)
 		w.Write([]byte(`{"status":"queued"}`))
