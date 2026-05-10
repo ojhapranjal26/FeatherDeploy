@@ -390,14 +390,25 @@ func (h *NodeHandler) CompleteJoin(w http.ResponseWriter, r *http.Request) {
 	if serverIP == "" {
 		serverIP = "127.0.0.1"
 	}
-	etcdMain := fmt.Sprintf("main=http://%s:2380", serverIP)
+	// Detect server's public IP for cluster coordination
+	publicIP := "127.0.0.1"
+	if conn, err := net.DialTimeout("udp", "1.1.1.1:80", 2*time.Second); err == nil {
+		publicIP = conn.LocalAddr().(*net.UDPAddr).IP.String()
+		conn.Close()
+	}
 
-	writeJSON(w, http.StatusOK, map[string]string{
-		"ca_cert_pem":    ca.CertPEM,
+	etcdMain := fmt.Sprintf("main=http://%s:2380", publicIP)
+	rqliteMain := fmt.Sprintf("%s:4001", publicIP)
+	
+	// Add node to etcd cluster
+	exec.Command("etcdctl", "member", "add", nodeID, "--peer-urls="+etcdPeerURL).Run()
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"node_id":        nodeID,
 		"node_cert_pem":  nodeCert.CertPEM,
 		"node_key_pem":   nodeCert.KeyPEM,  // node key sent only once
 		"encrypted_env":  encryptedEnv,     // decrypt with join token
-		"rqlite_main":    "127.0.0.1:4001", // main HTTP addr to join
+		"rqlite_main":    rqliteMain,       // main HTTP addr to join
 		"etcd_main":      etcdMain,         // etcd initial cluster
 		"ssh_public_key": sshPubKey,        // add to /root/.ssh/authorized_keys
 	})
