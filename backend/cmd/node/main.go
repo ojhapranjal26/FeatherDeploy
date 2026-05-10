@@ -137,7 +137,7 @@ func runJoin(args []string) {
 	// Node ID = hostname
 	nodeIP := reply.NodeIP
 	if nodeIP == "" {
-		nodeIP = detectPublicIP()
+		nodeIP = localIP()
 	}
 	nodeID := hostname()
 	writeFile(nodeIDFile, nodeID, 0644)

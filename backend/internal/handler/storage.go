@@ -21,6 +21,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/crypto"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/middleware"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/coordination"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -30,10 +31,11 @@ import (
 type StorageHandler struct {
 	db     *sql.DB
 	secret string
+	etcd   *coordination.Client
 }
 
-func NewStorageHandler(db *sql.DB, secret string) *StorageHandler {
-	return &StorageHandler{db: db, secret: secret}
+func NewStorageHandler(db *sql.DB, secret string, etcd *coordination.Client) *StorageHandler {
+	return &StorageHandler{db: db, secret: secret, etcd: etcd}
 }
 
 // ── Configuration ─────────────────────────────────────────────────────────────
@@ -359,6 +361,14 @@ func (h *StorageHandler) Create(w http.ResponseWriter, r *http.Request) {
 	); err != nil {
 		writeJSON(w, http.StatusInternalServerError, errMap(err.Error()))
 		return
+	}
+
+	if h.etcd != nil {
+		nodeIP := "127.0.0.1"
+		if dIP := os.Getenv("SERVER_IP"); dIP != "" {
+			nodeIP = dIP
+		}
+		go h.etcd.RegisterStorage(r.Context(), 0, body.Name, nodeIP)
 	}
 
 	writeJSON(w, http.StatusCreated, map[string]interface{}{

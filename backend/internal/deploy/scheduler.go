@@ -37,30 +37,39 @@ func SelectTargetNode(db *sql.DB, targetNodeID string) (string, error) {
 
 	// 1. Check main (brain)
 	var bCPU float64
-	var bRAMU, bRAMT int64
-	err := db.QueryRow(`SELECT brain_cpu, brain_ram_used, brain_ram_total FROM cluster_state LIMIT 1`).Scan(&bCPU, &bRAMU, &bRAMT)
+	var bRAMU, bRAMT, bDiskU, bDiskT int64
+	err := db.QueryRow(`SELECT brain_cpu, brain_ram_used, brain_ram_total, brain_disk_used, brain_disk_total FROM cluster_state LIMIT 1`).Scan(&bCPU, &bRAMU, &bRAMT, &bDiskU, &bDiskT)
 	if err == nil {
 		ramPct := 0.0
 		if bRAMT > 0 {
 			ramPct = (float64(bRAMU) / float64(bRAMT)) * 100
 		}
-		nodes = append(nodes, nodeScore{id: "main", score: bCPU + ramPct})
+		diskPct := 0.0
+		if bDiskT > 0 {
+			diskPct = (float64(bDiskU) / float64(bDiskT)) * 100
+		}
+		// Final score is average of CPU, RAM, and Disk percentages
+		nodes = append(nodes, nodeScore{id: "main", score: (bCPU + ramPct + diskPct) / 3})
 	}
 
 	// 2. Check workers
-	rows, err := db.Query(`SELECT node_id, cpu_usage, ram_used, ram_total FROM nodes WHERE status='connected'`)
+	rows, err := db.Query(`SELECT node_id, cpu_usage, ram_used, ram_total, disk_used, disk_total FROM nodes WHERE status='connected'`)
 	if err == nil {
 		defer rows.Close()
 		for rows.Next() {
 			var nid string
 			var cpu float64
-			var ru, rt int64
-			if err := rows.Scan(&nid, &cpu, &ru, &rt); err == nil {
+			var ru, rt, du, dt int64
+			if err := rows.Scan(&nid, &cpu, &ru, &rt, &du, &dt); err == nil {
 				ramPct := 0.0
 				if rt > 0 {
 					ramPct = (float64(ru) / float64(rt)) * 100
 				}
-				nodes = append(nodes, nodeScore{id: nid, score: cpu + ramPct})
+				diskPct := 0.0
+				if dt > 0 {
+					diskPct = (float64(du) / float64(dt)) * 100
+				}
+				nodes = append(nodes, nodeScore{id: nid, score: (cpu + ramPct + diskPct) / 3})
 			}
 		}
 	}

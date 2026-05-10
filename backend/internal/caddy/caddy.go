@@ -7,6 +7,7 @@ package caddy
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"fmt"
 	"io"
@@ -16,7 +17,12 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/coordination"
 )
+
+var EtcdClient *coordination.Client
+
+func SetEtcdClient(c *coordination.Client) { EtcdClient = c }
 
 const (
 	servicesFile = "/etc/caddy/featherdeploy-services.caddy"
@@ -104,7 +110,8 @@ func buildConfig(db *sql.DB) (string, error) {
 	rows, err := db.Query(`
 		SELECT d.domain, d.tls,
 		       COALESCE(s.cluster_port, s.host_port) AS proxy_port,
-		       n.ip AS node_ip
+		       n.ip AS node_ip,
+		       s.project_id, s.name AS svc_name
 		FROM   domains d
 		JOIN   services s ON s.id = d.service_id
 		LEFT JOIN nodes n ON n.node_id = s.node_id
@@ -125,7 +132,9 @@ func buildConfig(db *sql.DB) (string, error) {
 		var domain string
 		var tlsInt, hostPort int
 		var nodeIP sql.NullString
-		if rows.Scan(&domain, &tlsInt, &hostPort, &nodeIP) != nil {
+		var projectID int64
+		var svcName string
+		if rows.Scan(&domain, &tlsInt, &hostPort, &nodeIP, &projectID, &svcName) != nil {
 			continue
 		}
 		domain = strings.TrimSpace(strings.ToLower(domain))
@@ -136,6 +145,14 @@ func buildConfig(db *sql.DB) (string, error) {
 		targetIP := "127.0.0.1"
 		if nodeIP.Valid && nodeIP.String != "" {
 			targetIP = nodeIP.String
+		}
+
+		// Try to resolve from Etcd for live endpoint metadata
+		if EtcdClient != nil {
+			if ip, port, err := EtcdClient.DiscoverService(context.Background(), projectID, svcName); err == nil {
+				targetIP = ip
+				hostPort = port
+			}
 		}
 
 		if tlsInt == 1 {

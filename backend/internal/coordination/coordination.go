@@ -2,6 +2,7 @@ package coordination
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -74,4 +75,59 @@ func (c *Client) ElectLeader(ctx context.Context, electionName, candidateID stri
 	}()
 
 	return leaderChan, nil
+}
+// RegisterService registers a service endpoint in etcd.
+func (c *Client) RegisterService(ctx context.Context, projectID int64, svcName, nodeIP string, port int) error {
+	key := fmt.Sprintf("/discovery/services/%d/%s", projectID, svcName)
+	val := fmt.Sprintf(`{"ip":"%s","port":%d,"type":"service"}`, nodeIP, port)
+	_, err := c.etcd.Put(ctx, key, val)
+	return err
+}
+
+func (c *Client) UnregisterService(ctx context.Context, projectID int64, svcName string) error {
+	key := fmt.Sprintf("/discovery/services/%d/%s", projectID, svcName)
+	_, err := c.etcd.Delete(ctx, key)
+	return err
+}
+
+// RegisterDatabase registers a database endpoint in etcd.
+func (c *Client) RegisterDatabase(ctx context.Context, projectID int64, dbName, nodeIP string, port int) error {
+	key := fmt.Sprintf("/discovery/databases/%d/%s", projectID, dbName)
+	val := fmt.Sprintf(`{"ip":"%s","port":%d,"type":"database"}`, nodeIP, port)
+	_, err := c.etcd.Put(ctx, key, val)
+	return err
+}
+
+func (c *Client) UnregisterDatabase(ctx context.Context, projectID int64, dbName string) error {
+	key := fmt.Sprintf("/discovery/databases/%d/%s", projectID, dbName)
+	_, err := c.etcd.Delete(ctx, key)
+	return err
+}
+
+// RegisterStorage registers an object storage endpoint in etcd.
+func (c *Client) RegisterStorage(ctx context.Context, projectID int64, storageName, nodeIP string) error {
+	key := fmt.Sprintf("/discovery/storage/%d/%s", projectID, storageName)
+	val := fmt.Sprintf(`{"ip":"%s","type":"storage"}`, nodeIP)
+	_, err := c.etcd.Put(ctx, key, val)
+	return err
+}
+
+// DiscoverService fetches service metadata from etcd.
+func (c *Client) DiscoverService(ctx context.Context, projectID int64, svcName string) (string, int, error) {
+	key := fmt.Sprintf("/discovery/services/%d/%s", projectID, svcName)
+	resp, err := c.etcd.Get(ctx, key)
+	if err != nil {
+		return "", 0, err
+	}
+	if len(resp.Kvs) == 0 {
+		return "", 0, fmt.Errorf("service not found")
+	}
+	var data struct {
+		IP   string `json:"ip"`
+		Port int    `json:"port"`
+	}
+	if err := json.Unmarshal(resp.Kvs[0].Value, &data); err != nil {
+		return "", 0, err
+	}
+	return data.IP, data.Port, nil
 }

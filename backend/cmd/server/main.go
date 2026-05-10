@@ -24,6 +24,7 @@ import (
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/caddy"
 	appDb "github.com/ojhapranjal26/featherdeploy/backend/internal/db"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/deploy"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/coordination"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/handler"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/heartbeat"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/installer"
@@ -255,6 +256,20 @@ func serve() {
 		}
 	}
 	deploy.InitQueue(workers)
+	
+	// ─── Coordination: Etcd Cluster ───────────────────────────────────────────
+	etcdEndpoints := os.Getenv("ETCD_ENDPOINTS")
+	if etcdEndpoints == "" {
+		etcdEndpoints = "127.0.0.1:2379"
+	}
+	etcdClient, err := coordination.NewClient(strings.Split(etcdEndpoints, ","))
+	if err != nil {
+		slog.Warn("etcd: could not connect, discovery features will be disabled", "err", err)
+	} else {
+		deploy.SetEtcdClient(etcdClient)
+		caddy.SetEtcdClient(etcdClient)
+		slog.Info("etcd: coordination client ready", "endpoints", etcdEndpoints)
+	}
 
 	// ─── FDNet: lightweight internal network proxy ─────────────────────────────
 	// Replaces Podman named-bridge networks (netavark/aardvark-dns) with a
@@ -387,7 +402,7 @@ func serve() {
 	systemH := handler.NewSystemHandler()
 
 	sessionsH := handler.NewSessionsHandler(db)
-	storageH := handler.NewStorageHandler(db, *jwtSecret)
+	storageH := handler.NewStorageHandler(db, *jwtSecret, etcdClient)
 
 	// ─── Router ──────────────────────────────────────────────────────────────
 	r := chi.NewRouter()

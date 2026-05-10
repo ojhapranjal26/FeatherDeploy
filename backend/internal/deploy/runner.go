@@ -39,6 +39,7 @@ import (
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/caddy"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/detect"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/netdaemon"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/coordination"
 	"github.com/golang-jwt/jwt/v5"
 )
 
@@ -99,6 +100,10 @@ var (
 // SetNetDaemon so the deployment pipeline can register and deregister services
 // without importing the full netdaemon package in callers.
 var NetDaemon *netdaemon.Daemon
+var EtcdClient *coordination.Client
+
+// SetEtcdClient injects the coordination client instance.
+func SetEtcdClient(c *coordination.Client) { EtcdClient = c }
 
 // cgroupResourcesOnce / cgroupResourcesOK cache whether the host supports
 // cgroup v2 cpu+memory controllers in rootless Podman containers.
@@ -653,6 +658,16 @@ func Run(db *sql.DB, jwtSecret string, depID, svcID, userID int64) {
 	db.Exec(
 		`UPDATE services SET status='running', container_id=?, host_port=?, updated_at=datetime('now') WHERE id=?`,
 		newContainerID, hostPort, svcID)
+
+	// Cluster discovery registration (Etcd)
+	if EtcdClient != nil {
+		nodeIP := "127.0.0.1"
+		if conn, err := net.DialTimeout("udp", "1.1.1.1:80", 2*time.Second); err == nil {
+			nodeIP = conn.LocalAddr().(*net.UDPAddr).IP.String()
+			conn.Close()
+		}
+		go EtcdClient.RegisterService(context.Background(), projectID, svcName, nodeIP, hostPort)
+	}
 
 	// Wait for the container's published host port to accept TCP connections
 	// before reloading Caddy.  The app now binds hostPort directly, so this
@@ -2113,6 +2128,16 @@ func startDatabaseRetrying(db *sql.DB, jwtSecret string, dbID int64, attempt int
 	db.Exec( //nolint
 		`UPDATE databases SET status='running', container_id=?, last_error='', updated_at=datetime('now') WHERE id=?`,
 		containerID, dbID)
+
+	// Cluster discovery registration (Etcd)
+	if EtcdClient != nil {
+		nodeIP := "127.0.0.1"
+		if conn, err := net.DialTimeout("udp", "1.1.1.1:80", 2*time.Second); err == nil {
+			nodeIP = conn.LocalAddr().(*net.UDPAddr).IP.String()
+			conn.Close()
+		}
+		go EtcdClient.RegisterDatabase(context.Background(), projectID, dbName, nodeIP, hostPort)
+	}
 	log.add("[db-start] ✓ database is running — waiting for engine to initialize (this can take 10–30s for first-run)")
 	slog.Info("database container started", "db_id", dbID, "container", cName)
 
@@ -2269,6 +2294,9 @@ func StopDatabase(db *sql.DB, dbID int64) error {
 	if NetDaemon != nil {
 		NetDaemon.Deregister(projectID, DBNetworkAlias(dbName))
 	}
+	if EtcdClient != nil {
+		go EtcdClient.UnregisterDatabase(context.Background(), projectID, dbName)
+	}
 	db.Exec( //nolint
 		`UPDATE databases SET status='stopped', container_id='', updated_at=datetime('now') WHERE id=?`, dbID)
 	CleanupProjectRuntimeIfUnused(db, projectID) //nolint
@@ -2339,6 +2367,9 @@ func DeleteServiceRuntime(db *sql.DB, projectID, svcID int64) error {
 		db.QueryRow(`SELECT name FROM services WHERE id=?`, svcID).Scan(&svcName) //nolint
 		if svcName != "" {
 			NetDaemon.Deregister(projectID, svcName)
+			if EtcdClient != nil {
+				go EtcdClient.UnregisterService(context.Background(), projectID, svcName)
+			}
 		}
 	}
 	if err := deleteServiceImages(svcID); err != nil {
