@@ -214,22 +214,31 @@ func InitQueue(db *sql.DB, jwtSecret string, concurrency int) {
 }
 
 func janitor(db *sql.DB, jwtSecret string) {
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(2 * time.Minute)
 	defer ticker.Stop()
 	for range ticker.C {
-		rows, err := db.Query(`SELECT id, service_id, triggered_by FROM deployments 
-			WHERE status='pending' AND created_at < datetime('now', '-1 minute')`)
-		if err != nil {
-			continue
-		}
-		for rows.Next() {
-			var depID, svcID, userID int64
-			if err := rows.Scan(&depID, &svcID, &userID); err == nil {
-				// Try to enqueue it again. Enqueue() will check isAlreadyBuilding again.
-				Enqueue(db, jwtSecret, depID, svcID, userID)
+		// Cleanup: mark any jobs that have been 'running' for more than 45 minutes as failed.
+		// These are likely orphaned by a previous crash or a logic error that bypassed the 30m timeout.
+		now := time.Now().UTC().Format("2006-01-02 15:04:05")
+		_, _ = db.Exec(`UPDATE deployments 
+			SET status='failed', finished_at=?, error_message='deployment timed out (orphaned)'
+			WHERE status='running' AND started_at < datetime('now', '-45 minutes')`, now)
+
+		// Prune old logs for all services to keep DB size manageable.
+		var svcIDs []int64
+		rows, err := db.Query(`SELECT id FROM services`)
+		if err == nil {
+			for rows.Next() {
+				var id int64
+				if err := rows.Scan(&id); err == nil {
+					svcIDs = append(svcIDs, id)
+				}
 			}
+			rows.Close()
 		}
-		rows.Close()
+		for _, id := range svcIDs {
+			trimOldDeployLogs(db, id)
+		}
 	}
 }
 
@@ -430,10 +439,10 @@ func Run(ctx context.Context, db *sql.DB, jwtSecret string, depID, svcID, userID
 		// First try the GitHub App installation token (server-wide, preferred).
 		// If the App is not configured or the URL is unchanged, fall back to the
 		// deploying user's personal GitHub OAuth token.
-		repoURL = injectGitHubAppToken(context.Background(), db, repoURL, log)
+		repoURL = injectGitHubAppToken(ctx, db, repoURL, log)
 		if strings.HasPrefix(repoURL, "https://github.com/") {
 			// App token not injected — try user OAuth token
-			repoURL = injectUserOAuthToken(context.Background(), db, userID, repoURL, log)
+			repoURL = injectUserOAuthToken(ctx, db, userID, repoURL, log)
 		}
 
 		// ── 2b. SSH key setup for private / SSH repos ─────────────────────────
@@ -734,11 +743,13 @@ func Run(ctx context.Context, db *sql.DB, jwtSecret string, depID, svcID, userID
 	// Cluster discovery registration (Etcd)
 	if EtcdClient != nil {
 		nodeIP := detectNodeIP(db)
-		if err := EtcdClient.RegisterService(context.Background(), projectID, svcName, nodeIP, hostPort); err != nil {
+		discoveryCtx, discoveryCancel := context.WithTimeout(ctx, 10*time.Second)
+		if err := EtcdClient.RegisterService(discoveryCtx, projectID, svcName, nodeIP, hostPort); err != nil {
 			log.add("[etcd] warning: could not register service for discovery: %v", err)
 		} else {
 			log.add("[etcd] service registered successfully for discovery (ip=%s, port=%d)", nodeIP, hostPort)
 		}
+		discoveryCancel()
 	}
 
 	// Wait for the container's published host port to accept TCP connections
@@ -1058,7 +1069,9 @@ func containerExistsCtx(ctx context.Context, name string) bool {
 }
 
 func containerExists(name string) bool {
-	return containerExistsCtx(context.Background(), name)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return containerExistsCtx(ctx, name)
 }
 
 // containerExitStatus returns (exit_code, true) when the named container has
@@ -2208,7 +2221,11 @@ func startDatabaseRetrying(db *sql.DB, jwtSecret string, dbID int64, attempt int
 	// Cluster discovery registration (Etcd)
 	if EtcdClient != nil {
 		nodeIP := detectNodeIP(db)
-		go EtcdClient.RegisterDatabase(context.Background(), projectID, dbName, nodeIP, hostPort)
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			_ = EtcdClient.RegisterDatabase(ctx, projectID, dbName, nodeIP, hostPort)
+		}()
 	}
 	log.add("[db-start] ✓ database is running — waiting for engine to initialize (this can take 10–30s for first-run)")
 	slog.Info("database container started", "db_id", dbID, "container", cName)
@@ -2367,7 +2384,11 @@ func StopDatabase(db *sql.DB, dbID int64) error {
 		NetDaemon.Deregister(projectID, DBNetworkAlias(dbName))
 	}
 	if EtcdClient != nil {
-		go EtcdClient.UnregisterDatabase(context.Background(), projectID, dbName)
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			_ = EtcdClient.UnregisterDatabase(ctx, projectID, dbName)
+		}()
 	}
 	db.Exec( //nolint
 		`UPDATE databases SET status='stopped', container_id='', updated_at=datetime('now') WHERE id=?`, dbID)
@@ -2440,7 +2461,11 @@ func DeleteServiceRuntime(db *sql.DB, projectID, svcID int64) error {
 		if svcName != "" {
 			NetDaemon.Deregister(projectID, svcName)
 			if EtcdClient != nil {
-				go EtcdClient.UnregisterService(context.Background(), projectID, svcName)
+				go func() {
+					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					defer cancel()
+					_ = EtcdClient.UnregisterService(ctx, projectID, svcName)
+				}()
 			}
 		}
 	}
@@ -3090,7 +3115,9 @@ func removeContainerIfExistsCtx(ctx context.Context, name string) error {
 }
 
 func removeContainerIfExists(name string) error {
-	return removeContainerIfExistsCtx(context.Background(), name)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	return removeContainerIfExistsCtx(ctx, name)
 }
 
 func deleteServiceImages(svcID int64) error {
