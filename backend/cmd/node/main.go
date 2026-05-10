@@ -112,6 +112,7 @@ func runJoin(args []string) {
 		RqliteMain   string `json:"rqlite_main"` // main Raft addr to join
 		EtcdMain     string `json:"etcd_main"`   // etcd initial cluster
 		SSHPublicKey string `json:"ssh_public_key"`
+		NodeIP       string `json:"node_ip"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&reply); err != nil {
 		fatalf("decode response: %v", err)
@@ -134,6 +135,10 @@ func runJoin(args []string) {
 	writeFile(configDir+"/main_url", mainURL, 0644)
 
 	// Node ID = hostname
+	nodeIP := reply.NodeIP
+	if nodeIP == "" {
+		nodeIP = detectPublicIP()
+	}
 	nodeID := hostname()
 	writeFile(nodeIDFile, nodeID, 0644)
 
@@ -175,10 +180,30 @@ func runJoin(args []string) {
 			conn.Close()
 			fmt.Println("  ✓ Raft connectivity confirmed")
 		}
+
+		// Check Etcd client port (2379)
+		etcdClientAddr := mainIP + ":2379"
+		if conn, err := net.DialTimeout("tcp", etcdClientAddr, 5*time.Second); err != nil {
+			fmt.Printf("  WARNING: cannot reach main etcd client port at %s: %v\n", etcdClientAddr, err)
+			fmt.Println("  Ensure port 2379 is open in your cloud firewall (Security Groups).")
+		} else {
+			conn.Close()
+			fmt.Println("  ✓ Etcd client connectivity confirmed")
+		}
+
+		// Check Etcd peer port (2380)
+		etcdPeerAddr := mainIP + ":2380"
+		if conn, err := net.DialTimeout("tcp", etcdPeerAddr, 5*time.Second); err != nil {
+			fmt.Printf("  WARNING: cannot reach main etcd peer port at %s: %v\n", etcdPeerAddr, err)
+			fmt.Println("  Ensure port 2380 is open in your cloud firewall (Security Groups).")
+		} else {
+			conn.Close()
+			fmt.Println("  ✓ Etcd peer connectivity confirmed")
+		}
 	}
 
-	writeRqliteService(nodeID, rqliteJoinAddr)
-	writeEtcdService(nodeID, reply.EtcdMain)
+	writeRqliteService(nodeID, rqliteJoinAddr, nodeIP)
+	writeEtcdService(nodeID, reply.EtcdMain, nodeIP)
 
 	// Verify binaries before starting
 	for _, bin := range []string{"rqlited", "etcd"} {
@@ -429,8 +454,7 @@ RestartSec=5
 WantedBy=multi-user.target
 `
 
-func writeRqliteService(nodeID, mainRaft string) {
-	myIP := localIP()
+func writeRqliteService(nodeID, mainRaft, myIP string) {
 	content := fmt.Sprintf(rqliteServiceTmpl,
 		nodeID, rqliteHTTP, myIP, rqliteRaft, myIP, mainRaft, rqliteData)
 	writeFile(rqliteUnit, content, 0644)
@@ -442,7 +466,7 @@ After=network.target
 Before=featherdeploy-node.service
 
 [Service]
-Type=notify
+Type=simple
 User=root
 ExecStartPre=/bin/bash -c 'mkdir -p %s/etcd-data && chown -R root:root %s/etcd-data'
 ExecStart=/usr/local/bin/etcd \
@@ -462,8 +486,7 @@ RestartSec=5s
 WantedBy=multi-user.target
 `
 
-func writeEtcdService(nodeID, etcdMain string) {
-	myIP := localIP()
+func writeEtcdService(nodeID, etcdMain, myIP string) {
 	content := fmt.Sprintf(etcdServiceTmpl,
 		dataDir, dataDir, nodeID, dataDir, myIP, myIP, etcdMain, nodeID, myIP)
 	writeFile("/etc/systemd/system/etcd-node.service", content, 0644)

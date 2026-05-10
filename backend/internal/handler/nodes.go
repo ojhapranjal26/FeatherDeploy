@@ -375,11 +375,19 @@ func (h *NodeHandler) CompleteJoin(w http.ResponseWriter, r *http.Request) {
 		nodeID = "node-" + randomHex20()[:8]
 	}
 	etcdPeerURL := fmt.Sprintf("http://%s:2380", nodeIP)
-	go func() {
-		// etcdctl member add <name> --peer-urls=<url>
-		// We use sudo because etcd is usually root-owned or requires specific perms
-		exec.Command("sudo", "etcdctl", "member", "add", nodeID, "--peer-urls="+etcdPeerURL).Run()
-	}()
+	
+	// etcdctl member add <name> --peer-urls=<url>
+	// We use sudo because etcd is usually root-owned or requires specific perms
+	// and we use the absolute path to etcdctl.
+	slog.Info("complete-join: adding etcd member", "id", nodeID, "url", etcdPeerURL)
+	cmd := exec.Command("sudo", "/usr/local/bin/etcdctl", "member", "add", nodeID, "--peer-urls="+etcdPeerURL)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		slog.Error("complete-join: etcd member add failed", "err", err, "out", string(out))
+		// We continue even if this fails, as the node might already be in the cluster
+		// or etcd might not be running yet.
+	} else {
+		slog.Info("complete-join: etcd member added successfully")
+	}
 
 	// Fetch SSH public key so the node can add it to authorized_keys
 	sshPubKey := heartbeat.GetSSHPublicKey(h.db)
@@ -390,18 +398,18 @@ func (h *NodeHandler) CompleteJoin(w http.ResponseWriter, r *http.Request) {
 	if serverIP == "" {
 		serverIP = "127.0.0.1"
 	}
-	// Detect server's public IP for cluster coordination
-	publicIP := "127.0.0.1"
-	if conn, err := net.DialTimeout("udp", "1.1.1.1:80", 2*time.Second); err == nil {
-		publicIP = conn.LocalAddr().(*net.UDPAddr).IP.String()
-		conn.Close()
+	publicIP := serverIP
+	if publicIP == "127.0.0.1" || publicIP == "" {
+		if conn, err := net.DialTimeout("udp", "1.1.1.1:80", 2*time.Second); err == nil {
+			publicIP = conn.LocalAddr().(*net.UDPAddr).IP.String()
+			conn.Close()
+		}
 	}
 
 	etcdMain := fmt.Sprintf("main=http://%s:2380", publicIP)
 	rqliteMain := fmt.Sprintf("%s:4001", publicIP)
 	
-	// Add node to etcd cluster
-	exec.Command("etcdctl", "member", "add", nodeID, "--peer-urls="+etcdPeerURL).Run()
+	// Redundant call removed
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"node_id":        nodeID,
@@ -411,6 +419,7 @@ func (h *NodeHandler) CompleteJoin(w http.ResponseWriter, r *http.Request) {
 		"rqlite_main":    rqliteMain,       // main HTTP addr to join
 		"etcd_main":      etcdMain,         // etcd initial cluster
 		"ssh_public_key": sshPubKey,        // add to /root/.ssh/authorized_keys
+		"node_ip":        nodeIP,
 	})
 }
 

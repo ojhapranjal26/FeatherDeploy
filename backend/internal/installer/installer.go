@@ -864,7 +864,8 @@ func writeSudoersFile(svcUser string) {
 		svcUser + " ALL=(root) NOPASSWD: /sbin/iptables-save\n" +
 		svcUser + " ALL=(root) NOPASSWD: /usr/sbin/iptables-save\n" +
 		// Allow ufw for public database access toggle (persists across UFW reloads).
-		svcUser + " ALL=(root) NOPASSWD: /usr/sbin/ufw\n"
+		svcUser + " ALL=(root) NOPASSWD: /usr/sbin/ufw\n" +
+		svcUser + " ALL=(root) NOPASSWD: /usr/local/bin/etcdctl\n"
 	if err := os.WriteFile(sudoersFile, []byte(content), 0440); err != nil {
 		slog.Warn("installer: could not write sudoers file", "path", sudoersFile, "err", err)
 		return
