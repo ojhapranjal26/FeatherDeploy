@@ -1462,6 +1462,7 @@ const rqliteServiceTmpl = `[Unit]
 Description=rqlite Distributed SQLite
 After=network.target
 Before=featherdeploy.service
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -1480,7 +1481,6 @@ ExecStart=/usr/local/bin/rqlited \
   {{.DataDir}}/rqlite-data
 Restart=always
 RestartSec=5s
-StartLimitIntervalSec=0
 StandardOutput=journal
 StandardError=journal
 

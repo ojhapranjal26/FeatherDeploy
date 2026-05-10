@@ -226,6 +226,7 @@ CREATE TABLE IF NOT EXISTS nodes (
     node_cert_pem    TEXT     NOT NULL DEFAULT '',             -- TLS cert signed by our CA
     rqlite_addr      TEXT     NOT NULL DEFAULT '',             -- host:port for rqlite Raft join
     last_stats_at   DATETIME,
+    last_seen       DATETIME,
     last_rotated_at DATETIME, -- track mTLS cert rotation
     created_at      DATETIME NOT NULL DEFAULT (datetime('now')),
     updated_at       DATETIME NOT NULL DEFAULT (datetime('now'))
@@ -271,6 +272,7 @@ ALTER TABLE nodes ADD COLUMN last_stats_at DATETIME;
 ALTER TABLE nodes ADD COLUMN node_id      TEXT    NOT NULL DEFAULT '';  -- hostname used as election ID
 ALTER TABLE nodes ADD COLUMN hostname      TEXT    NOT NULL DEFAULT '';
 ALTER TABLE nodes ADD COLUMN os_info       TEXT    NOT NULL DEFAULT '';
+ALTER TABLE nodes ADD COLUMN last_seen     DATETIME;
 
 -- 015: system_settings — key-value store for branding and panel-wide configuration
 -- Note: column is named setting_key (not key) because key is reserved in rqlite.
