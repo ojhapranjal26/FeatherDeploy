@@ -2632,6 +2632,18 @@ func migrateDatabaseDataBackground(db *sql.DB, secret string, taskID, dbID int64
 		return fmt.Errorf("old node %q not found", oldNodeID)
 	}
 
+	if netdaemon.GlobalTunnel != nil {
+		if proxyAddr := netdaemon.GlobalTunnel.GetNodeProxyAddr(oldNodeID, port); proxyAddr != "" {
+			ip = "127.0.0.1"
+			parts := strings.Split(proxyAddr, ":")
+			if len(parts) == 2 {
+				if parsedPort, err := strconv.Atoi(parts[1]); err == nil {
+					port = parsedPort
+				}
+			}
+		}
+	}
+
 	caFile, _ := os.ReadFile("/etc/featherdeploy/ca.crt")
 	certFile, _ := os.ReadFile("/etc/featherdeploy/node.crt")
 	keyFile, _ := os.ReadFile("/etc/featherdeploy/node.key")
@@ -3711,6 +3723,20 @@ func dispatchToNode(db *sql.DB, nodeID string, depID, svcID, userID int64, secre
 		return fmt.Errorf("node %q not found in DB: %w", nodeID, err)
 	}
 
+	// Route traffic over the secure tunnel if a proxy is available
+	if netdaemon.GlobalTunnel != nil {
+		if proxyAddr := netdaemon.GlobalTunnel.GetNodeProxyAddr(nodeID, port); proxyAddr != "" {
+			ip = "127.0.0.1"
+			// proxyAddr looks like "127.0.0.1:20054"
+			parts := strings.Split(proxyAddr, ":")
+			if len(parts) == 2 {
+				if parsedPort, err := strconv.Atoi(parts[1]); err == nil {
+					port = parsedPort
+				}
+			}
+		}
+	}
+
 	// Prepare payload
 	payload := map[string]any{
 		"dep_id":     depID,
@@ -3757,6 +3783,18 @@ func stopContainerOnNode(db *sql.DB, nodeID, containerID string) error {
 		return fmt.Errorf("node %q not found: %w", nodeID, err)
 	}
 
+	if netdaemon.GlobalTunnel != nil {
+		if proxyAddr := netdaemon.GlobalTunnel.GetNodeProxyAddr(nodeID, port); proxyAddr != "" {
+			ip = "127.0.0.1"
+			parts := strings.Split(proxyAddr, ":")
+			if len(parts) == 2 {
+				if parsedPort, err := strconv.Atoi(parts[1]); err == nil {
+					port = parsedPort
+				}
+			}
+		}
+	}
+
 	payload := map[string]any{"container_id": containerID}
 	body, _ := json.Marshal(payload)
 
@@ -3796,6 +3834,18 @@ func dispatchDatabaseToNode(db *sql.DB, secret, nodeID string, dbID int64) error
 		return fmt.Errorf("node %q not found", nodeID)
 	}
 
+	if netdaemon.GlobalTunnel != nil {
+		if proxyAddr := netdaemon.GlobalTunnel.GetNodeProxyAddr(nodeID, port); proxyAddr != "" {
+			ip = "127.0.0.1"
+			parts := strings.Split(proxyAddr, ":")
+			if len(parts) == 2 {
+				if parsedPort, err := strconv.Atoi(parts[1]); err == nil {
+					port = parsedPort
+				}
+			}
+		}
+	}
+
 	payload := map[string]any{
 		"db_id":      dbID,
 		"jwt_secret": secret,
@@ -3830,6 +3880,18 @@ func migrateDatabaseData(db *sql.DB, secret, oldNodeID string, dbID int64) error
 	err := db.QueryRow(`SELECT ip, port FROM nodes WHERE node_id=?`, oldNodeID).Scan(&ip, &port)
 	if err != nil {
 		return fmt.Errorf("old node %q not found", oldNodeID)
+	}
+
+	if netdaemon.GlobalTunnel != nil {
+		if proxyAddr := netdaemon.GlobalTunnel.GetNodeProxyAddr(oldNodeID, port); proxyAddr != "" {
+			ip = "127.0.0.1"
+			parts := strings.Split(proxyAddr, ":")
+			if len(parts) == 2 {
+				if parsedPort, err := strconv.Atoi(parts[1]); err == nil {
+					port = parsedPort
+				}
+			}
+		}
 	}
 
 	caFile, _ := os.ReadFile("/etc/featherdeploy/ca.crt")

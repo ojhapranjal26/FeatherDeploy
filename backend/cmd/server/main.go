@@ -112,6 +112,12 @@ func runAsSvcUser(name string, args ...string) {
 var TunnelMgr *netdaemon.TunnelManager
 var NetDaemon *netdaemon.Daemon
 
+// Init global tunnel manager
+func init() {
+	TunnelMgr = netdaemon.NewTunnelManager()
+	netdaemon.GlobalTunnel = TunnelMgr
+}
+
 func main() {
 	// ── Subcommand dispatch ────────────────────────────────────────────────────
 	if len(os.Args) > 1 {

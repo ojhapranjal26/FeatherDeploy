@@ -218,6 +218,11 @@ func runJoin(args []string) {
 	waitForRqlite(60)
 
 
+	// Explicitly stop the temporary setup tunnel so the background service
+	// can bind to the proxy ports (4001, 2379, etc) without "address already in use" errors.
+	cancel()
+	time.Sleep(1 * time.Second)
+
 	// Write and enable featherdeploy-node serve service
 	writeNodeServeService()
 	runCmd("systemctl", "daemon-reload")

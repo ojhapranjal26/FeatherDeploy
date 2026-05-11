@@ -22,6 +22,10 @@ var upgrader = websocket.Upgrader{
 	WriteBufferSize: 4096,
 }
 
+// GlobalTunnel is a singleton instance initialized by the main server
+// so other packages (like deploy/scheduler) can query proxy addresses.
+var GlobalTunnel *TunnelManager
+
 // TunnelManager handles reverse tunnels over WebSockets.
 type TunnelManager struct {
 	mu        sync.RWMutex
