@@ -3,8 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -291,6 +293,11 @@ func runServe() {
 	// Start node heartbeat + brain-election goroutine
 	if db != nil {
 		go runNodeHeartbeat(db, myID)
+	}
+
+	if mainURL != "" && nodeToken != "" {
+		tunnelTLSCfg := &tls.Config{InsecureSkipVerify: true}
+		go runAutoUpdater(mainURL, nodeToken, tunnelTLSCfg)
 	}
 
 	// ─── etcd Coordination Layer ──────────────────────────────────────────────
@@ -881,4 +888,120 @@ func getOSInfo() string {
 	}
 	return strings.TrimSpace(string(out))
 }
+
+func runAutoUpdater(mainURL, nodeToken string, tlsCfg *tls.Config) {
+	// Every 5 minutes, check the brain for a binary update
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+
+	// Use the tunnel's inner IP if we are connected, but actually we are the node,
+	// so the brain proxy for the main HTTP API isn't strictly necessary if mainURL is reachable.
+	// However, we want to talk to the brain API. If the main URL is unreachable,
+	// we could talk to the brain through a proxy? The node DOES proxy port 7443 to the brain.
+	// But `featherdeploy-update` doesn't run on port 7443. The brain API is port 8080 or mainURL.
+	// It's safest to just use `mainURL`.
+
+	apiURL := strings.TrimRight(mainURL, "/")
+
+	client := &http.Client{
+		Transport: &http.Transport{TLSClientConfig: tlsCfg},
+		Timeout:   30 * time.Second,
+	}
+
+	for range ticker.C {
+		// 1. Get remote hash
+		req, err := http.NewRequest("GET", apiURL+"/api/nodes/binary/hash", nil)
+		if err != nil {
+			continue
+		}
+		// Since we're hitting the open endpoint, we can pass token just in case
+		req.Header.Set("Authorization", "Bearer "+nodeToken)
+		
+		resp, err := client.Do(req)
+		if err != nil {
+			slog.Debug("auto-update: hash check failed", "err", err)
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			continue
+		}
+
+		var payload map[string]string
+		if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+			resp.Body.Close()
+			continue
+		}
+		resp.Body.Close()
+
+		remoteHash := payload["hash"]
+		if remoteHash == "" {
+			continue
+		}
+
+		// 2. Get local hash
+		f, err := os.Open("/usr/local/bin/featherdeploy-node")
+		if err != nil {
+			continue
+		}
+		hsh := sha256.New()
+		io.Copy(hsh, f)
+		f.Close()
+		localHash := hex.EncodeToString(hsh.Sum(nil))
+
+		// 3. Compare and update
+		if localHash != remoteHash {
+			slog.Info("auto-update: new binary version detected", "local", localHash[:8], "remote", remoteHash[:8])
+			
+			// Download to temp file
+			tmpFile, err := os.CreateTemp("/tmp", "fd-node-new-*")
+			if err != nil {
+				slog.Error("auto-update: create temp file failed", "err", err)
+				continue
+			}
+			
+			dlReq, _ := http.NewRequest("GET", apiURL+"/api/nodes/binary", nil)
+			dlReq.Header.Set("Authorization", "Bearer "+nodeToken)
+			dlResp, err := client.Do(dlReq)
+			if err != nil || dlResp.StatusCode != http.StatusOK {
+				slog.Error("auto-update: download failed")
+				tmpFile.Close()
+				os.Remove(tmpFile.Name())
+				if dlResp != nil {
+					dlResp.Body.Close()
+				}
+				continue
+			}
+			
+			_, err = io.Copy(tmpFile, dlResp.Body)
+			dlResp.Body.Close()
+			tmpFile.Close()
+			if err != nil {
+				os.Remove(tmpFile.Name())
+				continue
+			}
+
+			// Chmod and replace
+			os.Chmod(tmpFile.Name(), 0755)
+			
+			// Try to atomically replace
+			err = os.Rename(tmpFile.Name(), "/usr/local/bin/featherdeploy-node")
+			if err != nil {
+				// Fallback if cross-device
+				cmd := exec.Command("mv", "-f", tmpFile.Name(), "/usr/local/bin/featherdeploy-node")
+				cmd.Run()
+			}
+			
+			slog.Info("auto-update: binary replaced successfully. restarting service...")
+			
+			// Restart service (we must run this in background so we don't block and get killed abruptly if we can avoid it,
+			// actually systemd will just kill us immediately when we call restart, which is fine)
+			exec.Command("systemctl", "restart", "featherdeploy-node").Start()
+			
+			// Exit just in case systemctl takes too long, systemd will start us again
+			os.Exit(0)
+		}
+	}
+}
+
 

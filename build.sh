@@ -752,9 +752,10 @@ rm -rf "$INSTALL_DIR/backend/web/dist"
 mkdir -p "$INSTALL_DIR/backend/web/dist"
 cp -r "$INSTALL_DIR/frontend/dist/." "$INSTALL_DIR/backend/web/dist/"
 
-echo "==> Building FeatherDeploy binary..."
+echo "==> Building FeatherDeploy binaries..."
 cd "$INSTALL_DIR/backend"
 CGO_ENABLED=0 go build -ldflags="-s -w" -o "$BINARY" ./cmd/server/
+CGO_ENABLED=0 go build -ldflags="-s -w" -o "/usr/local/bin/featherdeploy-node" ./cmd/node/
 
 echo "==> Cleaning up old logs..."
 journalctl --vacuum-time=1s 2>/dev/null || true

@@ -578,6 +578,7 @@ func serve() {
 	// Node join flow — the join token serves as the credential
 	r.Get("/api/nodes/{token}/join-script", nodeH.JoinScript)
 	r.Post("/api/nodes/{token}/complete-join", nodeH.CompleteJoin)
+	r.Get("/api/nodes/binary/hash", nodeH.BinaryHash)
 	r.Get("/api/nodes/binary", nodeH.BinaryDownload)
 	r.Get("/api/nodes/server-binary", nodeH.ServerBinaryDownload)
 	r.Get("/api/nodes/ca-cert", nodeH.CACert)

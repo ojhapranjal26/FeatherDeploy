@@ -2,6 +2,7 @@ package handler
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -295,6 +296,30 @@ func (h *NodeHandler) JoinScript(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/x-shellscript")
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(script))
+}
+
+// GET /api/nodes/binary/hash — returns the SHA256 hash of the node binary for auto-updates
+func (h *NodeHandler) BinaryHash(w http.ResponseWriter, r *http.Request) {
+	path := h.binaryPath
+	if path == "" {
+		path = "/usr/local/bin/featherdeploy-node"
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, errMap("node binary not found"))
+		return
+	}
+	defer f.Close()
+
+	hsh := sha256.New()
+	if _, err := io.Copy(hsh, f); err != nil {
+		writeJSON(w, http.StatusInternalServerError, errMap("failed to hash binary"))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{
+		"hash": hex.EncodeToString(hsh.Sum(nil)),
+	})
 }
 
 // GET /api/nodes/binary — serve the featherdeploy-node binary download
