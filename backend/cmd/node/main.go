@@ -235,50 +235,13 @@ func runJoin(args []string) {
 func runServe() {
 	slog.Info("featherdeploy-node starting")
 
-	// Connect to the Brain's rqlite via the tunnel proxy (always 127.0.0.1:4001 on workers).
-	// We retry until the tunnel is established.
-	var db *sql.DB
-	var err error
-	for i := 0; i < 30; i++ {
-		db, err = appDb.OpenRqlite("http://127.0.0.1:4001")
-		if err == nil {
-			break
-		}
-		slog.Info("waiting for tunnel and brain rqlite...", "attempt", i+1)
-		time.Sleep(2 * time.Second)
-	}
-	if err != nil {
-		slog.Error("could not connect to brain rqlite via tunnel", "err", err)
-	}
-
 	myID := hostname()
 	if data, err := os.ReadFile(nodeIDFile); err == nil {
 		myID = strings.TrimSpace(string(data))
 	}
 
-	// Start node heartbeat + brain-election goroutine
-	if db != nil {
-		go runNodeHeartbeat(db, myID)
-	}
-
-	// ─── etcd Coordination Layer ──────────────────────────────────────────────
-	// Initialize etcd client for real-time coordination
-	etcdClient, err := coordination.NewClient([]string{"http://127.0.0.1:2379"})
-	if err != nil {
-		slog.Warn("could not connect to local etcd, real-time coordination disabled", "err", err)
-	} else {
-		defer etcdClient.Close()
-		// Start real-time heartbeat in etcd
-		go func() {
-			slog.Info("etcd: registering node heartbeat", "id", myID)
-			_, err := etcdClient.RegisterNode(context.Background(), myID, 15)
-			if err != nil {
-				slog.Error("etcd: node registration failed", "err", err)
-			}
-		}()
-	}
-
 	// ─── FeatherTunnel: Reverse Tunneling ──────────────────────────────────────
+	// Start the tunnel FIRST so that proxies are available for DB/etcd connections
 	tunnelMgr := netdaemon.NewTunnelManager()
 	mainURL := ""
 	if data, err := os.ReadFile(configDir + "/main_url"); err == nil {
@@ -299,6 +262,47 @@ func runServe() {
 		tunnelMgr.ProxyNodeToBrain(4002, 4002)
 		tunnelMgr.ProxyNodeToBrain(2379, 2379)
 		tunnelMgr.ProxyNodeToBrain(2380, 2380)
+	}
+
+	// Wait a moment for tunnel to initialize
+	time.Sleep(2 * time.Second)
+
+	// Connect to the Brain's rqlite via the tunnel proxy (always 127.0.0.1:4001 on workers).
+	// We retry until the tunnel is established.
+	var db *sql.DB
+	var err error
+	for i := 0; i < 30; i++ {
+		db, err = appDb.OpenRqlite("http://127.0.0.1:4001")
+		if err == nil {
+			break
+		}
+		slog.Info("waiting for tunnel and brain rqlite...", "attempt", i+1, "err", err)
+		time.Sleep(2 * time.Second)
+	}
+	if err != nil {
+		slog.Error("could not connect to brain rqlite via tunnel", "err", err)
+	}
+
+	// Start node heartbeat + brain-election goroutine
+	if db != nil {
+		go runNodeHeartbeat(db, myID)
+	}
+
+	// ─── etcd Coordination Layer ──────────────────────────────────────────────
+	// Initialize etcd client for real-time coordination (pointing to local proxy)
+	etcdClient, err := coordination.NewClient([]string{"http://127.0.0.1:2379"})
+	if err != nil {
+		slog.Warn("could not connect to etcd proxy, real-time coordination disabled", "err", err)
+	} else {
+		defer etcdClient.Close()
+		// Start real-time heartbeat in etcd
+		go func() {
+			slog.Info("etcd: registering node heartbeat", "id", myID)
+			_, err := etcdClient.RegisterNode(context.Background(), myID, 15)
+			if err != nil {
+				slog.Error("etcd: node registration failed", "err", err)
+			}
+		}()
 	}
 
 	r := chi.NewRouter()
