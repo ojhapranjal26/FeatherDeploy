@@ -206,9 +206,9 @@ func buildConfig(db *sql.DB) (string, error) {
 
 		if tlsInt == 1 {
 			// No scheme prefix → Caddy auto-provisions HTTPS via Let's Encrypt
-			fmt.Fprintf(&sb, "\n%s {\n\tlog {\n\t\toutput stdout\n\t}\n\treverse_proxy %s:%d\n}\n", domain, targetIP, hostPort)
+			fmt.Fprintf(&sb, "\n%s {\n\tlog {\n\t\toutput stdout\n\t}\n\treverse_proxy %s:%d {\n\t\theader_up Host {host}\n\t\theader_up X-Real-IP {remote_host}\n\t}\n}\n", domain, targetIP, hostPort)
 		} else {
-			fmt.Fprintf(&sb, "\nhttp://%s {\n\tlog {\n\t\toutput stdout\n\t}\n\treverse_proxy %s:%d\n}\n", domain, targetIP, hostPort)
+			fmt.Fprintf(&sb, "\nhttp://%s {\n\tlog {\n\t\toutput stdout\n\t}\n\treverse_proxy %s:%d {\n\t\theader_up Host {host}\n\t\theader_up X-Real-IP {remote_host}\n\t}\n}\n", domain, targetIP, hostPort)
 		}
 	}
 	return sb.String(), nil
