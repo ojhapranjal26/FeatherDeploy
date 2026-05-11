@@ -95,9 +95,6 @@ func (tm *TunnelManager) HTTPHandler() http.HandlerFunc {
 		tm.sessions[nodeID] = session
 		tm.mu.Unlock()
 
-		// 4. Start keepalive pings.
-		go tm.pingLoop(conn, session.CloseChan())
-
 		// 5. Set up local proxy ports for this node.
 		tm.setupNodeProxies(nodeID)
 
@@ -110,22 +107,6 @@ func (tm *TunnelManager) HTTPHandler() http.HandlerFunc {
 			delete(tm.sessions, nodeID)
 		}
 		tm.mu.Unlock()
-	}
-}
-
-func (tm *TunnelManager) pingLoop(conn *websocket.Conn, done <-chan struct{}) {
-	ticker := time.NewTicker(20 * time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ticker.C:
-			conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
-				return
-			}
-		case <-done:
-			return
-		}
 	}
 }
 
@@ -224,13 +205,6 @@ func (tm *TunnelManager) dialAndServeWS(ctx context.Context, brainURL string, no
 		}
 		return fmt.Errorf("dial: %w", err)
 	}
-
-	// Set up pong handler to respond to server's ping messages.
-	conn.SetPongHandler(func(string) error {
-		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
-		return nil
-	})
-	conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 
 	wsConn := &wsNetConn{Conn: conn}
 	session, err := yamux.Client(wsConn, yamuxConfig())
