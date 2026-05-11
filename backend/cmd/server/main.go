@@ -581,17 +581,17 @@ func serve() {
 		if token == *jwtSecret {
 			return "main" // The original brain authenticating as a worker node
 		}
-		var name string
+		var id int64
 		// Accept current token OR previous token (24h grace period after rotation)
 		err := db.QueryRow(`
-			SELECT name FROM nodes 
+			SELECT id FROM nodes 
 			WHERE tunnel_token = ? 
 			   OR (tunnel_token_prev = ? AND tunnel_rotated_at > datetime('now', '-24 hours'))
-			LIMIT 1`, token, token).Scan(&name)
+			LIMIT 1`, token, token).Scan(&id)
 		if err != nil {
 			return ""
 		}
-		return name
+		return fmt.Sprintf("node-%d", id)
 	}
 	r.Get("/api/cluster/tunnel", TunnelMgr.HTTPHandler())
 

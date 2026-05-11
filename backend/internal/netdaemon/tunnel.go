@@ -25,9 +25,9 @@ var upgrader = websocket.Upgrader{
 // TunnelManager handles reverse tunnels over WebSockets.
 type TunnelManager struct {
 	mu        sync.RWMutex
-	sessions  map[string]*yamux.Session   // key: nodeID
-	listeners map[string]net.Listener     // key: nodeID:localPort
-	portMap   map[string]map[int]int      // key: nodeID → remotePort → localPort
+	sessions  map[string]*yamux.Session
+	portMap   map[string]map[int]int    // nodeID -> remotePort -> localPort
+	listeners map[string][]net.Listener // nodeID -> active listeners
 
 	// ValidateToken is called during handshake to verify the node token.
 	// Return the nodeID if valid, empty string if invalid.
@@ -37,8 +37,8 @@ type TunnelManager struct {
 func NewTunnelManager() *TunnelManager {
 	return &TunnelManager{
 		sessions:  make(map[string]*yamux.Session),
-		listeners: make(map[string]net.Listener),
 		portMap:   make(map[string]map[int]int),
+		listeners: make(map[string][]net.Listener),
 	}
 }
 
@@ -87,10 +87,14 @@ func (tm *TunnelManager) HTTPHandler() http.HandlerFunc {
 			return
 		}
 
+		// 4. Register the session
 		tm.mu.Lock()
 		if old, ok := tm.sessions[nodeID]; ok {
+			slog.Info("tunnel server: replacing stale session", "node", nodeID)
 			old.Close()
-			slog.Info("tunnel server: replaced stale session", "node", nodeID)
+			tm.mu.Unlock()
+			tm.Cleanup(nodeID)
+			tm.mu.Lock()
 		}
 		tm.sessions[nodeID] = session
 		tm.mu.Unlock()
@@ -112,6 +116,7 @@ func (tm *TunnelManager) HTTPHandler() http.HandlerFunc {
 		// 6. Block until the session closes.
 		<-session.CloseChan()
 		slog.Info("tunnel server: node disconnected", "node", nodeID)
+		tm.Cleanup(nodeID)
 
 		tm.mu.Lock()
 		if tm.sessions[nodeID] == session {
@@ -125,38 +130,61 @@ func (tm *TunnelManager) setupNodeProxies(nodeID string) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 
+	// Clear any existing port mappings and listeners for this node to ensure a clean start
 	if _, ok := tm.portMap[nodeID]; !ok {
 		tm.portMap[nodeID] = make(map[int]int)
 	}
 
-	// Allocate a deterministic block of local ports based on the number of existing sessions.
-	// We map the worker's local services (which use non-conflicting ports 4003+) 
-	// to the brain's internal proxy ports.
-	ports := []int{4003, 4004, 2381, 2382, 7443}
-	idx := len(tm.sessions) // sessions map already updated before this call
-	base := 20000 + (idx * 10)
+	// Use a deterministic base port for each node based on its DB ID
+	// nodeID format is "node-<id>" (or "main")
+	idVal := 0
+	if nodeID == "main" {
+		idVal = 0
+	} else if strings.HasPrefix(nodeID, "node-") {
+		fmt.Sscanf(nodeID, "node-%d", &idVal)
+	} else {
+		// Fallback for legacy IDs
+		idVal = len(tm.sessions) 
+	}
+	base := 20000 + (idVal * 10)
 
+	ports := []int{4003, 4004, 2381, 2382, 7443}
 	for i, remotePort := range ports {
 		localPort := base + i
-		if _, exists := tm.portMap[nodeID][remotePort]; exists {
-			continue // already mapped, don't re-listen
-		}
 		tm.portMap[nodeID][remotePort] = localPort
 		go tm.startInternalProxy(nodeID, localPort, remotePort)
 		slog.Info("tunnel server: proxy mapped", "node", nodeID, "localPort", localPort, "remotePort", remotePort)
 	}
 }
 
+func (tm *TunnelManager) Cleanup(nodeID string) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+
+	if session, ok := tm.sessions[nodeID]; ok {
+		session.Close()
+		delete(tm.sessions, nodeID)
+	}
+
+	if listeners, ok := tm.listeners[nodeID]; ok {
+		for _, l := range listeners {
+			l.Close()
+		}
+		delete(tm.listeners, nodeID)
+	}
+	delete(tm.portMap, nodeID)
+}
+
 func (tm *TunnelManager) startInternalProxy(nodeID string, localPort, remotePort int) {
 	addr := fmt.Sprintf("127.0.0.1:%d", localPort)
 	l, err := net.Listen("tcp", addr)
 	if err != nil {
-		slog.Error("tunnel server: proxy listen failed", "addr", addr, "err", err)
+		slog.Error("tunnel server: failed to start proxy listener", "node", nodeID, "port", localPort, "err", err)
 		return
 	}
 
 	tm.mu.Lock()
-	tm.listeners[fmt.Sprintf("%s:%d", nodeID, localPort)] = l
+	tm.listeners[nodeID] = append(tm.listeners[nodeID], l)
 	tm.mu.Unlock()
 
 	defer l.Close()
