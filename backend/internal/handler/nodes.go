@@ -422,8 +422,8 @@ func (h *NodeHandler) CompleteJoin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Trigger firewall reconciliation to allow this node IP
-	go deploy.ReconcileNodeRqliteIPTables(h.db)
+	// Trigger firewall reconciliation to allow this node IP (synchronously to avoid race)
+	deploy.ReconcileNodeRqliteIPTables(h.db)
 
 	// Add node to etcd cluster
 	nodeID := payload.Hostname

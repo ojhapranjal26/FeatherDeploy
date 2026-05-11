@@ -21,8 +21,10 @@ func ReconcileClusterFirewall(db *sql.DB) {
 		return exec.Command(ipt, args...)
 	}
 
-	// 1. Allow localhost (always safe for internal services)
 	clusterPorts := []string{"4001", "4002", "2379", "2380", "7443"}
+	slog.Info("ReconcileClusterFirewall: starting reconciliation", "ports", clusterPorts)
+
+	// 1. Allow localhost (always safe for internal services)
 	for _, port := range clusterPorts {
 		ruleSpec := []string{"-p", "tcp", "--dport", port, "-s", "127.0.0.1", "-j", "ACCEPT"}
 		if iptCmd(append([]string{"-C", "INPUT"}, ruleSpec...)...).Run() != nil {
@@ -33,6 +35,7 @@ func ReconcileClusterFirewall(db *sql.DB) {
 	// 1b. Allow our own public IP (detected)
 	myIP := detectNodeIP(db)
 	if myIP != "" && myIP != "127.0.0.1" {
+		slog.Info("ReconcileClusterFirewall: whitelisting self", "ip", myIP)
 		for _, port := range clusterPorts {
 			ruleSpec := []string{"-p", "tcp", "--dport", port, "-s", myIP,
 				"-m", "comment", "--comment", "featherdeploy brain public ip", "-j", "ACCEPT"}
@@ -43,21 +46,22 @@ func ReconcileClusterFirewall(db *sql.DB) {
 	}
 
 	// 2. Allow all registered nodes (connected or pending)
-	rows, err := db.Query(`SELECT ip FROM nodes WHERE ip != ''`)
+	rows, err := db.Query(`SELECT name, ip FROM nodes WHERE ip != ''`)
 	if err != nil {
 		slog.Warn("ReconcileClusterFirewall: query nodes", "err", err)
 		return
 	}
 	defer rows.Close()
 
-	activeIPs := make(map[string]bool)
+	activeIPs := make(map[string]string)
 	for rows.Next() {
-		var ip string
-		if rows.Scan(&ip) != nil || ip == "" {
+		var name, ip string
+		if rows.Scan(&name, &ip) != nil || ip == "" {
 			continue
 		}
-		activeIPs[ip] = true
+		activeIPs[name] = ip
 
+		slog.Info("ReconcileClusterFirewall: whitelisting node", "name", name, "ip", ip)
 		for _, port := range clusterPorts {
 			comment := "featherdeploy cluster port " + port + " from node"
 			ruleSpec := []string{"-p", "tcp", "--dport", port, "-s", ip,
@@ -76,14 +80,12 @@ func ReconcileClusterFirewall(db *sql.DB) {
 		ruleSpec := []string{"-p", "tcp", "--dport", port,
 			"-m", "comment", "--comment", comment, "-j", "DROP"}
 		
-		// If the DROP rule doesn't exist, append it.
-		// Note: We use -C to check if it exists anywhere.
 		if iptCmd(append([]string{"-C", "INPUT"}, ruleSpec...)...).Run() != nil {
 			iptCmd(append([]string{"-A", "INPUT"}, ruleSpec...)...).Run()
 		}
 	}
 
-	slog.Info("ReconcileClusterFirewall: reconciled rules", "nodes", len(activeIPs), "ports", len(clusterPorts))
+	slog.Info("ReconcileClusterFirewall: reconciliation complete", "nodes_whitelisted", len(activeIPs))
 }
 
 // Deprecated: use ReconcileClusterFirewall
