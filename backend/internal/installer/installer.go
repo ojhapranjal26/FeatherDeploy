@@ -947,6 +947,7 @@ func setupIPTablesProtection() {
 	rules := []rule{
 		{"featherdeploy service ports", 10000, 14999},
 		{"featherdeploy database ports", 15000, 29999},
+		{"featherdeploy cluster ports", 30000, 59999},
 	}
 
 	// ── Remove legacy bare DROP rules (without --ctstate NEW) ─────────────────
@@ -980,6 +981,19 @@ func setupIPTablesProtection() {
 		}
 	} else {
 		fmt.Println("  ✓ iptables ESTABLISHED/RELATED ACCEPT already present")
+	}
+
+	// ── Allow traffic from private subnets (RFC1918) ──────────────────────────
+	// This allows cross-node service and database communication within the
+	// cluster's private network while still blocking the internet.
+	privateSubnets := []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"}
+	for _, subnet := range privateSubnets {
+		for _, r := range rules {
+			portRange := fmt.Sprintf("%d:%d", r.startPort, r.endPort)
+			if runSilent(iptablesPath, "-C", "INPUT", "-s", subnet, "-p", "tcp", "--dport", portRange, "-j", "ACCEPT") != nil {
+				mustRun(iptablesPath, "-I", "INPUT", "1", "-s", subnet, "-p", "tcp", "--dport", portRange, "-j", "ACCEPT")
+			}
+		}
 	}
 
 	// ── Add NEW-only DROP rules for internal port ranges ──────────────────────

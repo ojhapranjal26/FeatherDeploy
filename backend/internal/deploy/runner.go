@@ -1910,8 +1910,8 @@ func rewriteAndInjectDBEnvArgs(db *sql.DB, projectID int64, jwtSecret string, en
 		v := kv[eqIdx+1:]
 		for _, d := range dbs {
 			if d.internalPort > 0 {
-				old := fmt.Sprintf("@%s:%d/", d.alias, d.internalPort)
-				repl := fmt.Sprintf("@%s:%d/", netdaemon.SlirpGateway, d.reachablePort)
+				old := fmt.Sprintf("@%s:%d", d.alias, d.internalPort)
+				repl := fmt.Sprintf("@%s:%d", netdaemon.SlirpGateway, d.reachablePort)
 				v = strings.ReplaceAll(v, old, repl)
 			}
 		}
@@ -2288,10 +2288,17 @@ func startDatabaseRetrying(db *sql.DB, jwtSecret string, dbID int64, attempt int
 	// Cluster discovery registration (Etcd)
 	if EtcdClient != nil {
 		nodeIP := detectNodeIP(db)
+		// Use the project-unique alias for discovery
+		regPort := hostPort
+		var cp int
+		db.QueryRow(`SELECT cluster_port FROM databases WHERE id=?`, dbID).Scan(&cp)
+		if cp > 0 {
+			regPort = cp
+		}
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
-			_ = EtcdClient.RegisterDatabase(ctx, projectID, dbName, nodeIP, hostPort)
+			_ = EtcdClient.RegisterDatabase(ctx, projectID, alias, nodeIP, regPort)
 		}()
 	}
 	log.add("[db-start] ✓ database is running — waiting for engine to initialize (this can take 10–30s for first-run)")

@@ -98,10 +98,30 @@ func (c *Client) RegisterDatabase(ctx context.Context, projectID int64, dbName, 
 	return err
 }
 
-func (c *Client) UnregisterDatabase(ctx context.Context, projectID int64, dbName string) error {
-	key := fmt.Sprintf("/discovery/databases/%d/%s", projectID, dbName)
+func (c *Client) UnregisterDatabase(ctx context.Context, projectID int64, name string) error {
+	key := fmt.Sprintf("/discovery/databases/%d/%s", projectID, name)
 	_, err := c.etcd.Delete(ctx, key)
 	return err
+}
+
+// DiscoverDatabase fetches database metadata from etcd.
+func (c *Client) DiscoverDatabase(ctx context.Context, projectID int64, name string) (string, int, error) {
+	key := fmt.Sprintf("/discovery/databases/%d/%s", projectID, name)
+	resp, err := c.etcd.Get(ctx, key)
+	if err != nil {
+		return "", 0, err
+	}
+	if len(resp.Kvs) == 0 {
+		return "", 0, fmt.Errorf("database not found")
+	}
+	var data struct {
+		IP   string `json:"ip"`
+		Port int    `json:"port"`
+	}
+	if err := json.Unmarshal(resp.Kvs[0].Value, &data); err != nil {
+		return "", 0, err
+	}
+	return data.IP, data.Port, nil
 }
 
 // RegisterStorage registers an object storage endpoint in etcd.

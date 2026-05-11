@@ -34,11 +34,9 @@ func (d *Daemon) EnvVarsForPeers(projectID int64, ownServiceName string) []strin
 			continue
 		}
 		prefix := strings.ToUpper(sanitizeEnvKey(peer.ServiceName))
+		// Always use the local slirp4netns gateway (10.0.2.2) so the connection
+		// hits the local NetDaemon proxy, which then handles cross-node routing.
 		gatewayHost := SlirpGateway
-		// For cross-node peers the NodeAddr is the remote IP; use that directly.
-		if peer.NodeAddr != "" && peer.NodeAddr != "127.0.0.1" {
-			gatewayHost = peer.NodeAddr
-		}
 		args = append(args,
 			"-e", fmt.Sprintf("%s_HOST=%s", prefix, gatewayHost),
 			"-e", fmt.Sprintf("%s_PORT=%d", prefix, peer.ClusterPort),

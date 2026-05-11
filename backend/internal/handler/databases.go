@@ -547,7 +547,7 @@ func (h *DatabaseHandler) RestoreUploadPart(w http.ResponseWriter, r *http.Reque
 	uploadID := chi.URLParam(r, "uploadID")
 	partNum := chi.URLParam(r, "partNum")
 	pn, err := strconv.Atoi(partNum)
-	if err != nil || pn < 1 {
+	if err != nil || pn < 0 {
 		writeJSON(w, http.StatusBadRequest, errMap("invalid part number"))
 		return
 	}
