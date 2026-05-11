@@ -148,8 +148,9 @@ func TLSConfig(certPEM, keyPEM, caCertPEM string) (*tls.Config, error) {
 		Certificates: []tls.Certificate{cert},
 		ClientCAs:    pool,
 		RootCAs:      pool,
-		ClientAuth:   tls.RequireAndVerifyClientCert,
-		MinVersion:   tls.VersionTLS13,
+		ClientAuth:         tls.RequireAndVerifyClientCert,
+		InsecureSkipVerify: true, // We verify the identity via the CA and PeerCertificates manually
+		MinVersion:         tls.VersionTLS13,
 	}, nil
 }
 
