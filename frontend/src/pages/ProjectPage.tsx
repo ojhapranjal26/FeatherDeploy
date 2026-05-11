@@ -120,7 +120,7 @@ function ServiceCard({ service, projectId, canEdit }: { service: Service; projec
               </div>
             </div>
             <DropdownMenu>
-              <DropdownMenuTrigger render={<Button variant="ghost" size="icon" className="h-7 w-7 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity" />}>
+              <DropdownMenuTrigger render={<Button variant="ghost" size="icon" className="h-7 w-7 shrink-0" />}>
                 <Settings2 className="h-3.5 w-3.5" />
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
@@ -435,7 +435,7 @@ function DatabaseCard({ database, projectId, canEdit, nodes }: { database: Datab
               </div>
             </div>
             <DropdownMenu>
-              <DropdownMenuTrigger render={<Button variant="ghost" size="icon" className="h-7 w-7 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity" />}>
+              <DropdownMenuTrigger render={<Button variant="ghost" size="icon" className="h-7 w-7 shrink-0" />}>
                 <Settings2 className="h-3.5 w-3.5" />
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
@@ -508,12 +508,6 @@ function DatabaseCard({ database, projectId, canEdit, nodes }: { database: Datab
         </CardHeader>
 
         <CardContent className="flex flex-col gap-3 flex-1 pb-4">
-          <DatabaseTasksPanel
-            projectId={projectId}
-            databaseId={database.id}
-            enabled={true}
-            compact={true}
-          />
 
           <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
             <Database className="h-3.5 w-3.5 shrink-0" />
@@ -594,6 +588,44 @@ function DatabaseCard({ database, projectId, canEdit, nodes }: { database: Datab
             <p className="text-xs text-muted-foreground">
               SQLite is mounted into services on the next deployment rather than exposed as a network container.
             </p>
+          )}
+
+          {!isSQLite && canEdit && (
+            <div className="mt-auto space-y-3">
+              <DatabaseTasksPanel
+                projectId={projectId}
+                databaseId={database.id}
+                enabled={true}
+                compact={true}
+              />
+              <div className="flex gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="flex-1 gap-1.5 text-xs h-8"
+                  disabled={isBusy}
+                  onClick={() => restartMutation.mutate()}
+                >
+                  {restartMutation.isPending ? (
+                    <span className="flex items-center gap-1.5">
+                      <span className="h-3 w-3 rounded-full border-2 border-current border-t-transparent animate-spin" />
+                      Restarting…
+                    </span>
+                  ) : (
+                    <><RotateCcw className="h-3.5 w-3.5" /> Restart</>
+                  )}
+                </Button>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  className="flex-1 gap-1.5 text-xs h-8"
+                  disabled={isBusy}
+                  onClick={() => { setRestoreFile(null); setRestoreOpen(true) }}
+                >
+                  <Upload className="h-3.5 w-3.5" /> Restore
+                </Button>
+              </div>
+            </div>
           )}
         </CardContent>
       </Card>

@@ -986,7 +986,9 @@ func setupIPTablesProtection() {
 	// ── Allow traffic from private subnets (RFC1918) ──────────────────────────
 	// This allows cross-node service and database communication within the
 	// cluster's private network while still blocking the internet.
-	privateSubnets := []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"}
+	// 10.0.2.2 and 127.0.0.1 are explicitly included to allow slirp4netns
+	// containers to reach the host-side fdnet proxy.
+	privateSubnets := []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.1/32", "10.0.2.2/32"}
 	for _, subnet := range privateSubnets {
 		for _, r := range rules {
 			portRange := fmt.Sprintf("%d:%d", r.startPort, r.endPort)

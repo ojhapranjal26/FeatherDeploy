@@ -253,5 +253,6 @@ func setKeepalive(conn net.Conn) {
 	if tc, ok := conn.(*net.TCPConn); ok {
 		tc.SetKeepAlive(true)                  //nolint:errcheck
 		tc.SetKeepAlivePeriod(30 * time.Second) //nolint:errcheck
+		tc.SetNoDelay(true)                    //nolint:errcheck
 	}
 }
