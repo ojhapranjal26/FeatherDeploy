@@ -861,13 +861,10 @@ func (h *DatabaseHandler) TogglePublic(w http.ResponseWriter, r *http.Request) {
 			// Remove ACCEPT rule.
 			iptCmd(append([]string{"-D", "INPUT"}, acceptSpec...)...).Run() //nolint
 			// Add DROP so the port is explicitly blocked on default-ACCEPT chains.
-			checkDropArgs := append([]string{"-C", "INPUT"}, dropSpec...)
-			if iptCmd(checkDropArgs...).Run() != nil {
-				appendArgs := append([]string{"-A", "INPUT"}, dropSpec...)
-				if out, runErr := iptCmd(appendArgs...).CombinedOutput(); runErr != nil {
-					slog.Error("iptables: add block DB rule", "port", p, "err", runErr, "out", string(out))
-				}
-			}
+			iptCmd("-I", "INPUT", "1", "-p", "tcp", "--dport", portStr,
+				"-m", "conntrack", "--ctstate", "NEW",
+				"-m", "comment", "--comment", fmt.Sprintf("featherdeploy db-%d block", dbID),
+				"-j", "DROP").Run() //nolint
 		}
 		// Also manage UFW so rules survive UFW reloads/reboots.
 		applyUFWRule(req.Public, portStr)

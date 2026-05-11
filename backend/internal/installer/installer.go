@@ -965,23 +965,6 @@ func setupIPTablesProtection() {
 		}
 	}
 
-	// ── Ensure ESTABLISHED/RELATED ACCEPT is at the top of INPUT ──────────────
-	// This guarantees response packets for connections this server initiated are
-	// accepted regardless of what DROP rules follow.
-	estCheck := []string{"-C", "INPUT", "-m", "conntrack",
-		"--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"}
-	if exec.Command(iptablesPath, estCheck...).Run() != nil {
-		insEst := []string{"-I", "INPUT", "1", "-m", "conntrack",
-			"--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"}
-		if out, err2 := exec.Command(iptablesPath, insEst...).CombinedOutput(); err2 != nil {
-			fmt.Printf("  WARNING: could not add ESTABLISHED/RELATED ACCEPT rule: %v — %s\n",
-				err2, strings.TrimSpace(string(out)))
-		} else {
-			fmt.Println("  ✓ iptables INPUT ACCEPT ESTABLISHED,RELATED (position 1)")
-		}
-	} else {
-		fmt.Println("  ✓ iptables ESTABLISHED/RELATED ACCEPT already present")
-	}
 
 	// ── Allow traffic from private subnets (RFC1918) ──────────────────────────
 	// This allows cross-node service and database communication within the
@@ -1009,9 +992,9 @@ func setupIPTablesProtection() {
 		if exec.Command(iptablesPath, checkArgs...).Run() == nil {
 			continue // already present
 		}
-		// Append after the ESTABLISHED/RELATED ACCEPT at position 1.
+		// Insert at position 1 (will be pushed down by subnets and ESTABLISHED later).
 		// --ctstate NEW ensures only unsolicited inbound connections are dropped.
-		addArgs := []string{"-A", "INPUT", "!", "-i", "lo", "-p", "tcp",
+		addArgs := []string{"-I", "INPUT", "1", "!", "-i", "lo", "-p", "tcp",
 			"--dport", portRange, "-m", "conntrack", "--ctstate", "NEW",
 			"-m", "comment", "--comment", r.comment, "-j", "DROP"}
 		if out, err2 := exec.Command(iptablesPath, addArgs...).CombinedOutput(); err2 != nil {
@@ -1025,6 +1008,17 @@ func setupIPTablesProtection() {
 	if added == 0 {
 		fmt.Println("  ✓ iptables DROP rules already present — no changes needed")
 	}
+
+	// ── Ensure ESTABLISHED/RELATED ACCEPT is at the top of INPUT ──────────────
+	// We remove and re-insert this rule at position 1 to ensure it always
+	// stays above our DROP and privateSubnet rules. This guarantees response
+	// packets for connections this server initiated are accepted.
+	estSpec := []string{"-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"}
+	for exec.Command(iptablesPath, append([]string{"-C", "INPUT"}, estSpec...)...).Run() == nil {
+		exec.Command(iptablesPath, append([]string{"-D", "INPUT"}, estSpec...)...).Run() //nolint:errcheck
+	}
+	mustRun(iptablesPath, append([]string{"-I", "INPUT", "1"}, estSpec...)...)
+	fmt.Println("  ✓ iptables INPUT ACCEPT ESTABLISHED,RELATED (enforced at position 1)")
 
 	// Persist rules so they survive reboots.
 	persistIPTables()
