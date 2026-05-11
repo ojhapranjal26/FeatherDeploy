@@ -370,12 +370,14 @@ func runServe() {
 		var payload struct {
 			DBID   int64  `json:"db_id"`
 			Secret string `json:"jwt_secret"`
+			Stop   bool   `json:"stop"`
 		}
+		// Default to true for backward compatibility with migration triggers
+		payload.Stop = true
 		if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
-			http.Error(w, "invalid JSON", 400)
-			return
+			// If decoding fails, we still have the default stop=true
 		}
-		path, _, err := deploy.CreateDatabaseBackup(db, payload.Secret, payload.DBID)
+		path, _, err := deploy.CreateDatabaseBackup(db, payload.Secret, payload.DBID, payload.Stop)
 		if err != nil {
 			http.Error(w, err.Error(), 500)
 			return
