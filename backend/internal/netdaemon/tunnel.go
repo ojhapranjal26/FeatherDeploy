@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -213,8 +214,14 @@ func (tm *TunnelManager) dialAndServeWS(ctx context.Context, brainURL string, no
 	header.Set("X-Node-ID", nodeID)
 	header.Set("X-Node-Token", token)
 
-	conn, _, err := dialer.DialContext(ctx, brainURL, header)
+	conn, resp, err := dialer.DialContext(ctx, brainURL, header)
 	if err != nil {
+		// Log the actual HTTP response to diagnose the rejection
+		if resp != nil {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			return fmt.Errorf("dial: HTTP %d %s — body: %s", resp.StatusCode, resp.Status, strings.TrimSpace(string(body)))
+		}
 		return fmt.Errorf("dial: %w", err)
 	}
 
