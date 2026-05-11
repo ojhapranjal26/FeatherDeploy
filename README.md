@@ -1,12 +1,16 @@
 <div align="center">
 
+![FeatherDeploy Banner](docs/assets/banner.png)
+
 # 🪶 FeatherDeploy
 
-**A self-hosted, lightweight PaaS panel for deploying containerised applications via Podman.**
+**A high-performance, self-hosted PaaS panel for orchestrating containerised applications across multi-node clusters.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Go](https://img.shields.io/badge/Go-1.22+-00ADD8?logo=go)](https://go.dev)
-[![React](https://img.shields.io/badge/React-18-61DAFB?logo=react)](https://react.dev)
+[![Go](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go)](https://go.dev)
+[![React](https://img.shields.io/badge/React-19-61DAFB?logo=react)](https://react.dev)
+[![Tailwind](https://img.shields.io/badge/Tailwind-v4-06B6D4?logo=tailwindcss)](https://tailwindcss.com)
+[![Vite](https://img.shields.io/badge/Vite-v8-646CFF?logo=vite)](https://vitejs.dev)
 
 </div>
 
@@ -14,241 +18,157 @@
 
 ## ✨ Features
 
-- **Single binary** — frontend (React + Vite) is embedded directly into the Go binary via `go:embed`. No separate web server needed.
-- **Invite-only registration** — no public sign-up. Superadmins send email invitations.
-- **Full RBAC** — global roles (`superadmin`, `admin`, `user`) and per-project roles (`owner`, `editor`, `viewer`).
-- **GitHub integrations**
-  - OAuth App — connect a personal GitHub account
-  - GitHub App — organisation-wide repo access via RS256 JWT installation tokens
-  - SSH Keys — generate or import ED25519 deploy keys (private keys stored AES-256-GCM encrypted)
-  - 📖 [Full GitHub setup guide →](docs/github-setup.md)
-- **Podman containers** — deploy services as rootless OCI containers using user namespaces (no root, no sudo required for the container runtime).
-- **Automatic TLS** — Caddy reverse proxy obtains Let's Encrypt certificates for your domain.
-- **Non-root service user** — the panel process runs under a dedicated Linux user (not root) for security isolation.
-- **Systemd managed** — installs as a persistent systemd service with automatic restarts.
+FeatherDeploy is designed to bridge the gap between simple single-server setups and complex Kubernetes clusters. It provides a lightweight, secure, and user-friendly interface for managing your deployments.
+
+- **🚀 Multi-Node Orchestration** — Deploy applications across multiple worker nodes with intelligent scheduling and resource telemetry.
+- **⚡ Single Binary Execution** — The React 19 frontend is embedded directly into the Go binary. Deployment is as simple as running one file.
+- **🛡️ Rootless Security** — Built on Podman, all containers run in rootless mode using user namespaces. The panel itself runs as a non-root service user.
+- **🔒 Distributed Coordination** — Utilizes **Etcd** for cluster state management and **rqlite** for distributed data consistency.
+- **🌐 Automatic TLS & Proxy** — Integrated Caddy server handles automatic HTTPS via Let's Encrypt and zero-config reverse proxying.
+- **📂 GitHub Integration** — Native support for OAuth, GitHub Apps, and SSH key management for seamless "Push to Deploy" workflows.
+- **🤖 Framework Detection** — Automatically detects languages and frameworks (Node.js, Go, Python, etc.) to generate optimized Dockerfiles.
+- **✉️ Enterprise RBAC** — Granular permissions with global roles and project-specific access controls.
 
 ---
 
 ## 🖥️ Tech Stack
 
-| Layer     | Technology                                                                |
-|-----------|---------------------------------------------------------------------------|
-| Frontend  | React 19, TypeScript, Vite 7, Tailwind CSS v4, shadcn/ui, TanStack Query v5, recharts, react-hook-form, zod, lucide-react |
-| Backend   | Go 1.26, chi v5 router, JWT (HS256 + RS256), bcrypt                       |
-| Database  | rqlite v8 (distributed SQLite — no CGO, no external DB binary required)   |
-| Container | Podman (rootless OCI — runs as the service user via user namespaces)       |
-| Proxy     | Caddy 2 (automatic HTTPS via Let's Encrypt)                               |
-| Infra     | systemd, rqlite                                                           |
+| Layer | Technology |
+| :--- | :--- |
+| **Frontend** | React 19, TypeScript, Vite 8, Tailwind CSS v4, shadcn/ui, TanStack Query v5 |
+| **Backend** | Go 1.26, Chi v5 Router, Etcd v3 (Coordination), rqlite (Distributed Storage) |
+| **Containerization** | Podman (Rootless OCI), Buildah (Image Building) |
+| **Networking** | Caddy 2 (Auto-TLS), mTLS for internal node communication |
+| **Auth** | JWT (HS256/RS256), bcrypt (Cost 14), AES-256-GCM for sensitive data |
+| **Infrastructure** | systemd (Service management), Linux User Namespaces |
 
 ---
 
-## 🚀 One-Command Installation (Linux)
+## 🏗️ Architecture
 
-> **Requirements:** A fresh Linux server (Ubuntu 22.04+ recommended) with a public IP and a domain name pointed at it. Run as root or with `sudo`.
+```mermaid
+graph TD
+    User((User)) -->|HTTPS| Proxy[Caddy Edge Proxy]
+    Proxy -->|Local API| Brain[FeatherDeploy Brain Node]
+    
+    subgraph ClusterState
+        Etcd[(Etcd Coordination)]
+        RQLite[(rqlite DB)]
+    end
+    
+    Brain <--> ClusterState
+    
+    subgraph WorkerNodes
+        Node1[Worker Node A]
+        Node2[Worker Node B]
+        Node3[Worker Node C]
+    end
+    
+    Brain -->|mTLS Orchestration| Node1
+    Brain -->|mTLS Orchestration| Node2
+    Brain -->|mTLS Orchestration| Node3
+    
+    Node1 -->|Rootless| C1[Podman Container]
+    Node2 -->|Rootless| C2[Podman Container]
+```
+
+---
+
+## 🚀 Quick Installation (Linux)
+
+> **Requirements:** Ubuntu 22.04+, Debian 12+, or Fedora. Requires a public IP and a domain name pointing to it.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ojhapranjal26/FeatherDeploy/main/build.sh | sudo bash
 ```
 
-That single command will:
-
-1. **Install all dependencies automatically:**
-   - `git`, `curl`, `ca-certificates`
-   - **Node.js 20** (via NodeSource)
-   - **Go 1.26** (via official tarball if not already installed)
-   - **Podman** (container runtime, rootless via user namespaces)
-   - **rqlite v8** (embedded distributed SQLite — no CGO or libsqlite3 needed)
-   - **Caddy** (reverse proxy + automatic TLS)
-2. **Clone** the FeatherDeploy source from GitHub into `/opt/featherdeploy-src`
-3. **Build** the React frontend (`npm ci && npm run build`)
-4. **Compile** the Go backend with the frontend embedded inside (single binary)
-5. **Install** the binary to `/usr/local/bin/featherdeploy`
-6. **Launch the interactive setup wizard** which asks:
-
-```
-Service OS username [featherdeploy]: myuser         ← Linux user that runs the service (not root)
-Password for OS user 'myuser' (min 8 chars):        ← OS user password
-Confirm OS user password:
-
-Panel domain (e.g. panel.example.com): panel.featherdeploy.in
-
-Superadmin email: admin@featherdeploy.in
-Superadmin full name: Pranjal Ojha
-Superadmin password (min 8 chars):
-Confirm superadmin password:
-```
-
-After the wizard completes, FeatherDeploy will be:
-- Running at `https://panel.featherdeploy.in` with automatic TLS
-- Managed by systemd (`featherdeploy.service`)
-- Running as your chosen non-root OS user
-
----
-
-## 🔧 Requirements
-
-| Requirement | Notes |
-|---|---|
-| Linux (x86_64) | Ubuntu 22.04+, Debian 12+, Fedora 38+, CentOS Stream 9, Arch, Alpine |
-| Root / sudo | Required only for installation |
-| Domain name | Must resolve to the server's public IP before install |
-| Ports 80 + 443 | Used by Caddy for HTTP→HTTPS redirect and TLS |
-| Internet access | To download Node.js, Go, Podman, Caddy, and Let's Encrypt certificates |
+The installer will:
+1. Install system dependencies (Go, Node.js, Podman, Caddy).
+2. Build the project from source and install the binary to `/usr/local/bin`.
+3. Guide you through an interactive setup for the Superadmin and Cluster configuration.
 
 ---
 
 ## 📋 Post-Installation
 
-### Check service status
+### Manage Services
 ```bash
-sudo systemctl status featherdeploy
-sudo systemctl status caddy
+sudo systemctl status featherdeploy    # Panel & Brain
+sudo systemctl status featherdeploy-node # Worker (if applicable)
+sudo systemctl status caddy            # Proxy
 ```
 
-### View live logs
+### View Live Logs
 ```bash
 sudo journalctl -u featherdeploy -f
 ```
 
-### Switch to the service user
-```bash
-sudo -u featherdeploy /bin/bash    # the account has no login shell — use sudo -u
-```
-
-### Restart the panel
-```bash
-sudo systemctl restart featherdeploy
-```
-
-### Environment configuration
-
-The installer writes `/etc/featherdeploy/featherdeploy.env`. This file is readable only by root and the service group. Use `sudo` to view or edit it:
-
-```bash
-sudo nano /etc/featherdeploy/featherdeploy.env
-sudo systemctl restart featherdeploy   # apply changes
-```
-
-Optional settings you can add:
-
-```env
-# /etc/featherdeploy/featherdeploy.env
-
-DB_PATH=/var/lib/featherdeploy/deploy.db
-JWT_SECRET=<auto-generated — do not change>
-ADDR=127.0.0.1:8080
-ORIGIN=https://panel.featherdeploy.in
-
-# SMTP (optional — leave blank to log invite links to the console instead)
-SMTP_HOST=smtp.example.com
-SMTP_PORT=587
-SMTP_USER=user@example.com
-SMTP_PASS=yourpassword
-SMTP_FROM=noreply@example.com
-SMTP_TLS=true
-
-# GitHub OAuth (optional)
-GITHUB_CLIENT_ID=
-GITHUB_CLIENT_SECRET=
-```
-
-After editing, restart the service: `sudo systemctl restart featherdeploy`
+### Configuration
+Environment variables are stored in `/etc/featherdeploy/featherdeploy.env`. Use `sudo` to edit and restart the service to apply changes.
 
 ---
 
-## 🔒 Security Model
+## 🔒 Security First
 
-The panel process **never runs as root**. The installer creates a dedicated Linux user (default: `featherdeploy`) with no direct sudo access.
-- The only elevated permission granted is a locked-down sudoers rule: `NOPASSWD: /usr/local/bin/featherdeploy-update` (one-click updates) and `NOPASSWD: /bin/systemctl reload caddy`. Nothing else. Podman runs rootlessly — no sudo required for container builds or runs.
-- The binary is owned by `root` and executable, but all data (`/var/lib/featherdeploy/`) is owned by the service user only.
-- The env file (`/etc/featherdeploy/featherdeploy.env`) containing the JWT secret has mode `640` (readable only by root and the service group).
-- The systemd unit sets `PrivateTmp=yes` and `NoNewPrivileges=yes`. Rootless Podman uses user namespaces (the service user has entries in `/etc/subuid` and `/etc/subgid`).
-- Passwords are hashed with **bcrypt** (cost 14). SSH private keys are encrypted with **AES-256-GCM** before storage.
-- HTTPS is enforced by Caddy with automatic certificate renewal. Security headers (`HSTS`, `X-Frame-Options`, `X-Content-Type-Options`) are set on all responses.
+FeatherDeploy is built with a **Defense in Depth** strategy:
+- **No Root Required**: Neither the panel nor the containers run as root.
+- **Encrypted Secrets**: All SSH private keys and GitHub tokens are stored with AES-256-GCM encryption.
+- **Internal mTLS**: Communication between the Brain and Worker nodes is secured via mutual TLS with an internal CA.
+- **Isolated Namespaces**: Rootless Podman ensures that even a container escape remains confined to a non-privileged user namespace.
 
 ---
 
-## 🏗️ Development Setup
+## 🛠️ Development
 
-### Clone the repository
+### Setup
 ```bash
 git clone https://github.com/ojhapranjal26/FeatherDeploy.git
 cd FeatherDeploy
 ```
 
-### Run the backend (Go)
+### Backend
 ```bash
 cd backend
-cp .env.example .env          # edit as needed
+cp .env.example .env
 go run ./cmd/server/
 ```
 
-### Run the frontend (Vite dev server)
+### Frontend
 ```bash
 cd frontend
 npm install
 npm run dev
 ```
 
-The frontend dev server starts at `http://localhost:5173` and proxies API calls to the backend at `:8080`.
-
-### Build the production binary (requires WSL2 or Linux)
-```bash
-# From WSL2 on Windows:
-powershell ./build.ps1
-
-# From Linux / macOS:
-sudo bash build.sh
-```
+The dev server proxies API requests to `localhost:8080` by default.
 
 ---
 
 ## 📁 Project Structure
 
-```
-FeatherDeploy/
-├── build.sh                    # One-shot Linux install / update script
-├── build.ps1                   # Windows wrapper (runs build.sh via WSL2)
-├── VERSION.json                # Version manifest — checked by the dashboard update banner
-├── frontend/                   # React 19 + Vite + TypeScript frontend
-│   └── src/
-│       ├── pages/              # Page components
-│       ├── components/         # UI + layout components (shadcn/ui)
-│       ├── context/            # Auth + Theme contexts
-│       ├── hooks/              # SSE hooks (stats, deployment logs)
-│       └── api/                # Typed API client helpers (axios)
-└── backend/
-    ├── cmd/
-    │   ├── server/main.go      # Entry point (serve / install / update subcommands)
-    │   └── node/main.go        # Worker-node binary entry point
-    ├── web/                    # go:embed target for built frontend assets
-    ├── internal/
-    │   ├── auth/               # bcrypt + JWT helpers
-    │   ├── crypto/             # AES-256-GCM encrypt/decrypt
-    │   ├── db/                 # rqlite open + schema migrations
-    │   ├── deploy/             # Deployment queue, runner, Dockerfile generator
-    │   ├── detect/             # Framework + language auto-detection
-    │   ├── handler/            # HTTP handlers (auth, projects, github, ssh, system…)
-    │   ├── heartbeat/          # Brain/node heartbeat + cluster state
-    │   ├── installer/          # Interactive Linux setup wizard + update logic
-    │   ├── mailer/             # SMTP email sender
-    │   ├── middleware/         # JWT auth + RBAC middleware
-    │   ├── model/              # Shared data types + DTOs
-    │   ├── pki/                # Internal CA, TLS cert generation for nodes
-    │   ├── rqlitedrv/          # rqlite database/sql driver
-    │   └── validator/          # Input validation
-    └── migrations/
-        └── schema.sql          # Full database schema
+```text
+.
+├── backend/
+│   ├── cmd/            # Entry points (server/node)
+│   ├── internal/       # Core logic (deploy, auth, coordination, pki)
+│   ├── migrations/     # Database schema migrations
+│   └── web/            # Embedded frontend assets
+├── frontend/
+│   ├── src/            # React components and pages
+│   └── public/         # Static assets
+├── docs/               # Detailed guides (GitHub Setup, Cluster setup)
+└── build.sh            # Universal Linux installation script
 ```
 
 ---
 
-## 🤝 Contributing
+## 🤝 Contributing & License
 
-Pull requests are welcome. For major changes, please open an issue first.
+Contributions are what make the open-source community such an amazing place to learn, inspire, and create. Any contributions you make are **greatly appreciated**.
+
+Distributed under the MIT License. See `LICENSE` for more information.
 
 ---
-
-## 📄 License
-
-[MIT](LICENSE)
+<div align="center">
+Built with ❤️ by the FeatherDeploy Team
+</div>
