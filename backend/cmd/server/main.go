@@ -292,6 +292,12 @@ func serve() {
 	deploy.SetNetDaemon(netDaemon)
 	slog.Info("fdnet: network daemon ready")
 
+	// Establish a single secure port (8080/443) for all inter-node communication.
+	// We use WebSockets for the underlying tunnel.
+	TunnelMgr = netdaemon.NewTunnelManager()
+	
+	// Add the tunnel endpoint to the router later in the file...
+
 	// Sync cluster_port back to the DB for all services whose fdnet proxy was
 	// restored from the state file.  This is required so Caddy's buildConfig
 	// picks up the correct proxy port (via COALESCE(cluster_port, host_port))
@@ -469,6 +475,10 @@ func serve() {
 	r.Get("/api/nodes/binary", nodeH.BinaryDownload)
 	r.Get("/api/nodes/server-binary", nodeH.ServerBinaryDownload)
 	r.Get("/api/nodes/ca-cert", nodeH.CACert)
+	
+	// Cluster Tunnel (WebSocket)
+	caCertData, _ := os.ReadFile("/etc/featherdeploy/ca.crt")
+	r.Get("/api/cluster/tunnel", TunnelMgr.HTTPHandler(string(caCertData)))
 
 	// ── Storage Object API — service key auth (X-Storage-Key), no JWT required ───
 	// Services (containers) call these endpoints using their per-service API key.
@@ -1392,7 +1402,7 @@ func rotateCerts(db *sql.DB, jwtSecret string) {
 			continue
 		}
 
-		if err := pushCertToNode(ip, port, nodeCert, caCertPEM); err != nil {
+		if err := pushCertToNode(name, ip, port, nodeCert, caCertPEM); err != nil {
 			slog.Error("pki: failed to push cert to node", "node", name, "err", err)
 			continue
 		}
@@ -1402,7 +1412,7 @@ func rotateCerts(db *sql.DB, jwtSecret string) {
 	}
 }
 
-func pushCertToNode(ip string, port int, cert *pki.NodeCert, caPEM string) error {
+func pushCertToNode(name string, ip string, port int, cert *pki.NodeCert, caPEM string) error {
 	payload := map[string]string{
 		"cert_pem": cert.CertPEM,
 		"key_pem":  cert.KeyPEM,
@@ -1425,6 +1435,16 @@ func pushCertToNode(ip string, port int, cert *pki.NodeCert, caPEM string) error
 	}
 
 	url := fmt.Sprintf("https://%s:%d/api/node/rotate-cert", ip, port)
+	
+	// If the node is connected via tunnel, use the tunnel address instead of the public IP
+	// (NodeID is currently the hostname/name in our DB)
+	if TunnelMgr != nil {
+		if proxyAddr := TunnelMgr.GetNodeProxyAddr(name, 7443); proxyAddr != "" {
+			url = fmt.Sprintf("https://%s/api/node/rotate-cert", proxyAddr)
+			slog.Info("pki: using tunnel for cert push", "node", name, "addr", url)
+		}
+	}
+
 	resp, err := client.Post(url, "application/json", bytes.NewReader(body))
 	if err != nil {
 		return err

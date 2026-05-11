@@ -148,62 +148,62 @@ func runJoin(args []string) {
 	}
 
 	// Write and start rqlite service (join main Raft cluster)
-	// Determine main IP from mainURL for Raft join address
-	mainIP := extractHost(mainURL)
-	rqliteJoinAddr := mainIP + ":4001"
+	// Determine main IP from mainURL for Raft join address.
+	// Since we are using a tunnel, we join via localhost:4001 which is proxied to the brain.
+	rqliteJoinAddr := "127.0.0.1:4001"
 	if reply.RqliteMain != "" {
-		// If server explicitly provided a different port, honor it
 		parts := strings.Split(reply.RqliteMain, ":")
 		port := parts[len(parts)-1]
-		rqliteJoinAddr = mainIP + ":" + port
+		rqliteJoinAddr = "127.0.0.1:" + port
 	}
 
-	// Connectivity check: ensure we can reach the main server's rqlite port
-	// This helps diagnose firewall/network issues before we start the service.
-	fmt.Printf("==> Checking connectivity to main rqlite at http://%s...\n", rqliteJoinAddr)
-	{
-		client := &http.Client{Timeout: 10 * time.Second}
-		// Check HTTP port (4001)
-		if resp, err := client.Get("http://" + rqliteJoinAddr + "/readyz"); err != nil {
-			fmt.Printf("  WARNING: cannot reach main rqlite HTTP API: %v\n", err)
-			fmt.Println("  Ensure port 4001 is open in your cloud firewall (Security Groups).")
+	// Update etcdMain to use localhost through the tunnel
+	etcdMain := reply.EtcdMain
+	if etcdMain != "" {
+		// Replace brain IP with 127.0.0.1
+		mainIP := extractHost(mainURL)
+		etcdMain = strings.Replace(etcdMain, mainIP, "127.0.0.1", -1)
+	}
+
+	// Connectivity check: ensure we can reach the main server's WebSocket tunnel
+	wsURL := strings.Replace(mainURL, "http", "ws", 1) + "/api/cluster/tunnel"
+	fmt.Printf("==> Establishing secure tunnel to brain at %s...\n", wsURL)
+	
+	tunnelMgr := netdaemon.NewTunnelManager()
+	caPEM, _ := os.ReadFile(caCertFile)
+	certPEM, _ := os.ReadFile(nodeCert)
+	keyPEM, _ := os.ReadFile(nodeKey)
+	tunnelTLSCfg, err := pki.TLSConfig(string(certPEM), string(keyPEM), string(caPEM))
+	if err != nil {
+		fmt.Printf("  WARNING: TLS setup failed: %v\n", err)
+	} else {
+		// Start a temporary tunnel client
+		ctx, cancel := context.WithCancel(context.Background())
+		go tunnelMgr.StartClient(ctx, wsURL, hostname(), tunnelTLSCfg)
+		
+		// Wait a bit for connection
+		time.Sleep(3 * time.Second)
+		
+		// Setup local proxies to the brain's ports
+		tunnelMgr.ProxyNodeToBrain(4001, 4001)
+		tunnelMgr.ProxyNodeToBrain(4002, 4002)
+		tunnelMgr.ProxyNodeToBrain(2379, 2379)
+		tunnelMgr.ProxyNodeToBrain(2380, 2380)
+
+		fmt.Println("==> Checking connectivity through tunnel...")
+		client := &http.Client{Timeout: 5 * time.Second}
+		if resp, err := client.Get("http://127.0.0.1:4001/readyz"); err != nil {
+			fmt.Printf("  WARNING: cannot reach main rqlite via tunnel: %v\n", err)
 		} else {
 			resp.Body.Close()
-			fmt.Println("  ✓ HTTP connectivity confirmed")
+			fmt.Println("  ✓ Rqlite connectivity confirmed via tunnel")
 		}
-		// Check Raft port (4002) - simple TCP dial
-		raftAddr := mainIP + ":4002"
-		if conn, err := net.DialTimeout("tcp", raftAddr, 5*time.Second); err != nil {
-			fmt.Printf("  WARNING: cannot reach main rqlite Raft port at %s: %v\n", raftAddr, err)
-			fmt.Println("  Ensure port 4002 is open in your cloud firewall (Security Groups).")
-		} else {
-			conn.Close()
-			fmt.Println("  ✓ Raft connectivity confirmed")
-		}
-
-		// Check Etcd client port (2379)
-		etcdClientAddr := mainIP + ":2379"
-		if conn, err := net.DialTimeout("tcp", etcdClientAddr, 5*time.Second); err != nil {
-			fmt.Printf("  WARNING: cannot reach main etcd client port at %s: %v\n", etcdClientAddr, err)
-			fmt.Println("  Ensure port 2379 is open in your cloud firewall (Security Groups).")
-		} else {
-			conn.Close()
-			fmt.Println("  ✓ Etcd client connectivity confirmed")
-		}
-
-		// Check Etcd peer port (2380)
-		etcdPeerAddr := mainIP + ":2380"
-		if conn, err := net.DialTimeout("tcp", etcdPeerAddr, 5*time.Second); err != nil {
-			fmt.Printf("  WARNING: cannot reach main etcd peer port at %s: %v\n", etcdPeerAddr, err)
-			fmt.Println("  Ensure port 2380 is open in your cloud firewall (Security Groups).")
-		} else {
-			conn.Close()
-			fmt.Println("  ✓ Etcd peer connectivity confirmed")
-		}
+		
+		cancel() // Stop temporary tunnel
 	}
 
 	writeRqliteService(nodeID, rqliteJoinAddr, nodeIP)
-	writeEtcdService(nodeID, reply.EtcdMain, nodeIP)
+	writeEtcdService(nodeID, etcdMain, nodeIP)
 
 	// Verify binaries before starting
 	for _, bin := range []string{"rqlited", "etcd"} {
@@ -267,6 +267,35 @@ func runServe() {
 				slog.Error("etcd: node registration failed", "err", err)
 			}
 		}()
+	}
+
+	// ─── FeatherTunnel: Reverse Tunneling ──────────────────────────────────────
+	// Dial outbound to the Brain on port 7443 and establish a persistent tunnel.
+	// This allows the Brain to reach this node's services without inbound firewall rules.
+	tunnelMgr := netdaemon.NewTunnelManager()
+	mainURL := ""
+	if data, err := os.ReadFile(configDir + "/main_url"); err == nil {
+		mainURL = strings.TrimSpace(string(data))
+	}
+	if mainURL != "" {
+		wsURL := strings.Replace(mainURL, "http", "ws", 1) + "/api/cluster/tunnel"
+		
+		caPEM, _ := os.ReadFile(caCertFile)
+		certPEM, _ := os.ReadFile(nodeCert)
+		keyPEM, _ := os.ReadFile(nodeKey)
+		tunnelTLSCfg, err := pki.TLSConfig(string(certPEM), string(keyPEM), string(caPEM))
+		if err != nil {
+			slog.Error("tunnel: tls setup failed", "err", err)
+		} else {
+			slog.Info("tunnel client: connecting to brain", "url", wsURL)
+			go tunnelMgr.StartClient(context.Background(), wsURL, myID, tunnelTLSCfg)
+			
+			// Setup persistent proxies to the brain
+			tunnelMgr.ProxyNodeToBrain(4001, 4001)
+			tunnelMgr.ProxyNodeToBrain(4002, 4002)
+			tunnelMgr.ProxyNodeToBrain(2379, 2379)
+			tunnelMgr.ProxyNodeToBrain(2380, 2380)
+		}
 	}
 
 	r := chi.NewRouter()
@@ -443,9 +472,9 @@ After=network.target
 User=root
 ExecStart=/usr/local/bin/rqlited \
   -node-id=%s \
-  -http-addr=%s \
+  -http-addr=127.0.0.1:4001 \
+  -raft-addr=127.0.0.1:4002 \
   -http-adv-addr=%s:4001 \
-  -raft-addr=%s \
   -raft-adv-addr=%s:4002 \
   -join=%s \
   %s
@@ -474,10 +503,10 @@ ExecStartPre=/bin/bash -c 'mkdir -p %s/etcd-data && chown -R root:root %s/etcd-d
 ExecStart=/usr/local/bin/etcd \
   --name=%s \
   --data-dir=%s/etcd-data \
-  --listen-client-urls=http://0.0.0.0:2379 \
-  --advertise-client-urls=http://%s:2379 \
-  --listen-peer-urls=http://0.0.0.0:2380 \
-  --initial-advertise-peer-urls=http://%s:2380 \
+  --listen-client-urls=http://127.0.0.1:2379 \
+  --advertise-client-urls=http://127.0.0.1:2379 \
+  --listen-peer-urls=http://127.0.0.1:2380 \
+  --initial-advertise-peer-urls=http://127.0.0.1:2380 \
   --initial-cluster=%s,%s=http://%s:2380 \
   --initial-cluster-token=etcd-cluster-1 \
   --initial-cluster-state=existing
@@ -489,8 +518,9 @@ WantedBy=multi-user.target
 `
 
 func writeEtcdService(nodeID, etcdMain, myIP string) {
+	etcdPeerURL := "http://127.0.0.1:2380"
 	content := fmt.Sprintf(etcdServiceTmpl,
-		dataDir, dataDir, nodeID, dataDir, myIP, myIP, etcdMain, nodeID, myIP)
+		dataDir, dataDir, nodeID, dataDir, etcdPeerURL, etcdMain, nodeID, etcdPeerURL)
 	writeFile("/etc/systemd/system/etcd-node.service", content, 0644)
 }
 
