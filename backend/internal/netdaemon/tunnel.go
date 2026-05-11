@@ -98,6 +98,17 @@ func (tm *TunnelManager) HTTPHandler() http.HandlerFunc {
 		// 5. Set up local proxy ports for this node.
 		tm.setupNodeProxies(nodeID)
 
+		// 5.5 Accept incoming streams from the node (node-to-brain).
+		go func() {
+			for {
+				stream, err := session.Accept()
+				if err != nil {
+					return
+				}
+				go tm.handleIncomingStream(stream)
+			}
+		}()
+
 		// 6. Block until the session closes.
 		<-session.CloseChan()
 		slog.Info("tunnel server: node disconnected", "node", nodeID)
@@ -212,6 +223,14 @@ func (tm *TunnelManager) dialAndServeWS(ctx context.Context, brainURL string, no
 		conn.Close()
 		return fmt.Errorf("yamux: %w", err)
 	}
+
+	// Graceful cancellation: if ctx is canceled, close session and conn
+	go func() {
+		<-ctx.Done()
+		session.Close()
+		conn.Close()
+	}()
+
 	defer session.Close()
 
 	tm.mu.Lock()
