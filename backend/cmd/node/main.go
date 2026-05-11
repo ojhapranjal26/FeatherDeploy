@@ -301,6 +301,61 @@ func runServe() {
 		w.Write([]byte(`{"status":"ok"}`))
 	})
 
+	// Brain pushes a new tunnel token here during rotation
+	r.Post("/api/node/rotate-tunnel-token", func(w http.ResponseWriter, req *http.Request) {
+		// Only accept from localhost (via tunnel proxy — never from public internet)
+		host, _, _ := net.SplitHostPort(req.RemoteAddr)
+		if host != "127.0.0.1" && host != "::1" {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		var payload struct {
+			TunnelToken string `json:"tunnel_token"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&payload); err != nil || payload.TunnelToken == "" {
+			http.Error(w, "invalid payload", http.StatusBadRequest)
+			return
+		}
+		writeFile(configDir+"/tunnel_token", payload.TunnelToken, 0600)
+		slog.Info("node: tunnel token rotated by brain")
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	// Brain discovery: poll cluster_state (via local rqlite) for brain changes
+	go func() {
+		var knownBrain string
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			if db == nil {
+				continue
+			}
+			var brainAddr string
+			if err := db.QueryRow(`SELECT brain_addr FROM cluster_state WHERE id=1`).Scan(&brainAddr); err != nil || brainAddr == "" {
+				continue
+			}
+			// Normalize: strip trailing slash
+			brainAddr = strings.TrimRight(brainAddr, "/")
+			if brainAddr == knownBrain {
+				continue
+			}
+			slog.Info("node: brain changed, reconnecting tunnel", "old", knownBrain, "new", brainAddr)
+			knownBrain = brainAddr
+			// Read current token
+			var tok []byte
+			tok, _ = os.ReadFile(configDir + "/tunnel_token")
+			newToken := strings.TrimSpace(string(tok))
+			if newToken == "" {
+				continue
+			}
+			newWS := strings.Replace(brainAddr, "http", "ws", 1) + "/api/cluster/tunnel"
+			newTLS := &tls.Config{InsecureSkipVerify: true}
+			// The existing StartClient goroutine will keep retrying the old URL.
+			// Start a new one for the new brain — the old one will die when its session closes.
+			go tunnelMgr.StartClient(context.Background(), newWS, myID, newToken, newTLS)
+		}
+	}()
+
 	r.Post("/api/node/deploy", func(w http.ResponseWriter, req *http.Request) {
 		var payload struct {
 			DepID  int64  `json:"dep_id"`

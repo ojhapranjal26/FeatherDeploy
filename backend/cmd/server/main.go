@@ -3,7 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/tls"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -298,7 +301,101 @@ func serve() {
 	// Establish a single secure port (8080/443) for all inter-node communication.
 	// We use WebSockets for the underlying tunnel.
 	TunnelMgr = netdaemon.NewTunnelManager()
-	
+
+	// Periodic tunnel token rotation (every 7 days)
+	// Pushes new token to connected nodes via tunnel. Old token accepted for 24h (grace period).
+	go func() {
+		ticker := time.NewTicker(24 * time.Hour)
+		defer ticker.Stop()
+		for range ticker.C {
+			rows, err := db.Query(`
+				SELECT id, name, tunnel_token FROM nodes
+				WHERE status = 'connected'
+				  AND tunnel_token IS NOT NULL
+				  AND (tunnel_rotated_at IS NULL OR tunnel_rotated_at < datetime('now', '-7 days'))
+			`)
+			if err != nil {
+				continue
+			}
+			type nodeRow struct{ id int64; name, token string }
+			var toRotate []nodeRow
+			for rows.Next() {
+				var nr nodeRow
+				if rows.Scan(&nr.id, &nr.name, &nr.token) == nil {
+					toRotate = append(toRotate, nr)
+				}
+			}
+			rows.Close()
+			for _, nr := range toRotate {
+				newToken := func() string {
+					b := make([]byte, 20)
+					rand.Read(b)
+					return hex.EncodeToString(b)
+				}()
+				// Push to node via tunnel proxy on its management port (7443 → local proxy)
+				proxyAddr := TunnelMgr.GetNodeProxyAddr(nr.name, 7443)
+				if proxyAddr == "" {
+					slog.Warn("token-rotate: node not connected via tunnel, skipping", "node", nr.name)
+					continue
+				}
+				body, _ := json.Marshal(map[string]string{"tunnel_token": newToken})
+				resp, err := http.Post("http://"+proxyAddr+"/api/node/rotate-tunnel-token", "application/json", bytes.NewReader(body))
+				if err != nil || resp.StatusCode != http.StatusNoContent {
+					slog.Warn("token-rotate: push failed", "node", nr.name, "err", err)
+					if resp != nil { resp.Body.Close() }
+					continue
+				}
+				resp.Body.Close()
+				// Store new token, move old to prev for grace period
+				db.Exec(`UPDATE nodes SET tunnel_token=?, tunnel_token_prev=?, tunnel_rotated_at=datetime('now') WHERE id=?`,
+					newToken, nr.token, nr.id)
+				slog.Info("token-rotate: rotated tunnel token", "node", nr.name)
+			}
+		}
+	}()
+
+	// ─── Split-brain Prevention ───
+	if b, err := heartbeat.ReadBrain(db); err == nil && b.Alive && b.BrainID != "main" {
+		slog.Warn("Split-brain prevention: I am no longer the brain. Starting in worker mode.", "active_brain", b.BrainID)
+		
+		wsURL := strings.Replace(b.BrainAddr, "http", "ws", 1) + "/api/cluster/tunnel"
+		tlsCfg := &tls.Config{InsecureSkipVerify: true}
+		
+		// Wait until tunnel is established, then set up proxies
+		go func() {
+			TunnelMgr.StartClient(context.Background(), wsURL, "main", *jwtSecret, tlsCfg)
+		}()
+		time.Sleep(3 * time.Second)
+		TunnelMgr.ProxyNodeToBrain(4001, 4001)
+		TunnelMgr.ProxyNodeToBrain(4002, 4002)
+		TunnelMgr.ProxyNodeToBrain(2379, 2379)
+		TunnelMgr.ProxyNodeToBrain(2380, 2380)
+
+		// Brain discovery loop (like in node/main.go)
+		var knownBrain = strings.TrimRight(b.BrainAddr, "/")
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			newB, err := heartbeat.ReadBrain(db)
+			if err != nil || !newB.Alive {
+				continue
+			}
+			if newB.BrainID == "main" {
+				slog.Warn("I am the brain again! Restarting process to resume duties...")
+				os.Exit(0)
+			}
+			brainAddr := strings.TrimRight(newB.BrainAddr, "/")
+			if brainAddr == knownBrain {
+				continue
+			}
+			slog.Info("server-worker: brain changed, reconnecting tunnel", "old", knownBrain, "new", brainAddr)
+			knownBrain = brainAddr
+			newWS := strings.Replace(brainAddr, "http", "ws", 1) + "/api/cluster/tunnel"
+			go TunnelMgr.StartClient(context.Background(), newWS, "main", *jwtSecret, tlsCfg)
+		}
+		select {} // Block forever (HTTP server won't start)
+	}
+
 	// Add the tunnel endpoint to the router later in the file...
 
 	// Sync cluster_port back to the DB for all services whose fdnet proxy was
@@ -479,11 +576,18 @@ func serve() {
 	r.Get("/api/nodes/server-binary", nodeH.ServerBinaryDownload)
 	r.Get("/api/nodes/ca-cert", nodeH.CACert)
 	
-	// Cluster Tunnel (WebSocket) — token-based auth, no inner TLS needed (WSS handles it)
+	// Cluster Tunnel (WebSocket) — token-based auth, WSS handles encryption
 	TunnelMgr.ValidateToken = func(token string) string {
+		if token == *jwtSecret {
+			return "main" // The original brain authenticating as a worker node
+		}
 		var name string
-		// Look up node by its permanent tunnel_token (set during CompleteJoin)
-		err := db.QueryRow(`SELECT name FROM nodes WHERE tunnel_token = ? LIMIT 1`, token).Scan(&name)
+		// Accept current token OR previous token (24h grace period after rotation)
+		err := db.QueryRow(`
+			SELECT name FROM nodes 
+			WHERE tunnel_token = ? 
+			   OR (tunnel_token_prev = ? AND tunnel_rotated_at > datetime('now', '-24 hours'))
+			LIMIT 1`, token, token).Scan(&name)
 		if err != nil {
 			return ""
 		}

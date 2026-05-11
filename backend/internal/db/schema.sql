@@ -410,6 +410,8 @@ CREATE TABLE IF NOT EXISTS database_tasks (
 CREATE INDEX IF NOT EXISTS idx_database_tasks_db ON database_tasks(database_id);
 
 -- 025: tunnel_token — permanent per-node token for WebSocket tunnel authentication
--- Separate from join_token (which is single-use and cleared after CompleteJoin)
-ALTER TABLE nodes ADD COLUMN tunnel_token TEXT DEFAULT NULL;
-CREATE INDEX IF NOT EXISTS idx_nodes_tunnel_token ON nodes(tunnel_token);
+ALTER TABLE nodes ADD COLUMN tunnel_token      TEXT DEFAULT NULL;
+ALTER TABLE nodes ADD COLUMN tunnel_token_prev TEXT DEFAULT NULL;       -- old token accepted for 24h grace period
+ALTER TABLE nodes ADD COLUMN tunnel_rotated_at DATETIME DEFAULT NULL;  -- when last rotated
+CREATE INDEX IF NOT EXISTS idx_nodes_tunnel_token      ON nodes(tunnel_token);
+CREATE INDEX IF NOT EXISTS idx_nodes_tunnel_token_prev ON nodes(tunnel_token_prev);
