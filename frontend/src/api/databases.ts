@@ -122,13 +122,30 @@ export const databasesApi = {
     projectId: string | number,
     databaseId: string | number,
     file: File,
-  ): Promise<{ status: string }> => {
+  ): Promise<{ status: string; task_id?: number }> => {
     const form = new FormData()
     form.append('file', file)
     return client
-      .post<{ status: string }>(`/projects/${projectId}/databases/${databaseId}/restore`, form, {
+      .post<{ status: string; task_id?: number }>(`/projects/${projectId}/databases/${databaseId}/restore`, form, {
         headers: { 'Content-Type': 'multipart/form-data' },
       })
       .then((r) => r.data)
   },
+
+  listTasks: (projectId: string | number, databaseId: string | number): Promise<any[]> =>
+    client.get<any[]>(`/projects/${projectId}/databases/${databaseId}/tasks`).then((r) => r.data),
+
+  getTask: (projectId: string | number, databaseId: string | number, taskId: string | number): Promise<any> =>
+    client.get<any>(`/projects/${projectId}/databases/${databaseId}/tasks/${taskId}`).then((r) => r.data),
+
+  restoreUploadInit: (projectId: string | number, databaseId: string | number, filename: string, size: number): Promise<{ upload_id: string }> =>
+    client.post<{ upload_id: string }>(`/projects/${projectId}/databases/${databaseId}/restore/upload/init`, { filename, size }).then((r) => r.data),
+
+  restoreUploadPart: (projectId: string | number, databaseId: string | number, uploadId: string, partNum: number, chunk: Blob): Promise<void> =>
+    client.put(`/projects/${projectId}/databases/${databaseId}/restore/upload/${uploadId}/part/${partNum}`, chunk, {
+      headers: { 'Content-Type': 'application/octet-stream' },
+    }).then(() => undefined),
+
+  restoreUploadComplete: (projectId: string | number, databaseId: string | number, uploadId: string): Promise<{ task_id: number }> =>
+    client.post<{ task_id: number }>(`/projects/${projectId}/databases/${databaseId}/restore/upload/${uploadId}/complete`).then((r) => r.data),
 }

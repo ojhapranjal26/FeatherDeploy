@@ -15,6 +15,8 @@ import { deploymentsApi } from '@/api/deployments'
 import { nodesApi, type Node as ApiNode } from '@/api/nodes'
 import type { Service } from '@/api/services'
 import { ServiceStatusBadge } from '@/components/ServiceStatusBadge'
+import { DatabaseTasksPanel } from '@/components/DatabaseTasksPanel'
+import { useDatabaseRestore } from '@/hooks/useDatabaseRestore'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -373,16 +375,25 @@ function DatabaseCard({ database, projectId, canEdit, nodes }: { database: Datab
     onError: (err: unknown) => toast.error((err as any)?.response?.data?.error ?? 'Failed to update database.'),
   })
 
+  const { restore, isUploading, uploadProgress } = useDatabaseRestore(projectId, database.id)
+
   const restoreMutation = useMutation({
-    mutationFn: (file: File) => databasesApi.restoreBackup(projectId, database.id, file),
-    onSuccess: () => {
+    mutationFn: (file: File) => restore(file),
+    onSuccess: (data) => {
       qc.invalidateQueries({ queryKey: ['databases', projectId] })
       setRestoreOpen(false)
       setRestoreFile(null)
-      toast.success('Backup restored. Database is restarting.')
+      if (data.task_id) {
+        toast.success('Restore task started in background.')
+        setLogsOpen(true) // Open logs/tasks view
+      } else {
+        toast.success('Backup restored. Database is restarting.')
+      }
     },
     onError: (err: unknown) => toast.error((err as any)?.response?.data?.error ?? 'Failed to restore backup.'),
   })
+
+  const isRestoring = restoreMutation.isPending || isUploading
 
   const logsQuery = useQuery({
     queryKey: ['database-logs', database.id],
@@ -496,6 +507,13 @@ function DatabaseCard({ database, projectId, canEdit, nodes }: { database: Datab
         </CardHeader>
 
         <CardContent className="flex flex-col gap-3 flex-1 pb-4">
+          <DatabaseTasksPanel
+            projectId={projectId}
+            databaseId={database.id}
+            enabled={true}
+            compact={true}
+          />
+
           <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
             <Database className="h-3.5 w-3.5 shrink-0" />
             <span>{database.db_name}</span>
@@ -599,6 +617,14 @@ function DatabaseCard({ database, projectId, canEdit, nodes }: { database: Datab
               status={database.status}
               enabled={logsOpen}
             />
+            <div>
+              <p className="text-[10px] uppercase tracking-wide text-muted-foreground font-medium mb-2">Recent Tasks & Progress</p>
+              <DatabaseTasksPanel
+                projectId={projectId}
+                databaseId={database.id}
+                enabled={logsOpen}
+              />
+            </div>
             <div>
               <p className="text-[10px] uppercase tracking-wide text-muted-foreground font-medium mb-1">Container Output</p>
               <div className="rounded-md border bg-black/90 p-3 max-h-52 overflow-y-auto">
@@ -773,18 +799,30 @@ function DatabaseCard({ database, projectId, canEdit, nodes }: { database: Datab
             )}
           </div>
           <DialogFooter className="gap-2">
-            <Button variant="ghost" size="sm" onClick={() => setRestoreOpen(false)} disabled={restoreMutation.isPending}>Cancel</Button>
-            <Button
-              variant="destructive"
-              size="sm"
-              disabled={!restoreFile || restoreMutation.isPending}
-              onClick={() => restoreFile && restoreMutation.mutate(restoreFile)}
-            >
-              {restoreMutation.isPending
-                ? <><Loader2 className="mr-1.5 h-3 w-3 animate-spin" />Restoring…</>
-                : 'Restore backup'
-              }
-            </Button>
+            <Button variant="ghost" size="sm" onClick={() => setRestoreOpen(false)} disabled={isRestoring}>Cancel</Button>
+            <div className="flex-1">
+              {isUploading && (
+                <div className="space-y-1 mb-2">
+                  <div className="flex justify-between text-[10px] text-muted-foreground">
+                    <span>Uploading...</span>
+                    <span>{uploadProgress}%</span>
+                  </div>
+                  <Progress value={uploadProgress} className="h-1" />
+                </div>
+              )}
+              <Button
+                variant="destructive"
+                size="sm"
+                className="w-full"
+                disabled={!restoreFile || isRestoring}
+                onClick={() => restoreFile && restoreMutation.mutate(restoreFile)}
+              >
+                {isRestoring
+                  ? <><Loader2 className="mr-1.5 h-3 w-3 animate-spin" />{isUploading ? 'Uploading...' : 'Restoring…'}</>
+                  : 'Restore backup'
+                }
+              </Button>
+            </div>
           </DialogFooter>
         </DialogContent>
       </Dialog>
