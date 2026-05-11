@@ -179,6 +179,7 @@ func runJoin(args []string) {
 	tunnelTLSCfg := &tls.Config{InsecureSkipVerify: true}
 	
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel() // Stop temporary tunnel when script finishes
 	go tunnelMgr.StartClient(ctx, wsURL, hostname(), reply.TunnelToken, tunnelTLSCfg)
 
 	// Wait for connection to establish
@@ -198,8 +199,6 @@ func runJoin(args []string) {
 		resp.Body.Close()
 		fmt.Println("  ✓ Rqlite connectivity confirmed via tunnel")
 	}
-
-	cancel() // Stop temporary tunnel (the serve service will re-establish it)
 
 	writeRqliteService(nodeID, rqliteJoinAddr, nodeIP)
 	writeEtcdService(nodeID, etcdMain, nodeIP)
