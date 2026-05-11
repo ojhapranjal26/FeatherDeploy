@@ -40,8 +40,10 @@ const (
 	nodeIDFile = configDir + "/node.id"
 	rqliteUnit = "/etc/systemd/system/rqlite-node.service"
 	rqliteData = dataDir + "/rqlite-data"
-	rqliteHTTP = "0.0.0.0:4001"
-	rqliteRaft = "0.0.0.0:4002"
+	rqliteHTTP = "127.0.0.1:4003" // Worker's local rqlite (for HA only)
+	rqliteRaft = "127.0.0.1:4004"
+	etcdClient = "127.0.0.1:2381"
+	etcdPeer   = "127.0.0.1:2382"
 )
 
 func main() {
@@ -233,11 +235,20 @@ func runJoin(args []string) {
 func runServe() {
 	slog.Info("featherdeploy-node starting")
 
-	// Connect to local rqlite (already running as a Raft member)
-	rqliteURL := envOr("RQLITE_URL", "http://"+rqliteHTTP)
-	db, err := appDb.OpenRqlite(rqliteURL)
+	// Connect to the Brain's rqlite via the tunnel proxy (always 127.0.0.1:4001 on workers).
+	// We retry until the tunnel is established.
+	var db *sql.DB
+	var err error
+	for i := 0; i < 30; i++ {
+		db, err = appDb.OpenRqlite("http://127.0.0.1:4001")
+		if err == nil {
+			break
+		}
+		slog.Info("waiting for tunnel and brain rqlite...", "attempt", i+1)
+		time.Sleep(2 * time.Second)
+	}
 	if err != nil {
-		slog.Warn("rqlite not ready yet, heartbeat will not start", "err", err)
+		slog.Error("could not connect to brain rqlite via tunnel", "err", err)
 	}
 
 	myID := hostname()
@@ -519,10 +530,10 @@ After=network.target
 User=root
 ExecStart=/usr/local/bin/rqlited \
   -node-id=%s \
-  -http-addr=127.0.0.1:4001 \
-  -raft-addr=127.0.0.1:4002 \
-  -http-adv-addr=%s:4001 \
-  -raft-adv-addr=%s:4002 \
+  -http-addr=127.0.0.1:4003 \
+  -raft-addr=127.0.0.1:4004 \
+  -http-adv-addr=%s:4003 \
+  -raft-adv-addr=%s:4004 \
   -join=%s \
   %s
 Restart=always
@@ -550,11 +561,11 @@ ExecStartPre=/bin/bash -c 'mkdir -p %s/etcd-data && chown -R root:root %s/etcd-d
 ExecStart=/usr/local/bin/etcd \
   --name=%s \
   --data-dir=%s/etcd-data \
-  --listen-client-urls=http://127.0.0.1:2379 \
-  --advertise-client-urls=http://127.0.0.1:2379 \
-  --listen-peer-urls=http://127.0.0.1:2380 \
-  --initial-advertise-peer-urls=http://127.0.0.1:2380 \
-  --initial-cluster=%s,%s=http://%s:2380 \
+  --listen-client-urls=http://127.0.0.1:2381 \
+  --advertise-client-urls=http://127.0.0.1:2381 \
+  --listen-peer-urls=http://127.0.0.1:2382 \
+  --initial-advertise-peer-urls=http://127.0.0.1:2382 \
+  --initial-cluster=%s,%s=http://%s:2382 \
   --initial-cluster-token=etcd-cluster-1 \
   --initial-cluster-state=existing
 Restart=always

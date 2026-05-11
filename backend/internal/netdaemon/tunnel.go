@@ -130,7 +130,9 @@ func (tm *TunnelManager) setupNodeProxies(nodeID string) {
 	}
 
 	// Allocate a deterministic block of local ports based on the number of existing sessions.
-	ports := []int{4001, 4002, 2379, 2380, 7443}
+	// We map the worker's local services (which use non-conflicting ports 4003+) 
+	// to the brain's internal proxy ports.
+	ports := []int{4003, 4004, 2381, 2382, 7443}
 	idx := len(tm.sessions) // sessions map already updated before this call
 	base := 20000 + (idx * 10)
 
