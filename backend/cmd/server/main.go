@@ -440,7 +440,7 @@ func serve() {
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   splitOrigins(*origin),
 		AllowedMethods:   []string{"GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Authorization", "Content-Type", "X-Request-Id", "X-Storage-Key"},
+		AllowedHeaders:   []string{"Authorization", "Content-Type", "X-Request-Id", "X-Storage-Key", "X-Node-ID", "X-Node-Token"},
 		AllowCredentials: true,
 		MaxAge:           300,
 	}))
