@@ -16,12 +16,12 @@ import { nodesApi, type Node as ApiNode } from '@/api/nodes'
 import type { Service } from '@/api/services'
 import { ServiceStatusBadge } from '@/components/ServiceStatusBadge'
 import { DatabaseTasksPanel } from '@/components/DatabaseTasksPanel'
-import { useDatabaseRestore } from '@/hooks/useDatabaseRestore'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Badge } from '@/components/ui/badge'
+import { Progress } from '@/components/ui/progress'
 import { Separator } from '@/components/ui/separator'
 import { cn } from '@/lib/utils'
 import {
@@ -52,6 +52,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
+import { useDatabaseRestore } from '@/hooks/useDatabaseRestore'
 
 function ServiceCard({ service, projectId, canEdit }: { service: Service; projectId: string; canEdit: boolean }) {
   const navigate = useNavigate()

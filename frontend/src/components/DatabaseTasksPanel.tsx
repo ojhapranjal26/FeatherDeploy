@@ -3,15 +3,11 @@ import { databasesApi } from '@/api/databases'
 import { Badge } from '@/components/ui/badge'
 import { Progress } from '@/components/ui/progress'
 import { 
-  CheckCircle2, 
-  Circle, 
-  Loader2, 
-  XCircle, 
   Download, 
   RefreshCcw,
-  ArrowRightLeft
+  ArrowRightLeft,
+  Loader2
 } from 'lucide-react'
-import { formatDistanceToNow } from 'date-fns'
 import { Button } from './ui/button'
 
 interface DatabaseTasksPanelProps {
@@ -60,7 +56,7 @@ export function DatabaseTasksPanel({ projectId, databaseId, enabled, compact }: 
                   {task.task_type} {task.status === 'running' ? 'in progress...' : ''}
                 </p>
                 <p className="mt-1 text-xs text-muted-foreground">
-                  {task.started_at ? formatDistanceToNow(new Date(task.started_at + 'Z'), { addSuffix: true }) : 'Pending'}
+                  {task.started_at ? new Date(task.started_at + 'Z').toLocaleString() : 'Pending'}
                 </p>
               </div>
             </div>

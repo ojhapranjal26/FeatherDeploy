@@ -1,14 +1,12 @@
 import { useState } from 'react'
 import { databasesApi } from '@/api/databases'
 import { toast } from 'sonner'
-import { useQueryClient } from '@tanstack/react-query'
 
 const CHUNK_SIZE = 5 * 1024 * 1024 // 5MB chunks
 
 export function useDatabaseRestore(projectId: string | number, databaseId: string | number) {
   const [isUploading, setIsUploading] = useState(false)
   const [uploadProgress, setUploadProgress] = useState(0)
-  const qc = useQueryClient()
 
   const restore = async (file: File) => {
     setIsUploading(true)
