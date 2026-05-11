@@ -176,7 +176,7 @@ func (h *NodeHandler) Add(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Port == 0 {
-		req.Port = 7443
+		req.Port = 443
 	}
 
 	token := randomHex20()

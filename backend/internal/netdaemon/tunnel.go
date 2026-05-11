@@ -91,6 +91,24 @@ func (tm *TunnelManager) HTTPHandler(caPEM string) http.HandlerFunc {
 		tm.sessions[nodeID] = session
 		tm.mu.Unlock()
 
+		slog.Info("tunnel server: session established", "node", nodeID)
+
+		// Start heartbeat to keep the WebSocket alive through proxies
+		go func() {
+			ticker := time.NewTicker(20 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+						return
+					}
+				case <-session.CloseChan():
+					return
+				}
+			}
+		}()
+
 		tm.setupNodeProxies(nodeID)
 
 		<-session.CloseChan()
@@ -179,6 +197,12 @@ func (tm *TunnelManager) dialAndServeWS(ctx context.Context, brainURL string, no
 	if err != nil {
 		return err
 	}
+	
+	// Handle Pings from server to keep connection alive
+	conn.SetPingHandler(func(appData string) error {
+		return conn.WriteMessage(websocket.PongMessage, []byte(appData))
+	})
+
 	wsConn := &wsNetConn{Conn: conn}
 	tlsConn := tls.Client(wsConn, tlsCfg)
 	if err := tlsConn.Handshake(); err != nil {
