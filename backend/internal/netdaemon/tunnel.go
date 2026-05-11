@@ -46,7 +46,7 @@ func (tm *TunnelManager) HTTPHandler(caPEM string) http.HandlerFunc {
 			return
 		}
 
-		wsConn := &wsNetConn{conn}
+		wsConn := &wsNetConn{Conn: conn}
 
 		// Load server cert for inner mTLS
 		certFile := "/etc/featherdeploy/node.crt"
@@ -179,7 +179,7 @@ func (tm *TunnelManager) dialAndServeWS(ctx context.Context, brainURL string, no
 	if err != nil {
 		return err
 	}
-	wsConn := &wsNetConn{conn}
+	wsConn := &wsNetConn{Conn: conn}
 	tlsConn := tls.Client(wsConn, tlsCfg)
 	if err := tlsConn.Handshake(); err != nil {
 		tlsConn.Close()
@@ -286,14 +286,28 @@ func (tm *TunnelManager) handleIncomingStream(stream net.Conn) {
 
 type wsNetConn struct {
 	*websocket.Conn
+	reader io.Reader
 }
 
 func (c *wsNetConn) Read(b []byte) (n int, err error) {
-	_, r, err := c.Conn.NextReader()
-	if err != nil {
-		return 0, err
+	for {
+		if c.reader == nil {
+			_, r, err := c.Conn.NextReader()
+			if err != nil {
+				return 0, err
+			}
+			c.reader = r
+		}
+		n, err = c.reader.Read(b)
+		if err == io.EOF {
+			c.reader = nil
+			if n > 0 {
+				return n, nil
+			}
+			continue
+		}
+		return n, err
 	}
-	return r.Read(b)
 }
 
 func (c *wsNetConn) Write(b []byte) (n int, err error) {
