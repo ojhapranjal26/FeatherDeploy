@@ -111,10 +111,11 @@ func runJoin(args []string) {
 		NodeCertPEM  string `json:"node_cert_pem"`
 		NodeKeyPEM   string `json:"node_key_pem"`
 		EncryptedEnv string `json:"encrypted_env"`
-		RqliteMain   string `json:"rqlite_main"` // main Raft addr to join
-		EtcdMain     string `json:"etcd_main"`   // etcd initial cluster
+		RqliteMain   string `json:"rqlite_main"`
+		EtcdMain     string `json:"etcd_main"`
 		SSHPublicKey string `json:"ssh_public_key"`
 		NodeIP       string `json:"node_ip"`
+		TunnelToken  string `json:"tunnel_token"` // permanent token for WebSocket tunnel auth
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&reply); err != nil {
 		fatalf("decode response: %v", err)
@@ -132,8 +133,9 @@ func runJoin(args []string) {
 	}
 	writeFile(envFile, decryptedEnv, 0600)
 
-	// Store the join token so the node binary can request server binary later
-	writeFile(configDir+"/join_token", token, 0600)
+	// Persist tokens and connection info
+	writeFile(configDir+"/join_token", token, 0600)               // kept for binary downloads
+	writeFile(configDir+"/tunnel_token", reply.TunnelToken, 0600) // permanent tunnel auth
 	writeFile(configDir+"/main_url", mainURL, 0644)
 
 	// Node ID = hostname
@@ -177,7 +179,7 @@ func runJoin(args []string) {
 	tunnelTLSCfg := &tls.Config{InsecureSkipVerify: true}
 	
 	ctx, cancel := context.WithCancel(context.Background())
-	go tunnelMgr.StartClient(ctx, wsURL, hostname(), token, tunnelTLSCfg)
+	go tunnelMgr.StartClient(ctx, wsURL, hostname(), reply.TunnelToken, tunnelTLSCfg)
 
 	// Wait for connection to establish
 	time.Sleep(4 * time.Second)
@@ -273,7 +275,7 @@ func runServe() {
 		mainURL = strings.TrimSpace(string(data))
 	}
 	nodeToken := ""
-	if data, err := os.ReadFile(configDir + "/join_token"); err == nil {
+	if data, err := os.ReadFile(configDir + "/tunnel_token"); err == nil {
 		nodeToken = strings.TrimSpace(string(data))
 	}
 	if mainURL != "" && nodeToken != "" {

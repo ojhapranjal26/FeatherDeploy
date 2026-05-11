@@ -409,12 +409,15 @@ func (h *NodeHandler) CompleteJoin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Generate a permanent tunnel token (separate from the one-time registration join_token)
+	tunnelToken := randomHex20()
+
 	// Update node record: mark connected, save cert, clear join token, save real IP
 	_, err = h.db.ExecContext(r.Context(),
 		`UPDATE nodes SET status='connected', ip=?, hostname=?, os_info=?, node_id=?, node_cert_pem=?, rqlite_addr=?,
 		 join_token=NULL, token_expires_at=NULL, last_seen=datetime('now'),
-		 updated_at=datetime('now') WHERE id=?`,
-		nodeIP, payload.Hostname, payload.OSInfo, payload.Hostname, nodeCert.CertPEM, payload.RqliteAddr, node.ID,
+		 tunnel_token=?, updated_at=datetime('now') WHERE id=?`,
+		nodeIP, payload.Hostname, payload.OSInfo, payload.Hostname, nodeCert.CertPEM, payload.RqliteAddr, tunnelToken, node.ID,
 	)
 	if err != nil {
 		slog.Error("complete-join: update node", "err", err)
@@ -487,14 +490,15 @@ func (h *NodeHandler) CompleteJoin(w http.ResponseWriter, r *http.Request) {
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"node_id":        nodeID,
-		"ca_cert_pem":   ca.CertPEM,
+		"ca_cert_pem":    ca.CertPEM,
 		"node_cert_pem":  nodeCert.CertPEM,
-		"node_key_pem":   nodeCert.KeyPEM,  // node key sent only once
-		"encrypted_env":  encryptedEnv,     // decrypt with join token
-		"rqlite_main":    rqliteMain,       // main HTTP addr to join
-		"etcd_main":      etcdMain,         // etcd initial cluster
-		"ssh_public_key": sshPubKey,        // add to /root/.ssh/authorized_keys
+		"node_key_pem":   nodeCert.KeyPEM,
+		"encrypted_env":  encryptedEnv,
+		"rqlite_main":    rqliteMain,
+		"etcd_main":      etcdMain,
+		"ssh_public_key": sshPubKey,
 		"node_ip":        nodeIP,
+		"tunnel_token":   tunnelToken, // permanent token for WebSocket tunnel auth
 	})
 }
 

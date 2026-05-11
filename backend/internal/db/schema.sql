@@ -408,3 +408,8 @@ CREATE TABLE IF NOT EXISTS database_tasks (
     updated_at      DATETIME NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_database_tasks_db ON database_tasks(database_id);
+
+-- 025: tunnel_token — permanent per-node token for WebSocket tunnel authentication
+-- Separate from join_token (which is single-use and cleared after CompleteJoin)
+ALTER TABLE nodes ADD COLUMN tunnel_token TEXT DEFAULT NULL;
+CREATE INDEX IF NOT EXISTS idx_nodes_tunnel_token ON nodes(tunnel_token);

@@ -482,8 +482,8 @@ func serve() {
 	// Cluster Tunnel (WebSocket) — token-based auth, no inner TLS needed (WSS handles it)
 	TunnelMgr.ValidateToken = func(token string) string {
 		var name string
-		// Look up the node by its join token
-		err := db.QueryRow(`SELECT name FROM nodes WHERE join_token = ? LIMIT 1`, token).Scan(&name)
+		// Look up node by its permanent tunnel_token (set during CompleteJoin)
+		err := db.QueryRow(`SELECT name FROM nodes WHERE tunnel_token = ? LIMIT 1`, token).Scan(&name)
 		if err != nil {
 			return ""
 		}
