@@ -242,7 +242,7 @@ func (h *DatabaseHandler) Get(w http.ResponseWriter, r *http.Request) {
 	h.getByID(w, r, projectID, dbID)
 }
 
-// POST /api/projects/{projectID}/databases/{databaseID}/backup
+// GET/POST /api/projects/{projectID}/databases/{databaseID}/backup
 func (h *DatabaseHandler) Backup(w http.ResponseWriter, r *http.Request) {
 	projectID, _ := strconv.ParseInt(r.PathValue("projectID"), 10, 64)
 	dbID, _ := strconv.ParseInt(r.PathValue("databaseID"), 10, 64)
@@ -251,17 +251,48 @@ func (h *DatabaseHandler) Backup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if r.Method == http.MethodPost {
+		// Background task flow
+		res, err := h.db.ExecContext(r.Context(),
+			`INSERT INTO database_tasks (database_id, task_type, status) VALUES (?, 'backup', 'pending')`,
+			dbID)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, errMap(err.Error()))
+			return
+		}
+		taskID, _ := res.LastInsertId()
+		deploy.EnqueueDatabaseTask(h.db, h.jwtSecret, taskID, dbID)
+		writeJSON(w, http.StatusAccepted, map[string]any{"task_id": taskID})
+		return
+	}
+
+	// GET flow: Synchronous backup and download (legacy support / direct links)
+	// We still create a task record for audit/logging purposes.
 	res, err := h.db.ExecContext(r.Context(),
-		`INSERT INTO database_tasks (database_id, task_type, status) VALUES (?, 'backup', 'pending')`,
+		`INSERT INTO database_tasks (database_id, task_type, status, started_at) VALUES (?, 'backup', 'running', datetime('now'))`,
 		dbID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, errMap(err.Error()))
 		return
 	}
 	taskID, _ := res.LastInsertId()
-	deploy.EnqueueDatabaseTask(h.db, h.jwtSecret, taskID, dbID)
 
-	writeJSON(w, http.StatusAccepted, map[string]any{"task_id": taskID})
+	// Use the zero-downtime streaming helper
+	// Note: We use false for the 'stop' parameter for GET backups to prevent application downtime.
+	w.Header().Set("Content-Type", "application/x-tar")
+	// Generate a nice filename
+	var dbName, dbType string
+	h.db.QueryRow(`SELECT name, db_type FROM databases WHERE id=?`, dbID).Scan(&dbName, &dbType)
+	downloadName := fmt.Sprintf("%s-%s-backup-%s.tar",
+		deploy.DBNetworkAlias(dbName), dbType, time.Now().UTC().Format("20060102-150405"))
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", downloadName))
+
+	if err := deploy.StreamDatabaseBackup(h.db, h.jwtSecret, dbID, false, w); err != nil {
+		h.db.Exec(`UPDATE database_tasks SET status='failed', error_message=?, finished_at=datetime('now') WHERE id=?`, err.Error(), taskID)
+		// Header already sent, cannot write JSON error.
+		return
+	}
+	h.db.Exec(`UPDATE database_tasks SET status='completed', progress=100, finished_at=datetime('now') WHERE id=?`, taskID)
 }
 
 // DELETE /api/projects/{projectID}/databases/{databaseID}

@@ -676,7 +676,7 @@ func serve() {
 				r.Put("/api/projects/{projectID}/databases/{databaseID}", dbH.Update)
 				r.Get("/api/projects/{projectID}/databases/{databaseID}/logs", dbH.GetLogs)
 
-				r.Post("/api/projects/{projectID}/databases/{databaseID}/backup", dbH.Backup)
+				r.HandleFunc("/api/projects/{projectID}/databases/{databaseID}/backup", dbH.Backup)
 				r.Post("/api/projects/{projectID}/databases/{databaseID}/restore", dbH.Restore)
 				r.Delete("/api/projects/{projectID}/databases/{databaseID}", dbH.Delete)
 				r.Post("/api/projects/{projectID}/databases/{databaseID}/start", dbH.Start)
