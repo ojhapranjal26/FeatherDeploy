@@ -487,6 +487,7 @@ func (h *NodeHandler) CompleteJoin(w http.ResponseWriter, r *http.Request) {
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"node_id":        nodeID,
+		"ca_cert_pem":   ca.CertPEM,
 		"node_cert_pem":  nodeCert.CertPEM,
 		"node_key_pem":   nodeCert.KeyPEM,  // node key sent only once
 		"encrypted_env":  encryptedEnv,     // decrypt with join token
