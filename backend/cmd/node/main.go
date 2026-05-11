@@ -26,6 +26,7 @@ import (
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/heartbeat"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/pki"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/coordination"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/netdaemon"
 )
 
 const (
