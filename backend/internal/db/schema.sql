@@ -391,3 +391,20 @@ CREATE INDEX IF NOT EXISTS idx_storages_created_by    ON storages(created_by);
 CREATE INDEX IF NOT EXISTS idx_storage_access_storage ON storage_access(storage_id);
 CREATE INDEX IF NOT EXISTS idx_storage_access_service ON storage_access(service_id);
 CREATE INDEX IF NOT EXISTS idx_storage_bw             ON storage_bandwidth(storage_id, service_id, period);
+-- 024: database_tasks — tracks background database operations (backup, restore, migrate)
+CREATE TABLE IF NOT EXISTS database_tasks (
+    id              INTEGER  PRIMARY KEY AUTOINCREMENT,
+    database_id     INTEGER  NOT NULL REFERENCES databases(id) ON DELETE CASCADE,
+    task_type       TEXT     NOT NULL CHECK(task_type IN ('backup','restore','migrate')),
+    status          TEXT     NOT NULL DEFAULT 'pending'
+                             CHECK(status IN ('pending','running','completed','failed')),
+    progress        INTEGER  NOT NULL DEFAULT 0,
+    artifact_path   TEXT     NOT NULL DEFAULT '',   -- path to .tar backup file
+    download_name   TEXT     NOT NULL DEFAULT '',   -- filename for user download
+    error_message   TEXT     NOT NULL DEFAULT '',
+    started_at      DATETIME,
+    finished_at     DATETIME,
+    created_at      DATETIME NOT NULL DEFAULT (datetime('now')),
+    updated_at      DATETIME NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_database_tasks_db ON database_tasks(database_id);

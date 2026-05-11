@@ -87,6 +87,9 @@ type deployJob struct {
 var (
 	queueOnce sync.Once
 	jobCh     chan deployJob
+
+	dbQueueOnce sync.Once
+	dbJobCh     chan databaseJob
 )
 
 // networkMu serializes all per-project network operations (create / rm / inspect)
@@ -211,6 +214,70 @@ func InitQueue(db *sql.DB, jwtSecret string, concurrency int) {
 		// This handles cases where the server was restarted or a job was dropped.
 		go janitor(db, jwtSecret)
 	})
+}
+
+type databaseJob struct {
+	db        *sql.DB
+	jwtSecret string
+	taskID    int64
+	dbID      int64
+}
+
+func InitDatabaseQueue(db *sql.DB, jwtSecret string, concurrency int) {
+	dbQueueOnce.Do(func() {
+		if concurrency < 1 {
+			concurrency = 1
+		}
+		dbJobCh = make(chan databaseJob, 512)
+		for i := 0; i < concurrency; i++ {
+			go safeDatabaseWorker()
+		}
+		slog.Info("database task queue started", "workers", concurrency)
+	})
+}
+
+func safeDatabaseWorker() {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("database worker panic recovered — respawning", "panic", r)
+			go safeDatabaseWorker()
+		}
+	}()
+
+	for job := range dbJobCh {
+		// Transition: pending → running
+		job.db.Exec(`UPDATE database_tasks SET status='running', started_at=datetime('now'), updated_at=datetime('now') WHERE id=?`, job.taskID)
+
+		err := RunDatabaseTask(job.db, job.jwtSecret, job.taskID, job.dbID)
+		
+		finishedAt := time.Now().UTC().Format("2006-01-02 15:04:05")
+		if err != nil {
+			job.db.Exec(`UPDATE database_tasks SET status='failed', error_message=?, finished_at=?, updated_at=datetime('now') WHERE id=?`, err.Error(), finishedAt, job.taskID)
+		} else {
+			job.db.Exec(`UPDATE database_tasks SET status='completed', progress=100, finished_at=?, updated_at=datetime('now') WHERE id=?`, finishedAt, job.taskID)
+		}
+	}
+}
+
+func EnqueueDatabaseTask(db *sql.DB, jwtSecret string, taskID, dbID int64) {
+	if dbJobCh == nil {
+		go func() {
+			finishedAt := time.Now().UTC().Format("2006-01-02 15:04:05")
+			db.Exec(`UPDATE database_tasks SET status='running', started_at=datetime('now'), updated_at=datetime('now') WHERE id=?`, taskID)
+			err := RunDatabaseTask(db, jwtSecret, taskID, dbID)
+			if err != nil {
+				db.Exec(`UPDATE database_tasks SET status='failed', error_message=?, finished_at=?, updated_at=datetime('now') WHERE id=?`, err.Error(), finishedAt, taskID)
+			} else {
+				db.Exec(`UPDATE database_tasks SET status='completed', progress=100, finished_at=?, updated_at=datetime('now') WHERE id=?`, finishedAt, taskID)
+			}
+		}()
+		return
+	}
+	select {
+	case dbJobCh <- databaseJob{db: db, jwtSecret: jwtSecret, taskID: taskID, dbID: dbID}:
+	default:
+		db.Exec(`UPDATE database_tasks SET status='failed', error_message='database task queue is full', finished_at=datetime('now') WHERE id=?`, taskID)
+	}
 }
 
 func janitor(db *sql.DB, jwtSecret string) {
@@ -2476,7 +2543,164 @@ func DeleteServiceRuntime(db *sql.DB, projectID, svcID int64) error {
 	return nil
 }
 
-func CreateDatabaseBackup(db *sql.DB, jwtSecret string, dbID int64) (string, string, error) {
+func DatabaseBackupDir() string {
+	if d := os.Getenv("DATABASE_BACKUP_DIR"); d != "" {
+		return d
+	}
+	return "/var/lib/featherdeploy/backups/databases"
+}
+
+func RunDatabaseTask(db *sql.DB, jwtSecret string, taskID, dbID int64) error {
+	var taskType, artifactPath string
+	err := db.QueryRow(`SELECT task_type, artifact_path FROM database_tasks WHERE id=?`, taskID).Scan(&taskType, &artifactPath)
+	if err != nil {
+		return err
+	}
+
+	switch taskType {
+	case "backup":
+		// User downloads are zero-downtime (don't stop the container)
+		path, name, err := CreateDatabaseBackup(db, jwtSecret, dbID, false)
+		if err != nil {
+			return err
+		}
+		// Move to persistent backup dir
+		finalDir := filepath.Join(DatabaseBackupDir(), strconv.FormatInt(dbID, 10))
+		if err := os.MkdirAll(finalDir, 0750); err != nil {
+			return fmt.Errorf("create backup dir: %w", err)
+		}
+		finalPath := filepath.Join(finalDir, name)
+		if err := os.Rename(path, finalPath); err != nil {
+			// fallback to copy if rename fails (e.g. cross-filesystem)
+			if err := copyFile(path, finalPath); err != nil {
+				return err
+			}
+			os.Remove(path)
+		}
+		db.Exec(`UPDATE database_tasks SET artifact_path=?, download_name=? WHERE id=?`, finalPath, name, taskID)
+		return nil
+
+	case "restore":
+		if artifactPath == "" {
+			return fmt.Errorf("no artifact path provided for restore")
+		}
+		return RestoreDatabaseBackup(db, jwtSecret, dbID, artifactPath)
+
+	case "migrate":
+		return migrateDatabaseDataBackground(db, jwtSecret, taskID, dbID)
+	}
+
+	return fmt.Errorf("unknown task type: %s", taskType)
+}
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	_, err = io.Copy(out, in)
+	return err
+}
+
+func migrateDatabaseDataBackground(db *sql.DB, secret string, taskID, dbID int64) error {
+	var oldNodeID string
+	err := db.QueryRow(`SELECT node_id FROM databases WHERE id=?`, dbID).Scan(&oldNodeID)
+	if err != nil {
+		return err
+	}
+	if oldNodeID == "" || oldNodeID == "main" {
+		return nil // nothing to migrate
+	}
+
+	var ip string
+	var port int
+	err = db.QueryRow(`SELECT ip, port FROM nodes WHERE node_id=?`, oldNodeID).Scan(&ip, &port)
+	if err != nil {
+		return fmt.Errorf("old node %q not found", oldNodeID)
+	}
+
+	caFile, _ := os.ReadFile("/etc/featherdeploy/ca.crt")
+	certFile, _ := os.ReadFile("/etc/featherdeploy/node.crt")
+	keyFile, _ := os.ReadFile("/etc/featherdeploy/node.key")
+	tlsCfg, _ := pki.TLSConfig(string(certFile), string(keyFile), string(caFile))
+	client := &http.Client{
+		Transport: &http.Transport{TLSClientConfig: tlsCfg},
+		Timeout:   0, // Long-lived transfer
+	}
+
+	// 1. Trigger backup on old node
+	payload := map[string]any{
+		"db_id":      dbID,
+		"jwt_secret": secret,
+	}
+	body, _ := json.Marshal(payload)
+	url := fmt.Sprintf("https://%s:%d/api/node/db-backup", ip, port)
+	resp, err := client.Post(url, "application/json", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("backup request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("backup failed (%d): %s", resp.StatusCode, b)
+	}
+
+	// 2. Save to temp file with progress tracking
+	tmp, err := os.CreateTemp("", "db-mig-*.tar")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	
+	totalSize := resp.ContentLength
+	
+	// Create a wrapper to track progress
+	pw := &progressWriter{
+		total: totalSize,
+		onProgress: func(pct int) {
+			db.Exec(`UPDATE database_tasks SET progress=? WHERE id=?`, pct, taskID)
+		},
+	}
+	
+	if _, err := io.Copy(tmp, io.TeeReader(resp.Body, pw)); err != nil {
+		tmp.Close()
+		return err
+	}
+	tmp.Close()
+
+	// 3. Restore locally
+	return RestoreDatabaseBackup(db, secret, dbID, tmp.Name())
+}
+
+type progressWriter struct {
+	total      int64
+	written    int64
+	lastPct    int
+	onProgress func(int)
+}
+
+func (pw *progressWriter) Write(p []byte) (int, error) {
+	n := len(p)
+	pw.written += int64(n)
+	if pw.total > 0 {
+		pct := int(float64(pw.written) / float64(pw.total) * 100)
+		if pct > pw.lastPct {
+			pw.lastPct = pct
+			if pw.onProgress != nil {
+				pw.onProgress(pct)
+			}
+		}
+	}
+	return n, nil
+}
+
+func CreateDatabaseBackup(db *sql.DB, jwtSecret string, dbID int64, stop bool) (string, string, error) {
 	var name, dbType, status string
 	err := db.QueryRow(
 		`SELECT name, db_type, status FROM databases WHERE id=?`, dbID,
@@ -2485,7 +2709,7 @@ func CreateDatabaseBackup(db *sql.DB, jwtSecret string, dbID int64) (string, str
 		return "", "", fmt.Errorf("load database backup metadata: %w", err)
 	}
 
-	wasRunning := status == "running" && dbType != "sqlite"
+	wasRunning := status == "running" && dbType != "sqlite" && stop
 	if wasRunning {
 		if err := StopDatabase(db, dbID); err != nil {
 			return "", "", err
@@ -2501,28 +2725,48 @@ func CreateDatabaseBackup(db *sql.DB, jwtSecret string, dbID int64) (string, str
 	}
 	defer tmpFile.Close()
 
-	cmd := podmanCmd("volume", "export", dbVolumeName(dbID))
-	cmd.Stdout = tmpFile
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		os.Remove(tmpFile.Name()) //nolint
-		if wasRunning {
-			_ = StartDatabase(db, jwtSecret, dbID)
-		}
-		return "", "", fmt.Errorf("export database volume: %v — %s", err, strings.TrimSpace(stderr.String()))
-	}
-
-	if wasRunning {
-		if err := StartDatabase(db, jwtSecret, dbID); err != nil {
-			os.Remove(tmpFile.Name()) //nolint
-			return "", "", fmt.Errorf("restart database after backup: %w", err)
-		}
+	if err := StreamDatabaseBackup(db, jwtSecret, dbID, stop, tmpFile); err != nil {
+		os.Remove(tmpFile.Name())
+		return "", "", err
 	}
 
 	downloadName := fmt.Sprintf("%s-%s-backup-%s.tar",
 		DBNetworkAlias(name), dbType, time.Now().UTC().Format("20060102-150405"))
+	
+	fi, _ := tmpFile.Stat()
+	slog.Info("database backup file created", "db_id", dbID, "size", fi.Size(), "name", downloadName)
+
 	return tmpFile.Name(), downloadName, nil
+}
+
+func StreamDatabaseBackup(db *sql.DB, jwtSecret string, dbID int64, stop bool, out io.Writer) error {
+	var name, dbType, status string
+	err := db.QueryRow(
+		`SELECT name, db_type, status FROM databases WHERE id=?`, dbID,
+	).Scan(&name, &dbType, &status)
+	if err != nil {
+		return fmt.Errorf("load database backup metadata: %w", err)
+	}
+
+	wasRunning := status == "running" && dbType != "sqlite" && stop
+	if wasRunning {
+		if err := StopDatabase(db, dbID); err != nil {
+			return err
+		}
+		defer func() {
+			_ = StartDatabase(db, jwtSecret, dbID)
+		}()
+	}
+
+	cmd := podmanCmd("volume", "export", dbVolumeName(dbID))
+	cmd.Stdout = out
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("export database volume: %v — %s", err, strings.TrimSpace(stderr.String()))
+	}
+
+	return nil
 }
 
 // RestoreDatabaseBackup replaces the database volume's contents with the
@@ -2541,9 +2785,9 @@ func RestoreDatabaseBackup(db *sql.DB, jwtSecret string, dbID int64, backupPath 
 	if err != nil {
 		return fmt.Errorf("load database metadata: %w", err)
 	}
-	if dbType == "sqlite" {
-		return fmt.Errorf("restore is not supported for SQLite databases; replace the volume file directly")
-	}
+
+	fi, _ := os.Stat(backupPath)
+	slog.Info("database restore starting", "db_id", dbID, "size", fi.Size())
 
 	wasRunning := status == "running"
 	if wasRunning {

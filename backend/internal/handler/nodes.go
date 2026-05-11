@@ -910,6 +910,24 @@ echo "==> Running node join wizard..."
 exec "$NODE_BINARY" join --main="$MAIN_URL" --token="$JOIN_TOKEN"
 `
 
+// POST /api/node/db-backup (internal mTLS route)
+func (h *NodeHandler) DatabaseBackupStream(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		DBID      int64  `json:"db_id"`
+		JWTSecret string `json:"jwt_secret"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errMap("invalid request"))
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/x-tar")
+	// Migration backup ALWAYS stops the container to ensure 100% data consistency
+	if err := deploy.StreamDatabaseBackup(h.db, req.JWTSecret, req.DBID, true, w); err != nil {
+		slog.Error("node: db backup stream failed", "db_id", req.DBID, "err", err)
+	}
+}
+
 func renderJoinScript(mainURL, token, caCert, sshPubKey string) (string, error) {
 	tmpl, err := template.New("join").Parse(joinScriptTmpl)
 	if err != nil {

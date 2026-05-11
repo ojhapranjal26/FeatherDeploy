@@ -267,6 +267,7 @@ func serve() {
 		}
 	}
 	deploy.InitQueue(db, *jwtSecret, workers)
+	deploy.InitDatabaseQueue(db, *jwtSecret, 1) // sequential DB operations to prevent disk I/O saturation
 	
 	// ─── Coordination: Etcd Cluster ───────────────────────────────────────────
 	etcdEndpoints := os.Getenv("ETCD_ENDPOINTS")
@@ -675,7 +676,7 @@ func serve() {
 				r.Put("/api/projects/{projectID}/databases/{databaseID}", dbH.Update)
 				r.Get("/api/projects/{projectID}/databases/{databaseID}/logs", dbH.GetLogs)
 
-				r.Get("/api/projects/{projectID}/databases/{databaseID}/backup", dbH.Backup)
+				r.Post("/api/projects/{projectID}/databases/{databaseID}/backup", dbH.Backup)
 				r.Post("/api/projects/{projectID}/databases/{databaseID}/restore", dbH.Restore)
 				r.Delete("/api/projects/{projectID}/databases/{databaseID}", dbH.Delete)
 				r.Post("/api/projects/{projectID}/databases/{databaseID}/start", dbH.Start)
@@ -683,6 +684,14 @@ func serve() {
 				r.Post("/api/projects/{projectID}/databases/{databaseID}/stop", dbH.Stop)
 				r.Post("/api/projects/{projectID}/databases/{databaseID}/password", dbH.ChangePassword)
 				r.Post("/api/projects/{projectID}/databases/{databaseID}/public", dbH.TogglePublic)
+
+				r.Get("/api/projects/{projectID}/databases/{databaseID}/tasks", dbH.ListTasks)
+				r.Get("/api/projects/{projectID}/databases/{databaseID}/tasks/{taskID}", dbH.GetTask)
+				r.Get("/api/projects/{projectID}/databases/{databaseID}/tasks/{taskID}/download", dbH.DownloadBackup)
+
+				r.Post("/api/projects/{projectID}/databases/{databaseID}/restore/upload/init", dbH.RestoreUploadInit)
+				r.Put("/api/projects/{projectID}/databases/{databaseID}/restore/upload/{uploadID}/part/{partNum}", dbH.RestoreUploadPart)
+				r.Post("/api/projects/{projectID}/databases/{databaseID}/restore/upload/{uploadID}/complete", dbH.RestoreUploadComplete)
 
 				// ── QR approve (authenticated) ────────────────────────────
 				r.Post("/api/auth/qr/{token}/approve", qrH.Approve)

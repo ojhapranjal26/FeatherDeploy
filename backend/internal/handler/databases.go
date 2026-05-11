@@ -239,47 +239,26 @@ func (h *DatabaseHandler) Get(w http.ResponseWriter, r *http.Request) {
 	h.getByID(w, r, projectID, dbID)
 }
 
-// GET /api/projects/{projectID}/databases/{databaseID}/backup
+// POST /api/projects/{projectID}/databases/{databaseID}/backup
 func (h *DatabaseHandler) Backup(w http.ResponseWriter, r *http.Request) {
-	projectID, err := strconv.ParseInt(r.PathValue("projectID"), 10, 64)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errMap("invalid projectID"))
-		return
-	}
-	dbID, err := strconv.ParseInt(r.PathValue("databaseID"), 10, 64)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errMap("invalid databaseID"))
-		return
-	}
+	projectID, _ := strconv.ParseInt(r.PathValue("projectID"), 10, 64)
+	dbID, _ := strconv.ParseInt(r.PathValue("databaseID"), 10, 64)
 	if !h.databaseExists(r, projectID, dbID) {
 		writeJSON(w, http.StatusNotFound, errMap("database not found"))
 		return
 	}
 
-	backupPath, downloadName, err := deploy.CreateDatabaseBackup(h.db, h.jwtSecret, dbID)
+	res, err := h.db.ExecContext(r.Context(),
+		`INSERT INTO database_tasks (database_id, task_type, status) VALUES (?, 'backup', 'pending')`,
+		dbID)
 	if err != nil {
-		slog.Error("backup database", "db_id", dbID, "err", err)
-		writeJSON(w, http.StatusInternalServerError, errMap("failed to create database backup"))
+		writeJSON(w, http.StatusInternalServerError, errMap(err.Error()))
 		return
 	}
-	defer os.Remove(backupPath) //nolint
+	taskID, _ := res.LastInsertId()
+	deploy.EnqueueDatabaseTask(h.db, h.jwtSecret, taskID, dbID)
 
-	f, err := os.Open(backupPath)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, errMap("failed to read database backup"))
-		return
-	}
-	defer f.Close()
-
-	stat, err := f.Stat()
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, errMap("failed to stat database backup"))
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/x-tar")
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", downloadName))
-	http.ServeContent(w, r, downloadName, stat.ModTime(), f)
+	writeJSON(w, http.StatusAccepted, map[string]any{"task_id": taskID})
 }
 
 // DELETE /api/projects/{projectID}/databases/{databaseID}
@@ -317,61 +296,297 @@ func (h *DatabaseHandler) Delete(w http.ResponseWriter, r *http.Request) {
 }
 
 // POST /api/projects/{projectID}/databases/{databaseID}/restore
-// Accepts a multipart/form-data upload with a single "file" field containing
-// a .tar volume backup (as produced by the Backup endpoint). The database is
-// stopped, the volume is replaced with the backup content, then the database
-// is restarted.
 func (h *DatabaseHandler) Restore(w http.ResponseWriter, r *http.Request) {
-	projectID, err := strconv.ParseInt(r.PathValue("projectID"), 10, 64)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errMap("invalid projectID"))
-		return
-	}
-	dbID, err := strconv.ParseInt(r.PathValue("databaseID"), 10, 64)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errMap("invalid databaseID"))
-		return
-	}
+	projectID, _ := strconv.ParseInt(r.PathValue("projectID"), 10, 64)
+	dbID, _ := strconv.ParseInt(r.PathValue("databaseID"), 10, 64)
 	if !h.databaseExists(r, projectID, dbID) {
 		writeJSON(w, http.StatusNotFound, errMap("database not found"))
 		return
 	}
 
-	// Limit the multipart parse to 32 MB in-memory; the rest spills to disk
-	// automatically, so large backups are handled without OOM risk.
-	if err := r.ParseMultipartForm(32 << 20); err != nil {
-		writeJSON(w, http.StatusBadRequest, errMap("failed to parse multipart form"))
-		return
-	}
-	uploadFile, _, err := r.FormFile("file")
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errMap("missing 'file' field in form"))
-		return
-	}
-	defer uploadFile.Close()
+	var artifactPath string
 
-	// Stream the upload to a temp file so we can pass a path to podman.
-	tmp, err := os.CreateTemp("", fmt.Sprintf("fd-db-%d-restore-*.tar", dbID))
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, errMap("failed to create temp file"))
-		return
-	}
-	defer os.Remove(tmp.Name())
-	if _, err := io.Copy(tmp, uploadFile); err != nil {
-		tmp.Close()
-		writeJSON(w, http.StatusInternalServerError, errMap("failed to write backup data"))
-		return
-	}
-	tmp.Close()
+	// Support both multipart form (legacy/small files) and JSON with artifact_path/upload_id
+	if strings.Contains(r.Header.Get("Content-Type"), "multipart/form-data") {
+		if err := r.ParseMultipartForm(32 << 20); err != nil {
+			writeJSON(w, http.StatusBadRequest, errMap("failed to parse multipart form"))
+			return
+		}
+		uploadFile, _, err := r.FormFile("file")
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, errMap("missing 'file' field"))
+			return
+		}
+		defer uploadFile.Close()
 
-	if err := deploy.RestoreDatabaseBackup(h.db, h.jwtSecret, dbID, tmp.Name()); err != nil {
-		slog.Error("restore database", "db_id", dbID, "err", err)
-		writeJSON(w, http.StatusInternalServerError, errMap("failed to restore database: "+err.Error()))
+		tmp, err := os.CreateTemp("", "db-restore-*.tar")
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, errMap("could not create temp file"))
+			return
+		}
+		defer tmp.Close()
+		if _, err := io.Copy(tmp, uploadFile); err != nil {
+			os.Remove(tmp.Name())
+			writeJSON(w, http.StatusInternalServerError, errMap("failed to save upload"))
+			return
+		}
+		artifactPath = tmp.Name()
+	} else {
+		var body struct {
+			ArtifactPath string `json:"artifact_path"`
+			UploadID     string `json:"upload_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSON(w, http.StatusBadRequest, errMap("invalid JSON"))
+			return
+		}
+		if body.UploadID != "" {
+			artifactPath = filepath.Join(DatabaseUploadDir(), body.UploadID, "restored.tar")
+			if _, err := os.Stat(artifactPath); err != nil {
+				writeJSON(w, http.StatusBadRequest, errMap("upload not found or not completed"))
+				return
+			}
+		} else {
+			artifactPath = body.ArtifactPath
+		}
+	}
+
+	if artifactPath == "" {
+		writeJSON(w, http.StatusBadRequest, errMap("no backup file provided"))
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "restored"})
+
+	res, err := h.db.ExecContext(r.Context(),
+		`INSERT INTO database_tasks (database_id, task_type, status, artifact_path) VALUES (?, 'restore', 'pending', ?)`,
+		dbID, artifactPath)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errMap(err.Error()))
+		return
+	}
+	taskID, _ := res.LastInsertId()
+	deploy.EnqueueDatabaseTask(h.db, h.jwtSecret, taskID, dbID)
+
+	writeJSON(w, http.StatusAccepted, map[string]any{"task_id": taskID})
 }
 
+// GET /api/projects/{projectID}/databases/{databaseID}/tasks
+func (h *DatabaseHandler) ListTasks(w http.ResponseWriter, r *http.Request) {
+	projectID, _ := strconv.ParseInt(r.PathValue("projectID"), 10, 64)
+	dbID, _ := strconv.ParseInt(r.PathValue("databaseID"), 10, 64)
+	if !h.databaseExists(r, projectID, dbID) {
+		writeJSON(w, http.StatusNotFound, errMap("database not found"))
+		return
+	}
+
+	rows, err := h.db.QueryContext(r.Context(),
+		`SELECT id, database_id, task_type, status, progress, artifact_path, download_name, error_message, started_at, finished_at, created_at, updated_at
+		 FROM database_tasks WHERE database_id=? ORDER BY created_at DESC LIMIT 50`, dbID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errMap(err.Error()))
+		return
+	}
+	defer rows.Close()
+
+	tasks := []map[string]any{}
+	for rows.Next() {
+		var id, dbid int64
+		var ttype, status, artPath, downName, errMsg string
+		var progress int
+		var sa, fa, ca, ua sql.NullString
+		rows.Scan(&id, &dbid, &ttype, &status, &progress, &artPath, &downName, &errMsg, &sa, &fa, &ca, &ua)
+		tasks = append(tasks, map[string]any{
+			"id":            id,
+			"database_id":   dbid,
+			"task_type":     ttype,
+			"status":        status,
+			"progress":      progress,
+			"artifact_path": artPath,
+			"download_name": downName,
+			"error_message": errMsg,
+			"started_at":    sa.String,
+			"finished_at":   fa.String,
+			"created_at":    ca.String,
+			"updated_at":    ua.String,
+		})
+	}
+	writeJSON(w, http.StatusOK, tasks)
+}
+
+// GET /api/projects/{projectID}/databases/{databaseID}/tasks/{taskID}
+func (h *DatabaseHandler) GetTask(w http.ResponseWriter, r *http.Request) {
+	projectID, _ := strconv.ParseInt(r.PathValue("projectID"), 10, 64)
+	dbID, _ := strconv.ParseInt(r.PathValue("databaseID"), 10, 64)
+	taskID, _ := strconv.ParseInt(r.PathValue("taskID"), 10, 64)
+	if !h.databaseExists(r, projectID, dbID) {
+		writeJSON(w, http.StatusNotFound, errMap("database not found"))
+		return
+	}
+
+	var id, dbid int64
+	var ttype, status, artPath, downName, errMsg string
+	var progress int
+	var sa, fa, ca, ua sql.NullString
+	err := h.db.QueryRowContext(r.Context(),
+		`SELECT id, database_id, task_type, status, progress, artifact_path, download_name, error_message, started_at, finished_at, created_at, updated_at
+		 FROM database_tasks WHERE id=? AND database_id=?`, taskID, dbID).
+		Scan(&id, &dbid, &ttype, &status, &progress, &artPath, &downName, &errMsg, &sa, &fa, &ca, &ua)
+	if err == sql.ErrNoRows {
+		writeJSON(w, http.StatusNotFound, errMap("task not found"))
+		return
+	}
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errMap(err.Error()))
+		return
+	}
+	task := map[string]any{
+		"id":            id,
+		"database_id":   dbid,
+		"task_type":     ttype,
+		"status":        status,
+		"progress":      progress,
+		"artifact_path": artPath,
+		"download_name": downName,
+		"error_message": errMsg,
+		"started_at":    sa.String,
+		"finished_at":   fa.String,
+		"created_at":    ca.String,
+		"updated_at":    ua.String,
+	}
+	writeJSON(w, http.StatusOK, task)
+}
+
+// GET /api/projects/{projectID}/databases/{databaseID}/tasks/{taskID}/download
+func (h *DatabaseHandler) DownloadBackup(w http.ResponseWriter, r *http.Request) {
+	projectID, _ := strconv.ParseInt(r.PathValue("projectID"), 10, 64)
+	dbID, _ := strconv.ParseInt(r.PathValue("databaseID"), 10, 64)
+	taskID, _ := strconv.ParseInt(r.PathValue("taskID"), 10, 64)
+	if !h.databaseExists(r, projectID, dbID) {
+		writeJSON(w, http.StatusNotFound, errMap("database not found"))
+		return
+	}
+
+	var artPath, downName string
+	err := h.db.QueryRowContext(r.Context(),
+		`SELECT artifact_path, download_name FROM database_tasks WHERE id=? AND database_id=? AND status='completed' AND task_type='backup'`,
+		taskID, dbID).Scan(&artPath, &downName)
+	if err == sql.ErrNoRows {
+		writeJSON(w, http.StatusNotFound, errMap("backup not ready or not found"))
+		return
+	}
+
+	f, err := os.Open(artPath)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errMap("could not open backup file"))
+		return
+	}
+	defer f.Close()
+
+	info, _ := f.Stat()
+	w.Header().Set("Content-Type", "application/x-tar")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", downName))
+	http.ServeContent(w, r, downName, info.ModTime(), f)
+}
+
+// Multipart upload for restores
+
+func DatabaseUploadDir() string {
+	d := os.Getenv("DATABASE_UPLOAD_DIR")
+	if d == "" {
+		d = "/var/lib/featherdeploy/backups/uploads"
+	}
+	return d
+}
+
+// POST /api/projects/{projectID}/databases/{databaseID}/restore/upload/init
+func (h *DatabaseHandler) RestoreUploadInit(w http.ResponseWriter, r *http.Request) {
+	uploadID := genSecurePassword(32)
+	uploadDir := filepath.Join(DatabaseUploadDir(), uploadID)
+	if err := os.MkdirAll(uploadDir, 0750); err != nil {
+		writeJSON(w, http.StatusInternalServerError, errMap("could not create upload dir"))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"upload_id": uploadID})
+}
+
+// PUT /api/projects/{projectID}/databases/{databaseID}/restore/upload/{uploadID}/part/{partNum}
+func (h *DatabaseHandler) RestoreUploadPart(w http.ResponseWriter, r *http.Request) {
+	uploadID := chi.URLParam(r, "uploadID")
+	partNum := chi.URLParam(r, "partNum")
+	pn, err := strconv.Atoi(partNum)
+	if err != nil || pn < 1 {
+		writeJSON(w, http.StatusBadRequest, errMap("invalid part number"))
+		return
+	}
+
+	uploadDir := filepath.Join(DatabaseUploadDir(), uploadID)
+	if _, err := os.Stat(uploadDir); os.IsNotExist(err) {
+		writeJSON(w, http.StatusNotFound, errMap("upload session not found"))
+		return
+	}
+
+	partPath := filepath.Join(uploadDir, fmt.Sprintf("part-%05d", pn))
+	f, err := os.Create(partPath)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errMap("could not create part file"))
+		return
+	}
+	defer f.Close()
+
+	if _, err := io.Copy(f, r.Body); err != nil {
+		writeJSON(w, http.StatusInternalServerError, errMap("failed to save part"))
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// POST /api/projects/{projectID}/databases/{databaseID}/restore/upload/{uploadID}/complete
+func (h *DatabaseHandler) RestoreUploadComplete(w http.ResponseWriter, r *http.Request) {
+	uploadID := chi.URLParam(r, "uploadID")
+	uploadDir := filepath.Join(DatabaseUploadDir(), uploadID)
+	
+	entries, err := os.ReadDir(uploadDir)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, errMap("upload session not found"))
+		return
+	}
+
+	var parts []string
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "part-") {
+			parts = append(parts, filepath.Join(uploadDir, e.Name()))
+		}
+	}
+	sort.Strings(parts)
+	if len(parts) == 0 {
+		writeJSON(w, http.StatusBadRequest, errMap("no parts uploaded"))
+		return
+	}
+
+	finalPath := filepath.Join(uploadDir, "restored.tar")
+	f, err := os.Create(finalPath)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errMap("could not create final file"))
+		return
+	}
+	defer f.Close()
+
+	for _, p := range parts {
+		pf, err := os.Open(p)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, errMap("failed to open part"))
+			return
+		}
+		if _, err := io.Copy(f, pf); err != nil {
+			pf.Close()
+			writeJSON(w, http.StatusInternalServerError, errMap("failed to assemble parts"))
+			return
+		}
+		pf.Close()
+		os.Remove(p)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
+}
 // POST /api/projects/{projectID}/databases/{databaseID}/start
 func (h *DatabaseHandler) Start(w http.ResponseWriter, r *http.Request) {
 	dbID, err := strconv.ParseInt(r.PathValue("databaseID"), 10, 64)
