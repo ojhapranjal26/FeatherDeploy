@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -169,39 +170,34 @@ func runJoin(args []string) {
 	// Connectivity check: ensure we can reach the main server's WebSocket tunnel
 	wsURL := strings.Replace(mainURL, "http", "ws", 1) + "/api/cluster/tunnel"
 	fmt.Printf("==> Establishing secure tunnel to brain at %s...\n", wsURL)
-	
-	tunnelMgr := netdaemon.NewTunnelManager()
-	caPEM, _ := os.ReadFile(caCertFile)
-	certPEM, _ := os.ReadFile(nodeCert)
-	keyPEM, _ := os.ReadFile(nodeKey)
-	tunnelTLSCfg, err := pki.TLSConfig(string(certPEM), string(keyPEM), string(caPEM))
-	if err != nil {
-		fmt.Printf("  WARNING: TLS setup failed: %v\n", err)
-	} else {
-		// Start a temporary tunnel client
-		ctx, cancel := context.WithCancel(context.Background())
-		go tunnelMgr.StartClient(ctx, wsURL, hostname(), tunnelTLSCfg)
-		
-		// Wait a bit for connection
-		time.Sleep(3 * time.Second)
-		
-		// Setup local proxies to the brain's ports
-		tunnelMgr.ProxyNodeToBrain(4001, 4001)
-		tunnelMgr.ProxyNodeToBrain(4002, 4002)
-		tunnelMgr.ProxyNodeToBrain(2379, 2379)
-		tunnelMgr.ProxyNodeToBrain(2380, 2380)
 
-		fmt.Println("==> Checking connectivity through tunnel...")
-		client := &http.Client{Timeout: 5 * time.Second}
-		if resp, err := client.Get("http://127.0.0.1:4001/readyz"); err != nil {
-			fmt.Printf("  WARNING: cannot reach main rqlite via tunnel: %v\n", err)
-		} else {
-			resp.Body.Close()
-			fmt.Println("  ✓ Rqlite connectivity confirmed via tunnel")
-		}
-		
-		cancel() // Stop temporary tunnel
+	tunnelMgr := netdaemon.NewTunnelManager()
+	
+	// Use a simple TLS config that trusts the OS cert pool (for the outer WSS)
+	tunnelTLSCfg := &tls.Config{InsecureSkipVerify: true}
+	
+	ctx, cancel := context.WithCancel(context.Background())
+	go tunnelMgr.StartClient(ctx, wsURL, hostname(), token, tunnelTLSCfg)
+
+	// Wait for connection to establish
+	time.Sleep(4 * time.Second)
+
+	// Setup local proxies so this node can reach the brain's services via the tunnel
+	tunnelMgr.ProxyNodeToBrain(4001, 4001)
+	tunnelMgr.ProxyNodeToBrain(4002, 4002)
+	tunnelMgr.ProxyNodeToBrain(2379, 2379)
+	tunnelMgr.ProxyNodeToBrain(2380, 2380)
+
+	fmt.Println("==> Checking connectivity through tunnel...")
+	httpClient := &http.Client{Timeout: 5 * time.Second}
+	if resp, err := httpClient.Get("http://127.0.0.1:4001/readyz"); err != nil {
+		fmt.Printf("  WARNING: cannot reach main rqlite via tunnel: %v\n", err)
+	} else {
+		resp.Body.Close()
+		fmt.Println("  ✓ Rqlite connectivity confirmed via tunnel")
 	}
+
+	cancel() // Stop temporary tunnel (the serve service will re-establish it)
 
 	writeRqliteService(nodeID, rqliteJoinAddr, nodeIP)
 	writeEtcdService(nodeID, etcdMain, nodeIP)
@@ -271,32 +267,26 @@ func runServe() {
 	}
 
 	// ─── FeatherTunnel: Reverse Tunneling ──────────────────────────────────────
-	// Dial outbound to the Brain on port 7443 and establish a persistent tunnel.
-	// This allows the Brain to reach this node's services without inbound firewall rules.
 	tunnelMgr := netdaemon.NewTunnelManager()
 	mainURL := ""
 	if data, err := os.ReadFile(configDir + "/main_url"); err == nil {
 		mainURL = strings.TrimSpace(string(data))
 	}
-	if mainURL != "" {
+	nodeToken := ""
+	if data, err := os.ReadFile(configDir + "/join_token"); err == nil {
+		nodeToken = strings.TrimSpace(string(data))
+	}
+	if mainURL != "" && nodeToken != "" {
 		wsURL := strings.Replace(mainURL, "http", "ws", 1) + "/api/cluster/tunnel"
-		
-		caPEM, _ := os.ReadFile(caCertFile)
-		certPEM, _ := os.ReadFile(nodeCert)
-		keyPEM, _ := os.ReadFile(nodeKey)
-		tunnelTLSCfg, err := pki.TLSConfig(string(certPEM), string(keyPEM), string(caPEM))
-		if err != nil {
-			slog.Error("tunnel: tls setup failed", "err", err)
-		} else {
-			slog.Info("tunnel client: connecting to brain", "url", wsURL)
-			go tunnelMgr.StartClient(context.Background(), wsURL, myID, tunnelTLSCfg)
-			
-			// Setup persistent proxies to the brain
-			tunnelMgr.ProxyNodeToBrain(4001, 4001)
-			tunnelMgr.ProxyNodeToBrain(4002, 4002)
-			tunnelMgr.ProxyNodeToBrain(2379, 2379)
-			tunnelMgr.ProxyNodeToBrain(2380, 2380)
-		}
+		tunnelTLSCfg := &tls.Config{InsecureSkipVerify: true}
+		slog.Info("tunnel client: connecting to brain", "url", wsURL, "node", myID)
+		go tunnelMgr.StartClient(context.Background(), wsURL, myID, nodeToken, tunnelTLSCfg)
+
+		// Setup persistent proxies to the brain's services
+		tunnelMgr.ProxyNodeToBrain(4001, 4001)
+		tunnelMgr.ProxyNodeToBrain(4002, 4002)
+		tunnelMgr.ProxyNodeToBrain(2379, 2379)
+		tunnelMgr.ProxyNodeToBrain(2380, 2380)
 	}
 
 	r := chi.NewRouter()

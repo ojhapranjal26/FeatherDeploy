@@ -479,9 +479,17 @@ func serve() {
 	r.Get("/api/nodes/server-binary", nodeH.ServerBinaryDownload)
 	r.Get("/api/nodes/ca-cert", nodeH.CACert)
 	
-	// Cluster Tunnel (WebSocket)
-	caCertData, _ := os.ReadFile("/etc/featherdeploy/ca.crt")
-	r.Get("/api/cluster/tunnel", TunnelMgr.HTTPHandler(string(caCertData)))
+	// Cluster Tunnel (WebSocket) — token-based auth, no inner TLS needed (WSS handles it)
+	TunnelMgr.ValidateToken = func(token string) string {
+		var name string
+		// Look up the node by its join token
+		err := db.QueryRow(`SELECT name FROM nodes WHERE join_token = ? LIMIT 1`, token).Scan(&name)
+		if err != nil {
+			return ""
+		}
+		return name
+	}
+	r.Get("/api/cluster/tunnel", TunnelMgr.HTTPHandler())
 
 	// ── Storage Object API — service key auth (X-Storage-Key), no JWT required ───
 	// Services (containers) call these endpoints using their per-service API key.

@@ -3,7 +3,6 @@ package netdaemon
 import (
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"fmt"
 	"io"
 	"log/slog"
@@ -17,15 +16,21 @@ import (
 )
 
 var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool { return true },
+	CheckOrigin:     func(r *http.Request) bool { return true },
+	ReadBufferSize:  4096,
+	WriteBufferSize: 4096,
 }
 
-// TunnelManager handles reverse tunnels over WebSockets with inner mTLS.
+// TunnelManager handles reverse tunnels over WebSockets.
 type TunnelManager struct {
 	mu        sync.RWMutex
-	sessions  map[string]*yamux.Session    // key: nodeID
-	listeners map[string]net.Listener      // key: nodeID:port
-	portMap   map[string]map[int]int       // key: nodeID, inner key: remotePort, value: localPort
+	sessions  map[string]*yamux.Session   // key: nodeID
+	listeners map[string]net.Listener     // key: nodeID:localPort
+	portMap   map[string]map[int]int      // key: nodeID → remotePort → localPort
+
+	// ValidateToken is called during handshake to verify the node token.
+	// Return the nodeID if valid, empty string if invalid.
+	ValidateToken func(token string) string
 }
 
 func NewTunnelManager() *TunnelManager {
@@ -38,86 +43,88 @@ func NewTunnelManager() *TunnelManager {
 
 // ─── Brain Side (Server) ─────────────────────────────────────────────────────
 
-func (tm *TunnelManager) HTTPHandler(caPEM string) http.HandlerFunc {
+// HTTPHandler returns the http.HandlerFunc for /api/cluster/tunnel.
+// Authentication: the node sends its join token via the X-Node-Token header.
+func (tm *TunnelManager) HTTPHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// 1. Authenticate the node via its token.
+		token := r.Header.Get("X-Node-Token")
+		nodeID := r.Header.Get("X-Node-ID")
+
+		if token == "" || nodeID == "" {
+			slog.Warn("tunnel server: missing auth headers", "remote", r.RemoteAddr)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		// If a validator is registered, use it; otherwise trust the header.
+		if tm.ValidateToken != nil {
+			verified := tm.ValidateToken(token)
+			if verified == "" {
+				slog.Warn("tunnel server: invalid token", "node", nodeID)
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			nodeID = verified // use the name from the DB, not the header
+		}
+
+		// 2. Upgrade to WebSocket.
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			slog.Error("tunnel server: upgrade failed", "err", err)
 			return
 		}
 
+		slog.Info("tunnel server: node connected", "node", nodeID, "remote", r.RemoteAddr)
+
+		// 3. Wrap the WebSocket as a net.Conn and create a yamux session.
 		wsConn := &wsNetConn{Conn: conn}
-
-		// Load server cert for inner mTLS
-		certFile := "/etc/featherdeploy/node.crt"
-		keyFile := "/etc/featherdeploy/node.key"
-		serverCert, err := tls.LoadX509KeyPair(certFile, keyFile)
+		session, err := yamux.Server(wsConn, yamuxConfig())
 		if err != nil {
-			slog.Error("tunnel server: load cert failed", "err", err)
-			wsConn.Close()
-			return
-		}
-
-		caPool := x509.NewCertPool()
-		caPool.AppendCertsFromPEM([]byte(caPEM))
-
-		tlsCfg := &tls.Config{
-			Certificates: []tls.Certificate{serverCert},
-			ClientAuth:   tls.RequireAndVerifyClientCert,
-			ClientCAs:    caPool,
-		}
-
-		tlsConn := tls.Server(wsConn, tlsCfg)
-		if err := tlsConn.Handshake(); err != nil {
-			slog.Error("tunnel server: inner mTLS handshake failed", "err", err)
-			tlsConn.Close()
-			return
-		}
-
-		nodeID := tlsConn.ConnectionState().PeerCertificates[0].Subject.CommonName
-		slog.Info("tunnel server: verified node identity via inner mTLS", "node", nodeID)
-
-		session, err := yamux.Server(tlsConn, nil)
-		if err != nil {
-			slog.Error("tunnel server: yamux session", "node", nodeID, "err", err)
-			tlsConn.Close()
+			slog.Error("tunnel server: yamux session failed", "node", nodeID, "err", err)
+			conn.Close()
 			return
 		}
 
 		tm.mu.Lock()
 		if old, ok := tm.sessions[nodeID]; ok {
 			old.Close()
+			slog.Info("tunnel server: replaced stale session", "node", nodeID)
 		}
 		tm.sessions[nodeID] = session
 		tm.mu.Unlock()
 
-		slog.Info("tunnel server: session established", "node", nodeID)
+		// 4. Start keepalive pings.
+		go tm.pingLoop(conn, session.CloseChan())
 
-		// Start heartbeat to keep the WebSocket alive through proxies
-		go func() {
-			ticker := time.NewTicker(20 * time.Second)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ticker.C:
-					if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
-						return
-					}
-				case <-session.CloseChan():
-					return
-				}
-			}
-		}()
-
+		// 5. Set up local proxy ports for this node.
 		tm.setupNodeProxies(nodeID)
 
+		// 6. Block until the session closes.
 		<-session.CloseChan()
-		
+		slog.Info("tunnel server: node disconnected", "node", nodeID)
+
 		tm.mu.Lock()
 		if tm.sessions[nodeID] == session {
 			delete(tm.sessions, nodeID)
 		}
 		tm.mu.Unlock()
+	}
+}
+
+func (tm *TunnelManager) pingLoop(conn *websocket.Conn, done <-chan struct{}) {
+	ticker := time.NewTicker(20 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				return
+			}
+		case <-done:
+			return
+		}
 	}
 }
 
@@ -129,14 +136,19 @@ func (tm *TunnelManager) setupNodeProxies(nodeID string) {
 		tm.portMap[nodeID] = make(map[int]int)
 	}
 
+	// Allocate a deterministic block of local ports based on the number of existing sessions.
 	ports := []int{4001, 4002, 2379, 2380, 7443}
-	idx := len(tm.sessions)
+	idx := len(tm.sessions) // sessions map already updated before this call
 	base := 20000 + (idx * 10)
 
-	for i, p := range ports {
+	for i, remotePort := range ports {
 		localPort := base + i
-		tm.portMap[nodeID][p] = localPort
-		go tm.startInternalProxy(nodeID, localPort, p)
+		if _, exists := tm.portMap[nodeID][remotePort]; exists {
+			continue // already mapped, don't re-listen
+		}
+		tm.portMap[nodeID][remotePort] = localPort
+		go tm.startInternalProxy(nodeID, localPort, remotePort)
+		slog.Info("tunnel server: proxy mapped", "node", nodeID, "localPort", localPort, "remotePort", remotePort)
 	}
 }
 
@@ -144,12 +156,14 @@ func (tm *TunnelManager) startInternalProxy(nodeID string, localPort, remotePort
 	addr := fmt.Sprintf("127.0.0.1:%d", localPort)
 	l, err := net.Listen("tcp", addr)
 	if err != nil {
-		slog.Error("tunnel server: failed to listen for proxy", "addr", addr, "err", err)
+		slog.Error("tunnel server: proxy listen failed", "addr", addr, "err", err)
 		return
 	}
+
 	tm.mu.Lock()
-	tm.listeners[nodeID+":"+fmt.Sprint(localPort)] = l
+	tm.listeners[fmt.Sprintf("%s:%d", nodeID, localPort)] = l
 	tm.mu.Unlock()
+
 	defer l.Close()
 	for {
 		client, err := l.Accept()
@@ -160,6 +174,7 @@ func (tm *TunnelManager) startInternalProxy(nodeID string, localPort, remotePort
 	}
 }
 
+// GetNodeProxyAddr returns the local loopback address that tunnels to the node's port.
 func (tm *TunnelManager) GetNodeProxyAddr(nodeID string, remotePort int) string {
 	tm.mu.RLock()
 	defer tm.mu.RUnlock()
@@ -173,13 +188,13 @@ func (tm *TunnelManager) GetNodeProxyAddr(nodeID string, remotePort int) string 
 
 // ─── Worker Side (Client) ────────────────────────────────────────────────────
 
-func (tm *TunnelManager) StartClient(ctx context.Context, brainURL string, nodeID string, tlsCfg *tls.Config) {
+func (tm *TunnelManager) StartClient(ctx context.Context, brainURL string, nodeID string, token string, tlsCfg *tls.Config) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		default:
-			if err := tm.dialAndServeWS(ctx, brainURL, nodeID, tlsCfg); err != nil {
+			if err := tm.dialAndServeWS(ctx, brainURL, nodeID, token, tlsCfg); err != nil {
 				slog.Error("tunnel client: disconnected, retrying in 5s", "err", err)
 				time.Sleep(5 * time.Second)
 			}
@@ -187,38 +202,43 @@ func (tm *TunnelManager) StartClient(ctx context.Context, brainURL string, nodeI
 	}
 }
 
-func (tm *TunnelManager) dialAndServeWS(ctx context.Context, brainURL string, nodeID string, tlsCfg *tls.Config) error {
+func (tm *TunnelManager) dialAndServeWS(ctx context.Context, brainURL string, nodeID string, token string, tlsCfg *tls.Config) error {
 	dialer := websocket.Dialer{
 		Proxy:            http.ProxyFromEnvironment,
-		HandshakeTimeout: 10 * time.Second,
-		TLSClientConfig:  &tls.Config{InsecureSkipVerify: true},
+		HandshakeTimeout: 15 * time.Second,
+		TLSClientConfig:  tlsCfg,
 	}
-	conn, _, err := dialer.DialContext(ctx, brainURL, nil)
+
+	header := http.Header{}
+	header.Set("X-Node-ID", nodeID)
+	header.Set("X-Node-Token", token)
+
+	conn, _, err := dialer.DialContext(ctx, brainURL, header)
 	if err != nil {
-		return err
+		return fmt.Errorf("dial: %w", err)
 	}
-	
-	// Handle Pings from server to keep connection alive
-	conn.SetPingHandler(func(appData string) error {
-		return conn.WriteMessage(websocket.PongMessage, []byte(appData))
+
+	// Set up pong handler to respond to server's ping messages.
+	conn.SetPongHandler(func(string) error {
+		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		return nil
 	})
+	conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 
 	wsConn := &wsNetConn{Conn: conn}
-	tlsConn := tls.Client(wsConn, tlsCfg)
-	if err := tlsConn.Handshake(); err != nil {
-		tlsConn.Close()
-		return err
-	}
-	session, err := yamux.Client(tlsConn, nil)
+	session, err := yamux.Client(wsConn, yamuxConfig())
 	if err != nil {
-		tlsConn.Close()
-		return err
+		conn.Close()
+		return fmt.Errorf("yamux: %w", err)
 	}
 	defer session.Close()
+
 	tm.mu.Lock()
 	tm.sessions["brain"] = session
 	tm.mu.Unlock()
-	slog.Info("tunnel client: established secure mTLS tunnel to brain", "url", brainURL)
+
+	slog.Info("tunnel client: connected to brain", "url", brainURL, "node", nodeID)
+
 	for {
 		stream, err := session.Accept()
 		if err != nil {
@@ -232,22 +252,24 @@ func (tm *TunnelManager) dialAndServeWS(ctx context.Context, brainURL string, no
 
 func (tm *TunnelManager) handleProxyConn(nodeID string, remotePort int, client net.Conn) {
 	defer client.Close()
+
 	tm.mu.RLock()
 	session, ok := tm.sessions[nodeID]
 	tm.mu.RUnlock()
 	if !ok {
+		slog.Warn("tunnel server: no session for node", "node", nodeID)
 		return
 	}
+
 	stream, err := session.Open()
 	if err != nil {
 		return
 	}
 	defer stream.Close()
-	portBuf := []byte{byte(remotePort >> 8), byte(remotePort & 0xff)}
-	stream.Write(portBuf)
-	cp := func(dst, src net.Conn) { io.Copy(dst, src) }
-	go cp(client, stream)
-	io.Copy(stream, client)
+
+	// Send the target port as the first 2 bytes.
+	stream.Write([]byte{byte(remotePort >> 8), byte(remotePort & 0xff)})
+	pipe(client, stream)
 }
 
 func (tm *TunnelManager) ProxyNodeToBrain(localPort, remotePort int) error {
@@ -263,13 +285,13 @@ func (tm *TunnelManager) ProxyNodeToBrain(localPort, remotePort int) error {
 			if err != nil {
 				return
 			}
-			go tm.handleNodeToBrainProxyConn(remotePort, client)
+			go tm.forwardToBrain(remotePort, client)
 		}
 	}()
 	return nil
 }
 
-func (tm *TunnelManager) handleNodeToBrainProxyConn(remotePort int, client net.Conn) {
+func (tm *TunnelManager) forwardToBrain(remotePort int, client net.Conn) {
 	defer client.Close()
 	tm.mu.RLock()
 	session := tm.sessions["brain"]
@@ -282,11 +304,8 @@ func (tm *TunnelManager) handleNodeToBrainProxyConn(remotePort int, client net.C
 		return
 	}
 	defer stream.Close()
-	portBuf := []byte{byte(remotePort >> 8), byte(remotePort & 0xff)}
-	stream.Write(portBuf)
-	cp := func(dst, src net.Conn) { io.Copy(dst, src) }
-	go cp(client, stream)
-	io.Copy(stream, client)
+	stream.Write([]byte{byte(remotePort >> 8), byte(remotePort & 0xff)})
+	pipe(client, stream)
 }
 
 func (tm *TunnelManager) handleIncomingStream(stream net.Conn) {
@@ -295,22 +314,38 @@ func (tm *TunnelManager) handleIncomingStream(stream net.Conn) {
 	if _, err := io.ReadFull(stream, portBuf); err != nil {
 		return
 	}
-	remotePort := int(portBuf[0])<<8 | int(portBuf[1])
-	local, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", remotePort))
+	port := int(portBuf[0])<<8 | int(portBuf[1])
+	local, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
+		slog.Warn("tunnel client: cannot connect to local port", "port", port, "err", err)
 		return
 	}
 	defer local.Close()
-	cp := func(dst, src net.Conn) { io.Copy(dst, src) }
-	go cp(local, stream)
-	io.Copy(stream, local)
+	pipe(local, stream)
 }
 
-// ─── WebSocket to net.Conn Adapter ───────────────────────────────────────────
+func pipe(a, b net.Conn) {
+	done := make(chan struct{}, 2)
+	go func() { io.Copy(a, b); done <- struct{}{} }()
+	go func() { io.Copy(b, a); done <- struct{}{} }()
+	<-done
+}
+
+// ─── yamux config ─────────────────────────────────────────────────────────────
+
+func yamuxConfig() *yamux.Config {
+	cfg := yamux.DefaultConfig()
+	cfg.KeepAliveInterval = 30 * time.Second
+	cfg.ConnectionWriteTimeout = 10 * time.Second
+	return cfg
+}
+
+// ─── WebSocket → net.Conn adapter ────────────────────────────────────────────
 
 type wsNetConn struct {
 	*websocket.Conn
 	reader io.Reader
+	mu     sync.Mutex // protect concurrent writes
 }
 
 func (c *wsNetConn) Read(b []byte) (n int, err error) {
@@ -335,12 +370,15 @@ func (c *wsNetConn) Read(b []byte) (n int, err error) {
 }
 
 func (c *wsNetConn) Write(b []byte) (n int, err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	w, err := c.Conn.NextWriter(websocket.BinaryMessage)
 	if err != nil {
 		return 0, err
 	}
-	defer w.Close()
-	return w.Write(b)
+	n, err = w.Write(b)
+	w.Close()
+	return n, err
 }
 
 func (c *wsNetConn) LocalAddr() net.Addr                { return c.Conn.LocalAddr() }
@@ -353,4 +391,8 @@ func (c *wsNetConn) SetDeadline(t time.Time) error {
 		return err
 	}
 	return c.Conn.SetWriteDeadline(t)
+}
+
+func (c *wsNetConn) Close() error {
+	return c.Conn.Close()
 }
