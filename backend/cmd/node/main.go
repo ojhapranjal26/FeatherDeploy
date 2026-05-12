@@ -621,7 +621,8 @@ func runServe() {
 
 const rqliteServiceTmpl = `[Unit]
 Description=rqlite node
-After=network.target
+After=network.target featherdeploy-node.service
+Requires=featherdeploy-node.service
 
 [Service]
 User=root
@@ -631,7 +632,7 @@ ExecStart=/usr/local/bin/rqlited \
   -raft-addr=127.0.0.1:4004 \
   -http-adv-addr=%s:4003 \
   -raft-adv-addr=%s:4004 \
-  -join=%s \
+  -join=http://%s \
   %s
 Restart=always
 RestartSec=5
@@ -648,8 +649,8 @@ func writeRqliteService(nodeID, mainRaft, myIP string) {
 
 const etcdServiceTmpl = `[Unit]
 Description=etcd Key-Value Store (Node)
-After=network.target
-Before=featherdeploy-node.service
+After=network.target featherdeploy-node.service
+Requires=featherdeploy-node.service
 
 [Service]
 Type=simple
@@ -673,8 +674,10 @@ WantedBy=multi-user.target
 `
 
 func writeEtcdService(nodeID, etcdMain, myIP string) {
+	// Always force etcdMain to route through the secure loopback tunnel proxy
+	safeEtcdMain := "main=http://127.0.0.1:2380"
 	content := fmt.Sprintf(etcdServiceTmpl,
-		dataDir, dataDir, nodeID, dataDir, etcdMain, nodeID, "127.0.0.1")
+		dataDir, dataDir, nodeID, dataDir, safeEtcdMain, nodeID, "127.0.0.1")
 	writeFile("/etc/systemd/system/etcd-node.service", content, 0644)
 }
 
@@ -682,7 +685,7 @@ func writeEtcdService(nodeID, etcdMain, myIP string) {
 
 const nodeServeServiceTmpl = `[Unit]
 Description=FeatherDeploy Node
-After=network.target rqlite-node.service
+After=network.target
 
 [Service]
 User=root
