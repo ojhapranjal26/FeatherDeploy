@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"bufio"
 	"log/slog"
 	"net"
 	"net/http"
@@ -294,16 +295,22 @@ func (h *NodeHandler) NodeLogs(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
+	
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming not supported", http.StatusInternalServerError)
 		return
 	}
 
+	// Flush immediately to establish the SSE connection and prevent frontend/proxy timeouts
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
 	if nodeParam == "brain" {
 		// Stream local brain logs via journalctl
 		cmd := exec.CommandContext(r.Context(),
 			"journalctl", "-u", "featherdeploy", "-n", "100", "--follow", "--no-pager", "--output=short-iso")
+		
 		stdout, err := cmd.StdoutPipe()
 		if err != nil {
 			fmt.Fprintf(w, "data: {\"error\":\"failed to start journalctl: %s\"}\n\n", err)
@@ -317,28 +324,35 @@ func (h *NodeHandler) NodeLogs(w http.ResponseWriter, r *http.Request) {
 		}
 		defer cmd.Wait()
 
-		buf := make([]byte, 4096)
+		scanner := bufio.NewScanner(stdout)
+		lines := make(chan string)
+		go func() {
+			for scanner.Scan() {
+				lines <- scanner.Text()
+			}
+			close(lines)
+		}()
+
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+
 		for {
 			select {
 			case <-r.Context().Done():
 				return
-			default:
-				n, err := stdout.Read(buf)
-				if n > 0 {
-					lines := strings.Split(string(buf[:n]), "\n")
-					for _, line := range lines {
-						line = strings.TrimSpace(line)
-						if line == "" {
-							continue
-						}
-						data, _ := json.Marshal(map[string]string{"line": line})
-						fmt.Fprintf(w, "data: %s\n\n", data)
-					}
+			case line, ok := <-lines:
+				if !ok {
+					return // EOF
+				}
+				line = strings.TrimSpace(line)
+				if line != "" {
+					data, _ := json.Marshal(map[string]string{"line": line})
+					fmt.Fprintf(w, "data: %s\n\n", data)
 					flusher.Flush()
 				}
-				if err != nil {
-					return
-				}
+			case <-ticker.C:
+				fmt.Fprintf(w, ": ping\n\n")
+				flusher.Flush()
 			}
 		}
 	} else {
@@ -394,18 +408,41 @@ func (h *NodeHandler) NodeLogs(w http.ResponseWriter, r *http.Request) {
 		}
 		defer resp2.Body.Close()
 
-		buf := make([]byte, 4096)
+		type readResult struct {
+			data []byte
+			err  error
+		}
+		ch := make(chan readResult)
+		go func() {
+			buf := make([]byte, 4096)
+			for {
+				n, err := resp2.Body.Read(buf)
+				if n > 0 {
+					data := make([]byte, n)
+					copy(data, buf[:n])
+					ch <- readResult{data: data, err: nil}
+				}
+				if err != nil {
+					ch <- readResult{data: nil, err: err}
+					close(ch)
+					return
+				}
+			}
+		}()
+
 		for {
 			select {
 			case <-r.Context().Done():
 				return
-			default:
-				n, err := resp2.Body.Read(buf)
-				if n > 0 {
-					w.Write(buf[:n])
+			case res, ok := <-ch:
+				if !ok {
+					return
+				}
+				if len(res.data) > 0 {
+					w.Write(res.data)
 					flusher.Flush()
 				}
-				if err != nil {
+				if res.err != nil {
 					return
 				}
 			}

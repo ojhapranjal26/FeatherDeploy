@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"bufio"
 	"log/slog"
 	"net"
 	"net/http"
@@ -365,6 +366,10 @@ func runServe() {
 			return
 		}
 
+		// Flush headers immediately to establish connection without proxy timeout
+		w.WriteHeader(http.StatusOK)
+		flusher.Flush()
+
 		cmd := exec.CommandContext(req.Context(),
 			"journalctl", "-u", "featherdeploy-node", "-n", "100", "--follow", "--no-pager", "--output=short-iso")
 		stdout, err := cmd.StdoutPipe()
@@ -380,28 +385,35 @@ func runServe() {
 		}
 		defer cmd.Wait()
 
-		buf := make([]byte, 4096)
+		scanner := bufio.NewScanner(stdout)
+		lines := make(chan string)
+		go func() {
+			for scanner.Scan() {
+				lines <- scanner.Text()
+			}
+			close(lines)
+		}()
+
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+
 		for {
 			select {
 			case <-req.Context().Done():
 				return
-			default:
-				n, readErr := stdout.Read(buf)
-				if n > 0 {
-					lines := strings.Split(string(buf[:n]), "\n")
-					for _, line := range lines {
-						line = strings.TrimSpace(line)
-						if line == "" {
-							continue
-						}
-						data, _ := json.Marshal(map[string]string{"line": line})
-						fmt.Fprintf(w, "data: %s\n\n", data)
-					}
-					flusher.Flush()
-				}
-				if readErr != nil {
+			case line, ok := <-lines:
+				if !ok {
 					return
 				}
+				line = strings.TrimSpace(line)
+				if line != "" {
+					data, _ := json.Marshal(map[string]string{"line": line})
+					fmt.Fprintf(w, "data: %s\n\n", data)
+					flusher.Flush()
+				}
+			case <-ticker.C:
+				fmt.Fprintf(w, ": ping\n\n")
+				flusher.Flush()
 			}
 		}
 	})
