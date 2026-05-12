@@ -3738,18 +3738,6 @@ func resolveNodeTunnel(nodeID string, dbPort int) (ip string, port int, viaTunne
 // When viaTunnel is false we are talking directly to the node over the public network
 // and need a full mTLS client.
 func nodeHTTPClient(viaTunnel bool, timeout time.Duration) (*http.Client, string) {
-	if viaTunnel {
-		// The tunnel is a raw TCP proxy (yamux over WebSocket). The node API
-		// runs with TLS on port 7443. We must use HTTPS here so the TLS
-		// handshake works end-to-end. InsecureSkipVerify is safe because the
-		// yamux tunnel itself already provides transport security.
-		return &http.Client{
-			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
-			},
-			Timeout: timeout,
-		}, "https"
-	}
 	caPEM, _ := os.ReadFile("/etc/featherdeploy/ca.crt")
 	certPEM, _ := os.ReadFile("/etc/featherdeploy/node.crt")
 	keyPEM, _ := os.ReadFile("/etc/featherdeploy/node.key")
@@ -3760,6 +3748,11 @@ func nodeHTTPClient(viaTunnel bool, timeout time.Duration) (*http.Client, string
 			Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
 			Timeout:   timeout,
 		}, "https"
+	}
+	if viaTunnel {
+		// When routing through the yamux loopback proxy, target hostname is 127.0.0.1.
+		// Skip hostname verification while preserving our loaded client certificate to satisfy worker node mTLS requirements.
+		tlsCfg.InsecureSkipVerify = true
 	}
 	return &http.Client{
 		Transport: &http.Transport{TLSClientConfig: tlsCfg},

@@ -406,9 +406,18 @@ func (h *NodeHandler) NodeLogs(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 			return
 		}
+		caPEM, _ := os.ReadFile("/etc/featherdeploy/ca.crt")
+		certPEM, _ := os.ReadFile("/etc/featherdeploy/node.crt")
+		keyPEM, _ := os.ReadFile("/etc/featherdeploy/node.key")
+		tlsCfg, errTls := pki.TLSConfig(string(certPEM), string(keyPEM), string(caPEM))
+		if errTls != nil {
+			tlsCfg = &tls.Config{InsecureSkipVerify: true}
+		} else {
+			tlsCfg.InsecureSkipVerify = true
+		}
 		client := &http.Client{
 			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
+				TLSClientConfig: tlsCfg,
 			},
 			Timeout: 0,
 		}
