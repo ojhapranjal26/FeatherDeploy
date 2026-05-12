@@ -194,7 +194,8 @@ func buildConfig(db *sql.DB) (string, error) {
 		SELECT d.domain, d.tls,
 		       COALESCE(s.cluster_port, s.host_port) AS proxy_port,
 		       n.ip AS node_ip,
-		       s.project_id, s.name AS svc_name
+		       s.project_id, s.name AS svc_name,
+		       COALESCE(s.node_id, 'main') AS node_id
 		FROM   domains d
 		JOIN   services s ON s.id = d.service_id
 		LEFT JOIN nodes n ON n.node_id = s.node_id
@@ -217,8 +218,8 @@ func buildConfig(db *sql.DB) (string, error) {
 		var tlsInt, hostPort int
 		var nodeIP sql.NullString
 		var projectID int64
-		var svcName string
-		if rows.Scan(&domain, &tlsInt, &hostPort, &nodeIP, &projectID, &svcName) != nil {
+		var svcName, nodeIDStr string
+		if rows.Scan(&domain, &tlsInt, &hostPort, &nodeIP, &projectID, &svcName, &nodeIDStr) != nil {
 			continue
 		}
 		domain = strings.TrimSpace(strings.ToLower(domain))
@@ -231,10 +232,10 @@ func buildConfig(db *sql.DB) (string, error) {
 			targetIP = nodeIP.String
 		}
 
-		// If the target IP matches our own server IP, use 127.0.0.1.
-		// This ensures Caddy connects via loopback, avoiding iptables drops
-		// for incoming traffic on the public interface for local services.
-		if serverIP != "" && targetIP == serverIP {
+		// If the service runs on the main node, force loopback routing to prevent external interface hairpin NAT drops.
+		if nodeIDStr == "main" {
+			targetIP = "127.0.0.1"
+		} else if serverIP != "" && targetIP == serverIP {
 			targetIP = "127.0.0.1"
 		}
 
@@ -250,8 +251,9 @@ func buildConfig(db *sql.DB) (string, error) {
 				if ip != "" && port > 0 {
 					targetIP = ip
 					hostPort = port
-					// Again, prefer loopback if it's us
-					if serverIP != "" && targetIP == serverIP {
+					if nodeIDStr == "main" {
+						targetIP = "127.0.0.1"
+					} else if serverIP != "" && targetIP == serverIP {
 						targetIP = "127.0.0.1"
 					}
 				}
