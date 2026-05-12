@@ -618,8 +618,8 @@ ExecStart=/usr/local/bin/rqlited \
   -node-id=%s \
   -http-addr=127.0.0.1:4003 \
   -raft-addr=127.0.0.1:4004 \
-  -http-adv-addr=%s:4003 \
-  -raft-adv-addr=%s:4004 \
+  -http-adv-addr=127.0.0.1:4003 \
+  -raft-adv-addr=127.0.0.1:4002 \
   -join=%s \
   %s
 Restart=always
@@ -631,7 +631,7 @@ WantedBy=multi-user.target
 
 func writeRqliteService(nodeID, mainRaft, myIP string) {
 	content := fmt.Sprintf(rqliteServiceTmpl,
-		nodeID, myIP, myIP, mainRaft, rqliteData)
+		nodeID, mainRaft, rqliteData)
 	writeFile(rqliteUnit, content, 0644)
 }
 
