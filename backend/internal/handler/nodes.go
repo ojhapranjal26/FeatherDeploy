@@ -3,6 +3,7 @@ package handler
 import (
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -106,13 +107,11 @@ func (h *NodeHandler) EnsureLocalPKI() error {
 		return fmt.Errorf("write ca.crt: %w", err)
 	}
 
-	// Check if node cert/key are missing or empty
+	// Check if node cert/key are missing, empty, or contain invalid PEM data
 	var needsGen bool
-	if info, err := os.Stat(nodeCertFile); os.IsNotExist(err) || (err == nil && info.Size() == 0) {
+	if _, err := tls.LoadX509KeyPair(nodeCertFile, nodeKeyFile); err != nil {
 		needsGen = true
-	}
-	if info, err := os.Stat(nodeKeyFile); os.IsNotExist(err) || (err == nil && info.Size() == 0) {
-		needsGen = true
+		slog.Warn("nodes: local mTLS certs are missing or invalid, regenerating...", "err", err)
 	}
 
 	if needsGen {
