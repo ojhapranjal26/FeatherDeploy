@@ -209,6 +209,8 @@ func runJoin(args []string) {
 		fmt.Println("  ✓ Rqlite connectivity confirmed via tunnel")
 	}
 
+	// Write all service unit files before reloading systemd to prevent missing unit errors
+	writeNodeServeService()
 	writeRqliteService(nodeID, rqliteJoinAddr, nodeIP)
 	writeEtcdService(nodeID, etcdMain, nodeIP)
 
@@ -230,9 +232,7 @@ func runJoin(args []string) {
 	cancel()
 	time.Sleep(1 * time.Second)
 
-	// Write and enable featherdeploy-node serve service
-	writeNodeServeService()
-	runCmd("systemctl", "daemon-reload")
+	// Enable and start the background featherdeploy-node serve service
 	runCmd("systemctl", "enable", "--now", "featherdeploy-node")
 
 	fmt.Println("==> Node joined successfully!")
@@ -622,7 +622,6 @@ func runServe() {
 const rqliteServiceTmpl = `[Unit]
 Description=rqlite node
 After=network.target featherdeploy-node.service
-Requires=featherdeploy-node.service
 
 [Service]
 User=root
@@ -650,7 +649,6 @@ func writeRqliteService(nodeID, mainRaft, myIP string) {
 const etcdServiceTmpl = `[Unit]
 Description=etcd Key-Value Store (Node)
 After=network.target featherdeploy-node.service
-Requires=featherdeploy-node.service
 
 [Service]
 Type=simple
