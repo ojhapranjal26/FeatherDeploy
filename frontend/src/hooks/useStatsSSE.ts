@@ -12,6 +12,7 @@ export interface NodeStats {
   disk_total: number
   last_stats_at: string | null
   node_id: string
+  hostname?: string
 }
 
 export interface LiveStats {

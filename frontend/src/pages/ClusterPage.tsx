@@ -140,9 +140,9 @@ function LogViewer({ nodeId, nodeName, onClose }: {
 }
 
 // ── Brain Card ────────────────────────────────────────────────────────────────
-function BrainCard({ brain, history, ramHistory, connected }: {
+function BrainCard({ brain, history, connected }: {
   brain: NonNullable<ReturnType<typeof useStatsSSE>['brain']>
-  history: CpuPoint[]; ramHistory: RamPoint[]; connected: boolean
+  history: CpuPoint[]; connected: boolean
 }) {
   const [showLogs, setShowLogs] = useState(false)
   const cpuPct = Math.round(brain.CPU ?? 0)
@@ -231,8 +231,8 @@ function BrainCard({ brain, history, ramHistory, connected }: {
 }
 
 // ── Worker Node Card ──────────────────────────────────────────────────────────
-function WorkerNodeCard({ node, history, ramHistory }: {
-  node: NodeStats; history: CpuPoint[]; ramHistory: RamPoint[]
+function WorkerNodeCard({ node, history }: {
+  node: NodeStats; history: CpuPoint[]
 }) {
   const [showLogs, setShowLogs] = useState(false)
   const isConn = node.status === 'connected'
@@ -256,9 +256,7 @@ function WorkerNodeCard({ node, history, ramHistory }: {
               </div>
               <div>
                 <CardTitle className="text-base font-semibold">{node.name}</CardTitle>
-                {node.hostname && (
-                  <CardDescription className="text-xs font-mono">{node.hostname}</CardDescription>
-                )}
+                <CardDescription className="text-xs font-mono">{node.hostname || node.name}</CardDescription>
               </div>
             </div>
             <div className="flex items-center gap-1.5">
@@ -410,7 +408,6 @@ export function ClusterPage() {
           <BrainCard
             brain={brain}
             history={brainHistoryRef.current}
-            ramHistory={brainRamHistoryRef.current}
             connected={connected}
           />
           {liveNodes.map(node => (
@@ -418,7 +415,6 @@ export function ClusterPage() {
               key={node.id}
               node={node}
               history={nodeHistoriesRef.current[node.id] ?? []}
-              ramHistory={nodeRamHistoriesRef.current[node.id] ?? []}
             />
           ))}
         </div>

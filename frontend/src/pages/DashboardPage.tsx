@@ -3,23 +3,18 @@ import { useNavigate } from 'react-router-dom'
 import { useQuery, useMutation } from '@tanstack/react-query'
 import {
   Activity, AlertTriangle, Rocket, CheckCircle2, XCircle,
-  Crown, Cpu, MemoryStick, HardDrive, Server, Wifi, WifiOff,
+  Cpu, MemoryStick, HardDrive, Server, Wifi, WifiOff,
   FolderGit2, TrendingUp, Layers, ArrowUpCircle, X, RefreshCw,
   Tag, GitCommit, Clock, Loader2, Circle,
 } from 'lucide-react'
-import {
-  AreaChart, Area, ResponsiveContainer, Tooltip, XAxis,
-} from 'recharts'
 import client from '@/api/client'
 import { systemApi, type VersionInfo } from '@/api/system'
-import { useStatsSSE, type NodeStats } from '@/hooks/useStatsSSE'
+import { useStatsSSE } from '@/hooks/useStatsSSE'
 import { useAuth } from '@/context/AuthContext'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
-import { Progress } from '@/components/ui/progress'
-import { Badge } from '@/components/ui/badge'
 import {
-  Card, CardContent, CardHeader, CardTitle, CardDescription,
+  Card, CardContent,
 } from '@/components/ui/card'
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription,
@@ -46,77 +41,12 @@ type RamPoint = { t: string; v: number }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 const gb = (bytes: number) => (bytes / 1073741824).toFixed(1)
-const pct = (used: number, total: number) => total > 0 ? Math.round((used / total) * 100) : 0
 const fmt = (ms: number) => {
   const s = Math.floor((Date.now() - ms) / 1000)
   if (s < 60) return 'just now'
   const m = Math.floor(s / 60)
   if (m < 60) return `${m}m ago`
   return `${Math.floor(m / 60)}h ago`
-}
-
-function barColor(p: number) {
-  if (p > 85) return '[&>div]:bg-red-500'
-  if (p > 65) return '[&>div]:bg-amber-400'
-  return '[&>div]:bg-emerald-500'
-}
-
-// ── CpuSparkline ──────────────────────────────────────────────────────────────
-function CpuSparkline({ data, color = '#6366f1' }: { data: CpuPoint[]; color?: string }) {
-  if (data.length < 2) return null
-  const gradId = `grad${color.replace('#', '')}`
-  return (
-    <ResponsiveContainer width="100%" height={48}>
-      <AreaChart data={data} margin={{ top: 2, right: 0, bottom: 0, left: 0 }}>
-        <defs>
-          <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor={color} stopOpacity={0.4} />
-            <stop offset="100%" stopColor={color} stopOpacity={0.04} />
-          </linearGradient>
-        </defs>
-        <XAxis dataKey="t" hide />
-        <Tooltip
-          contentStyle={{ fontSize: 11, padding: '2px 8px', borderRadius: 6 }}
-          formatter={(v: unknown) => [`${Number(v).toFixed(1)}%`, 'CPU']}
-          labelFormatter={() => ''}
-        />
-        <Area
-          type="monotone" dataKey="v" stroke={color} strokeWidth={1.5}
-          fill={`url(#${gradId})`}
-          dot={false} isAnimationActive={false}
-        />
-      </AreaChart>
-    </ResponsiveContainer>
-  )
-}
-
-// ── RamSparkline ──────────────────────────────────────────────────────────────
-function RamSparkline({ data }: { data: RamPoint[] }) {
-  if (data.length < 2) return null
-  const color = '#10b981'
-  return (
-    <ResponsiveContainer width="100%" height={32}>
-      <AreaChart data={data} margin={{ top: 2, right: 0, bottom: 0, left: 0 }}>
-        <defs>
-          <linearGradient id="gradRam" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor={color} stopOpacity={0.35} />
-            <stop offset="100%" stopColor={color} stopOpacity={0.03} />
-          </linearGradient>
-        </defs>
-        <XAxis dataKey="t" hide />
-        <Tooltip
-          contentStyle={{ fontSize: 11, padding: '2px 8px', borderRadius: 6 }}
-          formatter={(v: unknown) => [`${Number(v).toFixed(1)}%`, 'RAM']}
-          labelFormatter={() => ''}
-        />
-        <Area
-          type="monotone" dataKey="v" stroke={color} strokeWidth={1.5}
-          fill="url(#gradRam)"
-          dot={false} isAnimationActive={false}
-        />
-      </AreaChart>
-    </ResponsiveContainer>
-  )
 }
 
 // ── StatCard ──────────────────────────────────────────────────────────────────
@@ -141,160 +71,6 @@ function StatCard({ title, value, icon: Icon, iconCls, bgCls, loading }: {
   )
 }
 
-// ── BrainCard ─────────────────────────────────────────────────────────────────
-function BrainCard({ brain, history, ramHistory, connected }: {
-  brain: NonNullable<ReturnType<typeof useStatsSSE>['brain']>
-  history: CpuPoint[]; ramHistory: RamPoint[]; connected: boolean
-}) {
-  const cpuPct = Math.round(brain.CPU ?? 0)
-  const ramPct = pct(brain.RAMUsed, brain.RAMTotal)
-  const diskPct = pct(brain.DiskUsed, brain.DiskTotal)
-  const cpuColor = cpuPct > 80 ? '#ef4444' : cpuPct > 60 ? '#f59e0b' : '#6366f1'
-
-  return (
-    <Card className="border-border/60 overflow-hidden">
-      <div className={cn('h-0.5', brain.Alive ? 'bg-emerald-500' : 'bg-red-500')} />
-      <CardHeader className="pb-3">
-        <div className="flex items-start justify-between gap-2">
-          <div className="flex items-center gap-2.5">
-            <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/10 text-primary">
-              <Crown className="h-4 w-4" />
-            </div>
-            <div>
-              <CardTitle className="text-base font-semibold flex items-center gap-2">
-                Brain Node
-                {connected
-                  ? <Wifi className="h-3.5 w-3.5 text-emerald-500" />
-                  : <WifiOff className="h-3.5 w-3.5 text-muted-foreground animate-pulse" />}
-              </CardTitle>
-              <CardDescription className="text-xs font-mono">{brain.BrainID || 'main'}</CardDescription>
-            </div>
-          </div>
-          <Badge className={brain.Alive
-            ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border-0'
-            : 'bg-red-500/15 text-red-600 dark:text-red-400 border-0'
-          }>
-            {brain.Alive
-              ? <><CheckCircle2 className="h-3 w-3 mr-1" />Healthy</>
-              : <><XCircle className="h-3 w-3 mr-1" />Degraded</>}
-          </Badge>
-        </div>
-      </CardHeader>
-
-      <CardContent className="space-y-4 pb-4">
-        <div>
-          <div className="flex items-center justify-between mb-1.5">
-            <span className="flex items-center gap-1.5 text-sm font-medium text-muted-foreground">
-              <Cpu className="h-3.5 w-3.5" /> CPU
-            </span>
-            <span className="text-2xl font-bold tabular-nums">{cpuPct}%</span>
-          </div>
-          <CpuSparkline data={history} color={cpuColor} />
-        </div>
-
-        {brain.RAMTotal > 0 && (
-          <div className="space-y-1.5">
-            <div className="flex items-center justify-between text-sm">
-              <span className="flex items-center gap-1.5 text-muted-foreground">
-                <MemoryStick className="h-3.5 w-3.5" /> RAM
-              </span>
-              <span className="tabular-nums font-medium">
-                {gb(brain.RAMUsed)} / {gb(brain.RAMTotal)} GB
-                <span className="text-muted-foreground ml-1.5 text-xs">({ramPct}%)</span>
-              </span>
-            </div>
-            <Progress value={ramPct} className={cn('h-2.5 rounded-full', barColor(ramPct))} />
-            <RamSparkline data={ramHistory} />
-          </div>
-        )}
-
-        {brain.DiskTotal > 0 && (
-          <div className="space-y-1.5">
-            <div className="flex items-center justify-between text-sm">
-              <span className="flex items-center gap-1.5 text-muted-foreground">
-                <HardDrive className="h-3.5 w-3.5" /> Disk
-              </span>
-              <span className="tabular-nums font-medium">
-                {gb(brain.DiskUsed)} / {gb(brain.DiskTotal)} GB
-                <span className="text-muted-foreground ml-1.5 text-xs">({diskPct}%)</span>
-              </span>
-            </div>
-            <Progress value={diskPct} className={cn('h-2.5 rounded-full', barColor(diskPct))} />
-          </div>
-        )}
-      </CardContent>
-    </Card>
-  )
-}
-
-// ── NodeCard ──────────────────────────────────────────────────────────────────
-function NodeCard({ node, history, ramHistory }: { node: NodeStats; history: CpuPoint[]; ramHistory: RamPoint[] }) {
-  const isConn = node.status === 'connected'
-  const stale = node.last_stats_at
-    ? Date.now() - new Date(node.last_stats_at).getTime() > 30_000 : true
-  const live = isConn && !stale
-  const ramPct = pct(node.ram_used, node.ram_total)
-  const diskPct = pct(node.disk_used, node.disk_total)
-
-  return (
-    <Card className={cn('border-border/60 overflow-hidden transition-all', !isConn && 'opacity-60')}>
-      <div className={cn('h-0.5', isConn ? 'bg-emerald-500' : 'bg-muted-foreground/30')} />
-      <CardContent className="p-4 space-y-3">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2 min-w-0">
-            <Server className="h-4 w-4 text-muted-foreground shrink-0" />
-            <span className="text-sm font-semibold truncate">{node.name}</span>
-          </div>
-          <span className={cn(
-            'text-xs font-medium rounded-full px-2 py-0.5',
-            isConn
-              ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
-              : 'bg-muted text-muted-foreground',
-          )}>
-            {node.status}
-          </span>
-        </div>
-
-        {live ? (
-          <>
-            <div>
-              <div className="flex items-center justify-between mb-1 text-xs">
-                <span className="text-muted-foreground flex items-center gap-1">
-                  <Cpu className="h-3 w-3" /> CPU
-                </span>
-                <span className="tabular-nums font-bold">{Math.round(node.cpu_usage)}%</span>
-              </div>
-              <CpuSparkline data={history} color="#6366f1" />
-            </div>
-            {node.ram_total > 0 && (
-              <div className="space-y-1">
-                <div className="flex justify-between text-xs text-muted-foreground">
-                  <span className="flex items-center gap-1"><MemoryStick className="h-3 w-3" /> RAM</span>
-                  <span className="tabular-nums">{gb(node.ram_used)} / {gb(node.ram_total)} GB</span>
-                </div>
-                <Progress value={ramPct} className={cn('h-1.5', barColor(ramPct))} />
-                <RamSparkline data={ramHistory} />
-              </div>
-            )}
-            {node.disk_total > 0 && (
-              <div className="space-y-1">
-                <div className="flex justify-between text-xs text-muted-foreground">
-                  <span className="flex items-center gap-1"><HardDrive className="h-3 w-3" /> Disk</span>
-                  <span className="tabular-nums">{gb(node.disk_used)} / {gb(node.disk_total)} GB</span>
-                </div>
-                <Progress value={diskPct} className={cn('h-1.5', barColor(diskPct))} />
-              </div>
-            )}
-          </>
-        ) : (
-          <p className="text-xs text-muted-foreground">
-            {isConn ? 'Collecting stats…' : 'No stats available'}
-          </p>
-        )}
-      </CardContent>
-    </Card>
-  )
-}
 
 // ── UpdateBanner ──────────────────────────────────────────────────────────────
 function UpdateBanner({ info, isSuperAdmin }: { info: VersionInfo; isSuperAdmin: boolean }) {
