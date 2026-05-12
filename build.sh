@@ -715,7 +715,9 @@ cat > /etc/sudoers.d/featherdeploy-podman << 'SUDOEOF'
 featherdeploy ALL=(root) NOPASSWD: /bin/systemctl reload caddy
 featherdeploy ALL=(root) NOPASSWD: /usr/bin/systemctl reload caddy
 featherdeploy ALL=(root) NOPASSWD: /usr/bin/tee /etc/caddy/featherdeploy-services.caddy
+featherdeploy ALL=(root) NOPASSWD: /usr/bin/tee /etc/caddy/featherdeploy-panel.caddy
 featherdeploy ALL=(root) NOPASSWD: /usr/bin/tee /etc/caddy/Caddyfile
+featherdeploy ALL=(root) NOPASSWD: /usr/bin/tee -a /etc/caddy/Caddyfile
 featherdeploy ALL=(root) NOPASSWD: /usr/local/bin/featherdeploy-update
 featherdeploy ALL=(root) NOPASSWD: /sbin/iptables
 featherdeploy ALL=(root) NOPASSWD: /usr/sbin/iptables
@@ -766,12 +768,14 @@ UPDATEEOF
 chmod 755 /usr/local/bin/featherdeploy-update
 echo "  featherdeploy-update installed"
 
-# -- 8e. Create the Caddy services include file with correct ownership so the
-#        FeatherDeploy service account can write domain routing config to it.
+# -- 8e. Create the Caddy services + panel include files with correct ownership
 echo "==> Preparing Caddy services include file..."
 touch /etc/caddy/featherdeploy-services.caddy
 chown "${SVC_USER}:${SVC_USER}" /etc/caddy/featherdeploy-services.caddy
 chmod 644 /etc/caddy/featherdeploy-services.caddy
+touch /etc/caddy/featherdeploy-panel.caddy
+chown "${SVC_USER}:${SVC_USER}" /etc/caddy/featherdeploy-panel.caddy
+chmod 644 /etc/caddy/featherdeploy-panel.caddy
 # Allow the service user to atomically rename temp config files inside /etc/caddy/.
 # Without group-write on the directory, the atomic rename (fastest write path
 # in the Go daemon) fails silently and falls back to sudo tee every time.

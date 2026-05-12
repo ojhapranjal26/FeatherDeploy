@@ -376,8 +376,10 @@ func (h *NodeHandler) NodeLogs(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Prefer tunnel proxy — the node API always listens on port 7443
-		// regardless of what port is stored in the DB (which is used for mTLS direct access).
-		scheme := "http"
+		// The node API runs with TLS, so we must use HTTPS even through the tunnel.
+		// InsecureSkipVerify is safe here: the yamux tunnel (WebSocket/TLS) is
+		// already the encrypted transport layer.
+		scheme := "https"
 		tunnelPort := port
 		if netdaemon.GlobalTunnel != nil {
 			// Try the stored port first, then fall back to 7443 (the node API port)
@@ -393,12 +395,7 @@ func (h *NodeHandler) NodeLogs(w http.ResponseWriter, r *http.Request) {
 						tunnelPort = p
 					}
 				}
-			} else {
-				scheme = "https"
-				tunnelPort = port
 			}
-		} else {
-			scheme = "https"
 		}
 
 		// The node exposes /api/node/logs as an SSE endpoint, we proxy it
@@ -409,7 +406,12 @@ func (h *NodeHandler) NodeLogs(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 			return
 		}
-		client := &http.Client{Timeout: 0}
+		client := &http.Client{
+			Transport: &http.Transport{
+				TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
+			},
+			Timeout: 0,
+		}
 		resp2, err := client.Do(req2)
 		if err != nil {
 			fmt.Fprintf(w, "data: {\"error\":\"connect to node: %s\"}\n\n", err)

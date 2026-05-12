@@ -433,6 +433,37 @@ func serve() {
 	// reload here repairs it before any user traffic arrives.
 	go caddy.Reload(db)
 
+	// Write a Caddy snippet for the panel domain with flush_interval -1 so SSE
+	// log streams are not buffered by Caddy's 30-second proxy timeout.
+	go func() {
+		panelDomain := ""
+		for _, o := range strings.Split(*origin, ",") {
+			o = strings.TrimSpace(o)
+			if o == "" {
+				continue
+			}
+			// Skip localhost/dev origins, only write for real domains
+			if strings.Contains(o, "localhost") || strings.Contains(o, "127.0.0.1") {
+				continue
+			}
+			// Strip scheme to get just the domain
+			o = strings.TrimPrefix(o, "https://")
+			o = strings.TrimPrefix(o, "http://")
+			o = strings.TrimRight(o, "/")
+			if o != "" {
+				panelDomain = o
+				break
+			}
+		}
+		if panelDomain != "" {
+			listenAddr := *addr
+			if strings.HasPrefix(listenAddr, ":") {
+				listenAddr = "127.0.0.1" + listenAddr
+			}
+			caddy.WritePanelSnippet(panelDomain, listenAddr)
+		}
+	}()
+
 	// Periodic Caddy sync: re-generate and reload the services file every 60s.
 	// This self-heals any situation where the initial reload failed (e.g. Caddy
 	// started after featherdeploy, a transient sudo timeout, etc.).
