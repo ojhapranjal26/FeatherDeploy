@@ -206,8 +206,8 @@ func (h *NodeHandler) List(w http.ResponseWriter, r *http.Request) {
 			t, _ := time.Parse(time.RFC3339, lastSeen.String)
 			n.LastSeen = &t
 		}
-		// Load hostname and OS info
-		h.db.QueryRowContext(r.Context(), `SELECT hostname, os_info FROM nodes WHERE id=?`, n.ID).Scan(&n.Hostname, &n.OSInfo)
+		// Load hostname, OS info, and node_id
+		h.db.QueryRowContext(r.Context(), `SELECT hostname, os_info, node_id FROM nodes WHERE id=?`, n.ID).Scan(&n.Hostname, &n.OSInfo, &n.NodeID)
 		nodes = append(nodes, n)
 	}
 	writeJSON(w, http.StatusOK, nodes)

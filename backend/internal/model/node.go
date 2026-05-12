@@ -35,6 +35,7 @@ type Node struct {
 // NodeSummary is the list-view representation shown to the frontend.
 type NodeSummary struct {
 	ID         int64      `json:"id"`
+	NodeID     string     `json:"node_id"`
 	Name       string     `json:"name"`
 	IP         string     `json:"ip"`
 	Port       int        `json:"port"`

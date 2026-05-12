@@ -440,6 +440,12 @@ func runServe() {
 			if brainAddr == knownBrain {
 				continue
 			}
+			// If the brain address is a loopback address, do not attempt to reconnect to it
+			// as loopback is local to the brain server itself.
+			if strings.Contains(brainAddr, "127.0.0.1") || strings.Contains(brainAddr, "localhost") {
+				knownBrain = brainAddr
+				continue
+			}
 			slog.Info("node: brain changed, reconnecting tunnel", "old", knownBrain, "new", brainAddr)
 			knownBrain = brainAddr
 			// Read current token
