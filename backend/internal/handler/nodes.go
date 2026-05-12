@@ -106,8 +106,16 @@ func (h *NodeHandler) EnsureLocalPKI() error {
 		return fmt.Errorf("write ca.crt: %w", err)
 	}
 
-	// If node cert/key missing, generate them for the "main" server
-	if _, err := os.Stat(nodeCertFile); os.IsNotExist(err) {
+	// Check if node cert/key are missing or empty
+	var needsGen bool
+	if info, err := os.Stat(nodeCertFile); os.IsNotExist(err) || (err == nil && info.Size() == 0) {
+		needsGen = true
+	}
+	if info, err := os.Stat(nodeKeyFile); os.IsNotExist(err) || (err == nil && info.Size() == 0) {
+		needsGen = true
+	}
+
+	if needsGen {
 		serverIP := os.Getenv("SERVER_IP")
 		if serverIP == "" {
 			serverIP = "127.0.0.1"
