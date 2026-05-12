@@ -20,6 +20,7 @@ import { DevicesPage } from '@/pages/DevicesPage'
 import { UserSettingsPage } from '@/pages/UserSettingsPage'
 import { StoragePage } from '@/pages/StoragePage'
 import { StorageDetailPage } from '@/pages/StorageDetailPage'
+import { ClusterPage } from '@/pages/ClusterPage'
 
 export default function App() {
   return (
@@ -35,6 +36,7 @@ export default function App() {
         <Route element={<AppLayout />}>
           <Route index element={<Navigate to="/dashboard" replace />} />
           <Route path="dashboard" element={<DashboardPage />} />
+          <Route path="cluster" element={<ClusterPage />} />
           <Route path="devices" element={<DevicesPage />} />
           <Route path="settings/profile" element={<UserSettingsPage />} />
           <Route path="projects" element={<ProjectsListPage />} />

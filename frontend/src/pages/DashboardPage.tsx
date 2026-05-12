@@ -1,4 +1,4 @@
-﻿import { useRef, useState, useEffect } from 'react'
+import { useRef, useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery, useMutation } from '@tanstack/react-query'
 import {
@@ -536,34 +536,102 @@ export function DashboardPage() {
           bgCls="bg-red-500/10" loading={dashLoading} />
       </div>
 
-      {/* Infrastructure nodes */}
-      <div className="space-y-3">
-        <h2 className="text-lg font-semibold flex items-center gap-2">
-          <Layers className="h-5 w-5 text-muted-foreground" />
-          Infrastructure Nodes
-        </h2>
-        {!brain ? (
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {[...Array(3)].map((_, i) => (
-              <Card key={i} className="border-border/60">
-                <CardContent className="p-4 space-y-3">
-                  <Skeleton className="h-5 w-32" />
-                  <Skeleton className="h-12 w-full" />
-                  <Skeleton className="h-3 w-full" />
-                  <Skeleton className="h-3 w-full" />
+      {/* Cluster Health card — click to open the full cluster page */}
+      {(() => {
+        // Aggregate CPU / RAM / Disk across Brain + all worker nodes
+        const allNodes = [
+          ...(brain ? [{ cpu: brain.CPU ?? 0, ramUsed: brain.RAMUsed, ramTotal: brain.RAMTotal, diskUsed: brain.DiskUsed, diskTotal: brain.DiskTotal, alive: brain.Alive }] : []),
+          ...liveNodes.map(n => ({ cpu: n.cpu_usage, ramUsed: n.ram_used, ramTotal: n.ram_total, diskUsed: n.disk_used, diskTotal: n.disk_total, alive: n.status === 'connected' })),
+        ]
+        const nodeCount = allNodes.length || 1
+        const avgCpu   = allNodes.length ? Math.round(allNodes.reduce((s, n) => s + n.cpu, 0) / nodeCount) : 0
+        const totalRamUsed  = allNodes.reduce((s, n) => s + (n.ramUsed  || 0), 0)
+        const totalRamTotal = allNodes.reduce((s, n) => s + (n.ramTotal || 0), 0)
+        const totalDiskUsed  = allNodes.reduce((s, n) => s + (n.diskUsed  || 0), 0)
+        const totalDiskTotal = allNodes.reduce((s, n) => s + (n.diskTotal || 0), 0)
+        const ramPct  = totalRamTotal  > 0 ? Math.round((totalRamUsed  / totalRamTotal)  * 100) : 0
+        const diskPct = totalDiskTotal > 0 ? Math.round((totalDiskUsed / totalDiskTotal) * 100) : 0
+        const onlineCount = allNodes.filter(n => n.alive).length
+
+        const bar = (v: number) => v > 85 ? 'bg-red-500' : v > 65 ? 'bg-amber-400' : 'bg-emerald-500'
+
+        return (
+          <div className="space-y-3">
+            <h2 className="text-lg font-semibold flex items-center gap-2">
+              <Layers className="h-5 w-5 text-muted-foreground" />
+              Cluster Health
+            </h2>
+            <button
+              onClick={() => navigate('/cluster')}
+              className="w-full text-left group"
+            >
+              <Card className="border-border/60 overflow-hidden hover:border-primary/40 hover:shadow-md transition-all cursor-pointer">
+                <div className={cn('h-0.5', connected ? 'bg-emerald-500' : 'bg-muted-foreground/30')} />
+                <CardContent className="p-5 space-y-4">
+                  {/* Top row */}
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-primary/10 text-primary">
+                        <Server className="h-5 w-5" />
+                      </div>
+                      <div>
+                        <p className="font-semibold text-base">
+                          {onlineCount} / {allNodes.length} {allNodes.length === 1 ? 'Node' : 'Nodes'} Online
+                        </p>
+                        <p className="text-xs text-muted-foreground">Click to view all nodes & logs</p>
+                      </div>
+                    </div>
+                    <span className={cn(
+                      'text-xs font-medium rounded-full px-2.5 py-1 border',
+                      connected
+                        ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-300/30'
+                        : 'bg-muted text-muted-foreground border-border',
+                    )}>
+                      {connected ? '● Live' : '○ Reconnecting'}
+                    </span>
+                  </div>
+
+                  {/* Stats grid */}
+                  <div className="grid grid-cols-3 gap-4">
+                    {/* CPU */}
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between text-xs text-muted-foreground">
+                        <span className="flex items-center gap-1"><Cpu className="h-3 w-3" /> Avg CPU</span>
+                        <span className="font-bold text-foreground tabular-nums">{avgCpu}%</span>
+                      </div>
+                      <div className="h-2 rounded-full bg-muted overflow-hidden">
+                        <div className={cn('h-full rounded-full transition-all', bar(avgCpu))} style={{ width: `${avgCpu}%` }} />
+                      </div>
+                    </div>
+                    {/* RAM */}
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between text-xs text-muted-foreground">
+                        <span className="flex items-center gap-1"><MemoryStick className="h-3 w-3" /> RAM</span>
+                        <span className="font-bold text-foreground tabular-nums">{ramPct}%</span>
+                      </div>
+                      <div className="h-2 rounded-full bg-muted overflow-hidden">
+                        <div className={cn('h-full rounded-full transition-all', bar(ramPct))} style={{ width: `${ramPct}%` }} />
+                      </div>
+                      <p className="text-[10px] text-muted-foreground tabular-nums">{gb(totalRamUsed)} / {gb(totalRamTotal)} GB</p>
+                    </div>
+                    {/* Disk */}
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between text-xs text-muted-foreground">
+                        <span className="flex items-center gap-1"><HardDrive className="h-3 w-3" /> Disk</span>
+                        <span className="font-bold text-foreground tabular-nums">{diskPct}%</span>
+                      </div>
+                      <div className="h-2 rounded-full bg-muted overflow-hidden">
+                        <div className={cn('h-full rounded-full transition-all', bar(diskPct))} style={{ width: `${diskPct}%` }} />
+                      </div>
+                      <p className="text-[10px] text-muted-foreground tabular-nums">{gb(totalDiskUsed)} / {gb(totalDiskTotal)} GB</p>
+                    </div>
+                  </div>
                 </CardContent>
               </Card>
-            ))}
+            </button>
           </div>
-        ) : (
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            <BrainCard brain={brain} history={brainHistoryRef.current} ramHistory={brainRamHistoryRef.current} connected={connected} />
-            {liveNodes.map(node => (
-              <NodeCard key={node.id} node={node} history={nodeHistoriesRef.current[node.id] ?? []} ramHistory={nodeRamHistoriesRef.current[node.id] ?? []} />
-            ))}
-          </div>
-        )}
-      </div>
+        )
+      })()}
 
       {/* Recent deployments */}
       {recentDeps.length > 0 && (
