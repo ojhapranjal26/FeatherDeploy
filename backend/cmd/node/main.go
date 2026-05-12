@@ -642,7 +642,7 @@ WantedBy=multi-user.target
 
 func writeRqliteService(nodeID, mainRaft, myIP string) {
 	content := fmt.Sprintf(rqliteServiceTmpl,
-		nodeID, rqliteHTTP, myIP, rqliteRaft, myIP, mainRaft, rqliteData)
+		nodeID, myIP, myIP, mainRaft, rqliteData)
 	writeFile(rqliteUnit, content, 0644)
 }
 
@@ -673,9 +673,8 @@ WantedBy=multi-user.target
 `
 
 func writeEtcdService(nodeID, etcdMain, myIP string) {
-	etcdPeerURL := "http://127.0.0.1:2380"
 	content := fmt.Sprintf(etcdServiceTmpl,
-		dataDir, dataDir, nodeID, dataDir, etcdPeerURL, etcdMain, nodeID, etcdPeerURL)
+		dataDir, dataDir, nodeID, dataDir, etcdMain, nodeID, "127.0.0.1")
 	writeFile("/etc/systemd/system/etcd-node.service", content, 0644)
 }
 
