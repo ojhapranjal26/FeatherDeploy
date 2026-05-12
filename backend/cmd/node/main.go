@@ -170,13 +170,8 @@ func runJoin(args []string) {
 		rqliteJoinAddr = "127.0.0.1:" + port
 	}
 
-	// Update etcdMain to use localhost through the tunnel
+	// Preserve the literal etcdMain string to satisfy etcd's cluster consensus validation checks
 	etcdMain := reply.EtcdMain
-	if etcdMain != "" {
-		// Replace brain IP with 127.0.0.1
-		mainIP := extractHost(mainURL)
-		etcdMain = strings.Replace(etcdMain, mainIP, "127.0.0.1", -1)
-	}
 
 	// Connectivity check: ensure we can reach the main server's WebSocket tunnel
 	wsURL := strings.Replace(mainURL, "http", "ws", 1) + "/api/cluster/tunnel"
@@ -631,7 +626,7 @@ ExecStart=/usr/local/bin/rqlited \
   -raft-addr=127.0.0.1:4004 \
   -http-adv-addr=%s:4003 \
   -raft-adv-addr=%s:4004 \
-  -join=http://%s \
+  -join=%s \
   %s
 Restart=always
 RestartSec=5
@@ -660,8 +655,8 @@ ExecStart=/usr/local/bin/etcd \
   --listen-client-urls=http://127.0.0.1:2381 \
   --advertise-client-urls=http://127.0.0.1:2381 \
   --listen-peer-urls=http://127.0.0.1:2382 \
-  --initial-advertise-peer-urls=http://127.0.0.1:2382 \
-  --initial-cluster=%s,%s=http://%s:2382 \
+  --initial-advertise-peer-urls=http://%s:2380 \
+  --initial-cluster=%s,%s=http://%s:2380 \
   --initial-cluster-token=etcd-cluster-1 \
   --initial-cluster-state=existing
 Restart=always
@@ -672,10 +667,20 @@ WantedBy=multi-user.target
 `
 
 func writeEtcdService(nodeID, etcdMain, myIP string) {
-	// Always force etcdMain to route through the secure loopback tunnel proxy
-	safeEtcdMain := "main=http://127.0.0.1:2380"
+	// Parse the main server's IP from etcdMain string (e.g. main=http://103.91.187.212:2380)
+	parts := strings.Split(etcdMain, "://")
+	if len(parts) > 1 {
+		hostPort := strings.Split(parts[1], ":")
+		if len(hostPort) > 0 {
+			mainIP := hostPort[0]
+			// Intercept outgoing traffic targeting the brain's external IP on port 2380 and route it to our secure loopback tunnel proxy port 2380
+			exec.Command("iptables", "-t", "nat", "-D", "OUTPUT", "-p", "tcp", "-d", mainIP, "--dport", "2380", "-j", "DNAT", "--to-destination", "127.0.0.1:2380").Run()
+			exec.Command("iptables", "-t", "nat", "-A", "OUTPUT", "-p", "tcp", "-d", mainIP, "--dport", "2380", "-j", "DNAT", "--to-destination", "127.0.0.1:2380").Run()
+		}
+	}
+
 	content := fmt.Sprintf(etcdServiceTmpl,
-		dataDir, dataDir, nodeID, dataDir, safeEtcdMain, nodeID, "127.0.0.1")
+		dataDir, dataDir, nodeID, dataDir, myIP, etcdMain, nodeID, myIP)
 	writeFile("/etc/systemd/system/etcd-node.service", content, 0644)
 }
 
