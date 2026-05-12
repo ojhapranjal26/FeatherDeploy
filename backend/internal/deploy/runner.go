@@ -2633,19 +2633,11 @@ func migrateDatabaseDataBackground(db *sql.DB, secret string, taskID, dbID int64
 		return fmt.Errorf("old node %q not found", oldNodeID)
 	}
 
-	viaTunnel := false
-	if netdaemon.GlobalTunnel != nil {
-		if proxyAddr := netdaemon.GlobalTunnel.GetNodeProxyAddr(oldNodeID, port); proxyAddr != "" {
-			ip = "127.0.0.1"
-			parts := strings.Split(proxyAddr, ":")
-			if len(parts) == 2 {
-				if parsedPort, err := strconv.Atoi(parts[1]); err == nil {
-					port = parsedPort
-				}
-			}
-			viaTunnel = true
-		}
+	if tunnelIP, tunnelPort, _ := resolveNodeTunnel(oldNodeID, port); tunnelIP != "" {
+		ip = tunnelIP
+		port = tunnelPort
 	}
+	viaTunnel := netdaemon.GlobalTunnel != nil && ip == "127.0.0.1"
 
 	client, scheme := nodeHTTPClient(viaTunnel, 0) // 0 = no timeout for long transfers
 
@@ -3711,6 +3703,35 @@ func extractTarGz(archivePath, destDir string, log *logBuf) error {
 	return nil
 }
 
+// resolveNodeTunnel looks up the local proxy address for a node API connection.
+// The node API always listens on port 7443 regardless of what is stored in the
+// DB (the DB port can be 443 from old registrations). We try the DB port first,
+// then fall back to 7443.
+func resolveNodeTunnel(nodeID string, dbPort int) (ip string, port int, viaTunnel bool) {
+	ip = ""
+	port = dbPort
+	viaTunnel = false
+	if netdaemon.GlobalTunnel == nil {
+		return
+	}
+	proxyAddr := netdaemon.GlobalTunnel.GetNodeProxyAddr(nodeID, dbPort)
+	if proxyAddr == "" && dbPort != 7443 {
+		proxyAddr = netdaemon.GlobalTunnel.GetNodeProxyAddr(nodeID, 7443)
+	}
+	if proxyAddr == "" {
+		return
+	}
+	parts := strings.Split(proxyAddr, ":")
+	if len(parts) == 2 {
+		if p, err := strconv.Atoi(parts[1]); err == nil {
+			port = p
+		}
+	}
+	ip = "127.0.0.1"
+	viaTunnel = true
+	return
+}
+
 // nodeHTTPClient builds the appropriate HTTP client for talking to a node.
 // When viaTunnel is true the request goes over the yamux tunnel proxy (plain HTTP,
 // no mTLS needed because the tunnel itself is the encrypted channel).
@@ -3746,20 +3767,12 @@ func dispatchToNode(db *sql.DB, nodeID string, depID, svcID, userID int64, secre
 	}
 
 	// Route traffic over the secure tunnel if a proxy is available
-	viaTunnel := false
-	if netdaemon.GlobalTunnel != nil {
-		if proxyAddr := netdaemon.GlobalTunnel.GetNodeProxyAddr(nodeID, port); proxyAddr != "" {
-			ip = "127.0.0.1"
-			// proxyAddr looks like "127.0.0.1:20054"
-			parts := strings.Split(proxyAddr, ":")
-			if len(parts) == 2 {
-				if parsedPort, err := strconv.Atoi(parts[1]); err == nil {
-					port = parsedPort
-				}
-			}
-			viaTunnel = true
-		}
+	if tunnelIP, tunnelPort, viaTunnel := resolveNodeTunnel(nodeID, port); tunnelIP != "" {
+		ip = tunnelIP
+		port = tunnelPort
+		_ = viaTunnel
 	}
+	viaTunnel := netdaemon.GlobalTunnel != nil && ip == "127.0.0.1"
 
 	// Prepare payload
 	payload := map[string]any{
@@ -3794,19 +3807,11 @@ func stopContainerOnNode(db *sql.DB, nodeID, containerID string) error {
 		return fmt.Errorf("node %q not found: %w", nodeID, err)
 	}
 
-	viaTunnel := false
-	if netdaemon.GlobalTunnel != nil {
-		if proxyAddr := netdaemon.GlobalTunnel.GetNodeProxyAddr(nodeID, port); proxyAddr != "" {
-			ip = "127.0.0.1"
-			parts := strings.Split(proxyAddr, ":")
-			if len(parts) == 2 {
-				if parsedPort, err := strconv.Atoi(parts[1]); err == nil {
-					port = parsedPort
-				}
-			}
-			viaTunnel = true
-		}
+	if tunnelIP, tunnelPort, _ := resolveNodeTunnel(nodeID, port); tunnelIP != "" {
+		ip = tunnelIP
+		port = tunnelPort
 	}
+	viaTunnel := netdaemon.GlobalTunnel != nil && ip == "127.0.0.1"
 
 	payload := map[string]any{"container_id": containerID}
 	body, _ := json.Marshal(payload)
@@ -3835,19 +3840,11 @@ func dispatchDatabaseToNode(db *sql.DB, secret, nodeID string, dbID int64) error
 		return fmt.Errorf("node %q not found", nodeID)
 	}
 
-	viaTunnel := false
-	if netdaemon.GlobalTunnel != nil {
-		if proxyAddr := netdaemon.GlobalTunnel.GetNodeProxyAddr(nodeID, port); proxyAddr != "" {
-			ip = "127.0.0.1"
-			parts := strings.Split(proxyAddr, ":")
-			if len(parts) == 2 {
-				if parsedPort, err := strconv.Atoi(parts[1]); err == nil {
-					port = parsedPort
-				}
-			}
-			viaTunnel = true
-		}
+	if tunnelIP, tunnelPort, _ := resolveNodeTunnel(nodeID, port); tunnelIP != "" {
+		ip = tunnelIP
+		port = tunnelPort
 	}
+	viaTunnel := netdaemon.GlobalTunnel != nil && ip == "127.0.0.1"
 
 	payload := map[string]any{
 		"db_id":      dbID,
@@ -3877,19 +3874,11 @@ func migrateDatabaseData(db *sql.DB, secret, oldNodeID string, dbID int64) error
 		return fmt.Errorf("old node %q not found", oldNodeID)
 	}
 
-	viaTunnel := false
-	if netdaemon.GlobalTunnel != nil {
-		if proxyAddr := netdaemon.GlobalTunnel.GetNodeProxyAddr(oldNodeID, port); proxyAddr != "" {
-			ip = "127.0.0.1"
-			parts := strings.Split(proxyAddr, ":")
-			if len(parts) == 2 {
-				if parsedPort, err := strconv.Atoi(parts[1]); err == nil {
-					port = parsedPort
-				}
-			}
-			viaTunnel = true
-		}
+	if tunnelIP, tunnelPort, _ := resolveNodeTunnel(oldNodeID, port); tunnelIP != "" {
+		ip = tunnelIP
+		port = tunnelPort
 	}
+	viaTunnel := netdaemon.GlobalTunnel != nil && ip == "127.0.0.1"
 
 	client, scheme := nodeHTTPClient(viaTunnel, 2*time.Minute)
 

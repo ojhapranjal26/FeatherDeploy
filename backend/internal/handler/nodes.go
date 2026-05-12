@@ -221,7 +221,7 @@ func (h *NodeHandler) Add(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Port == 0 {
-		req.Port = 443
+		req.Port = 7443
 	}
 
 	token := randomHex20()
@@ -375,24 +375,34 @@ func (h *NodeHandler) NodeLogs(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Prefer tunnel proxy
+		// Prefer tunnel proxy — the node API always listens on port 7443
+		// regardless of what port is stored in the DB (which is used for mTLS direct access).
 		scheme := "http"
+		tunnelPort := port
 		if netdaemon.GlobalTunnel != nil {
-			if proxyAddr := netdaemon.GlobalTunnel.GetNodeProxyAddr(dbNodeID, port); proxyAddr != "" {
+			// Try the stored port first, then fall back to 7443 (the node API port)
+			proxyAddr := netdaemon.GlobalTunnel.GetNodeProxyAddr(dbNodeID, port)
+			if proxyAddr == "" && port != 7443 {
+				proxyAddr = netdaemon.GlobalTunnel.GetNodeProxyAddr(dbNodeID, 7443)
+			}
+			if proxyAddr != "" {
 				ip = "127.0.0.1"
 				parts := strings.Split(proxyAddr, ":")
 				if len(parts) == 2 {
 					if p, err2 := strconv.Atoi(parts[1]); err2 == nil {
-						port = p
+						tunnelPort = p
 					}
 				}
+			} else {
+				scheme = "https"
+				tunnelPort = port
 			}
 		} else {
 			scheme = "https"
 		}
 
 		// The node exposes /api/node/logs as an SSE endpoint, we proxy it
-		nodeURL := fmt.Sprintf("%s://%s:%d/api/node/logs", scheme, ip, port)
+		nodeURL := fmt.Sprintf("%s://%s:%d/api/node/logs", scheme, ip, tunnelPort)
 		req2, err := http.NewRequestWithContext(r.Context(), "GET", nodeURL, nil)
 		if err != nil {
 			fmt.Fprintf(w, "data: {\"error\":\"build request: %s\"}\n\n", err)
@@ -649,7 +659,7 @@ func (h *NodeHandler) CompleteJoin(w http.ResponseWriter, r *http.Request) {
 	_, err = h.db.ExecContext(r.Context(),
 		`UPDATE nodes SET status='connected', ip=?, hostname=?, os_info=?, node_id=?, node_cert_pem=?, rqlite_addr=?,
 		 join_token=NULL, token_expires_at=NULL, last_seen=datetime('now'),
-		 tunnel_token=?, updated_at=datetime('now') WHERE id=?`,
+		 port=7443, tunnel_token=?, updated_at=datetime('now') WHERE id=?`,
 		nodeIP, payload.Hostname, payload.OSInfo, payload.Hostname, nodeCert.CertPEM, payload.RqliteAddr, tunnelToken, node.ID,
 	)
 	if err != nil {
