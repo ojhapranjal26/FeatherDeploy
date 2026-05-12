@@ -161,14 +161,8 @@ func runJoin(args []string) {
 	}
 
 	// Write and start rqlite service (join main Raft cluster)
-	// Determine main IP from mainURL for Raft join address.
-	// Since we are using a tunnel, we join via localhost:4001 which is proxied to the brain.
-	rqliteJoinAddr := "127.0.0.1:4001"
-	if reply.RqliteMain != "" {
-		parts := strings.Split(reply.RqliteMain, ":")
-		port := parts[len(parts)-1]
-		rqliteJoinAddr = "127.0.0.1:" + port
-	}
+	// Since we are using a tunnel, we join via loopback port 4002 which is proxied directly to the brain's pure Raft cluster socket.
+	rqliteJoinAddr := "127.0.0.1:4002"
 
 	// Preserve the literal etcdMain string to satisfy etcd's cluster consensus validation checks
 	etcdMain := reply.EtcdMain
