@@ -1,9 +1,9 @@
-import { useState } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   Server, Plus, Trash2, Copy, Check, Loader2, RefreshCw,
   CheckCircle2, Clock, WifiOff, AlertCircle, Crown, Terminal,
-  Cpu, MemoryStick, HardDrive,
+  Cpu, MemoryStick, HardDrive, ScrollText, X,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -164,6 +164,94 @@ function SSHCommandDialog({ node }: { node: Node }) {
   )
 }
 
+// ── Node Logs Viewer ─────────────────────────────────────────────────────────
+
+function NodeLogsDialog({ nodeId, nodeName }: { nodeId: string | number; nodeName: string }) {
+  const [open, setOpen] = useState(false)
+  const [lines, setLines] = useState<string[]>([])
+  const [error, setError] = useState('')
+  const bottomRef = useRef<HTMLDivElement>(null)
+  const esRef = useRef<EventSource | null>(null)
+
+  const openLogs = () => {
+    setLines([])
+    setError('')
+    setOpen(true)
+    const token = localStorage.getItem('token') || ''
+    const url = `/api/nodes/${nodeId}/logs?token=${encodeURIComponent(token)}`
+    const es = new EventSource(url)
+    esRef.current = es
+    es.onmessage = (e) => {
+      try {
+        const data = JSON.parse(e.data)
+        if (data.error) { setError(data.error); return }
+        if (data.line) setLines(prev => [...prev.slice(-500), data.line])
+      } catch { /* ignore */ }
+    }
+    es.onerror = () => setError('Connection lost. The node may be offline.')
+  }
+
+  const closeLogs = () => {
+    esRef.current?.close()
+    esRef.current = null
+    setOpen(false)
+  }
+
+  useEffect(() => {
+    if (open) bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [lines, open])
+
+  useEffect(() => () => { esRef.current?.close() }, [])
+
+  return (
+    <>
+      <button
+        onClick={openLogs}
+        title="View Logs"
+        className="inline-flex items-center justify-center h-8 w-8 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+      >
+        <ScrollText className="h-4 w-4" />
+      </button>
+
+      {open && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+          <div className="relative w-full max-w-4xl bg-zinc-950 border border-zinc-800 rounded-xl shadow-2xl flex flex-col" style={{ height: '80vh' }}>
+            <div className="flex items-center justify-between px-4 py-3 border-b border-zinc-800">
+              <div className="flex items-center gap-2">
+                <ScrollText className="h-4 w-4 text-emerald-400" />
+                <span className="font-semibold text-white text-sm">{nodeName} — Live Logs</span>
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-500/15 border border-emerald-500/30 text-xs text-emerald-400">
+                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                  streaming
+                </span>
+              </div>
+              <button onClick={closeLogs} className="text-zinc-400 hover:text-white transition-colors">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-4 font-mono text-xs text-zinc-300 space-y-0.5 scroll-smooth">
+              {error ? (
+                <p className="text-red-400">{error}</p>
+              ) : lines.length === 0 ? (
+                <p className="text-zinc-500 italic">Waiting for log lines…</p>
+              ) : (
+                lines.map((l, i) => (
+                  <div key={i} className={`whitespace-pre-wrap leading-5 ${
+                    l.includes('ERROR') || l.includes('error') ? 'text-red-400' :
+                    l.includes('WARN') || l.includes('warn') ? 'text-amber-400' :
+                    l.includes('INFO') || l.includes('info') ? 'text-zinc-300' : 'text-zinc-500'
+                  }`}>{l}</div>
+                ))
+              )}
+              <div ref={bottomRef} />
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  )
+}
+
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 export function NodesPage() {
@@ -266,6 +354,7 @@ export function NodesPage() {
           <Button variant="outline" size="icon" onClick={() => refetch()} title="Refresh">
             <RefreshCw className="h-4 w-4" />
           </Button>
+          <NodeLogsDialog nodeId="brain" nodeName="Brain (Main Server)" />
 
           <Dialog open={addOpen} onOpenChange={closeAdd}>
             <DialogTrigger>
@@ -423,6 +512,7 @@ export function NodesPage() {
                           <RefreshCw className={`h-4 w-4 ${regenerateMutation.isPending ? 'animate-spin' : ''}`} />
                         </Button>
                       )}
+                      <NodeLogsDialog nodeId={node.id} nodeName={node.name} />
                       <SSHCommandDialog node={node} />
                       <Button
                         variant="ghost"

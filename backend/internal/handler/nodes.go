@@ -26,6 +26,7 @@ import (
 	crypto "github.com/ojhapranjal26/featherdeploy/backend/internal/crypto"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/middleware"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/model"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/netdaemon"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/pki"
 	v "github.com/ojhapranjal26/featherdeploy/backend/internal/validator"
 )
@@ -282,6 +283,134 @@ func (h *NodeHandler) RegenerateToken(w http.ResponseWriter, r *http.Request) {
 		"token_expires_at": expires,
 		"join_command":     h.joinCommand(token),
 	})
+}
+
+// GET /api/nodes/brain/logs — SSE stream of brain (main server) logs
+// GET /api/nodes/{nodeID}/logs — SSE stream of a worker node's logs via tunnel
+func (h *NodeHandler) NodeLogs(w http.ResponseWriter, r *http.Request) {
+	nodeParam := chi.URLParam(r, "nodeID")
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	if nodeParam == "brain" {
+		// Stream local brain logs via journalctl
+		cmd := exec.CommandContext(r.Context(),
+			"journalctl", "-u", "featherdeploy", "-n", "100", "--follow", "--no-pager", "--output=short-iso")
+		stdout, err := cmd.StdoutPipe()
+		if err != nil {
+			fmt.Fprintf(w, "data: {\"error\":\"failed to start journalctl: %s\"}\n\n", err)
+			flusher.Flush()
+			return
+		}
+		if err := cmd.Start(); err != nil {
+			fmt.Fprintf(w, "data: {\"error\":\"journalctl start: %s\"}\n\n", err)
+			flusher.Flush()
+			return
+		}
+		defer cmd.Wait()
+
+		buf := make([]byte, 4096)
+		for {
+			select {
+			case <-r.Context().Done():
+				return
+			default:
+				n, err := stdout.Read(buf)
+				if n > 0 {
+					lines := strings.Split(string(buf[:n]), "\n")
+					for _, line := range lines {
+						line = strings.TrimSpace(line)
+						if line == "" {
+							continue
+						}
+						data, _ := json.Marshal(map[string]string{"line": line})
+						fmt.Fprintf(w, "data: %s\n\n", data)
+					}
+					flusher.Flush()
+				}
+				if err != nil {
+					return
+				}
+			}
+		}
+	} else {
+		// Worker node — stream via the tunnel
+		nodeID, err := strconv.ParseInt(nodeParam, 10, 64)
+		if err != nil {
+			fmt.Fprintf(w, "data: {\"error\":\"invalid node id\"}\n\n")
+			flusher.Flush()
+			return
+		}
+
+		var dbNodeID string
+		var ip string
+		var port int
+		err = h.db.QueryRowContext(r.Context(),
+			`SELECT node_id, ip, port FROM nodes WHERE id=?`, nodeID).Scan(&dbNodeID, &ip, &port)
+		if err != nil {
+			fmt.Fprintf(w, "data: {\"error\":\"node not found\"}\n\n")
+			flusher.Flush()
+			return
+		}
+
+		// Prefer tunnel proxy
+		scheme := "http"
+		if netdaemon.GlobalTunnel != nil {
+			if proxyAddr := netdaemon.GlobalTunnel.GetNodeProxyAddr(dbNodeID, port); proxyAddr != "" {
+				ip = "127.0.0.1"
+				parts := strings.Split(proxyAddr, ":")
+				if len(parts) == 2 {
+					if p, err2 := strconv.Atoi(parts[1]); err2 == nil {
+						port = p
+					}
+				}
+			}
+		} else {
+			scheme = "https"
+		}
+
+		// The node exposes /api/node/logs as an SSE endpoint, we proxy it
+		nodeURL := fmt.Sprintf("%s://%s:%d/api/node/logs", scheme, ip, port)
+		req2, err := http.NewRequestWithContext(r.Context(), "GET", nodeURL, nil)
+		if err != nil {
+			fmt.Fprintf(w, "data: {\"error\":\"build request: %s\"}\n\n", err)
+			flusher.Flush()
+			return
+		}
+		client := &http.Client{Timeout: 0}
+		resp2, err := client.Do(req2)
+		if err != nil {
+			fmt.Fprintf(w, "data: {\"error\":\"connect to node: %s\"}\n\n", err)
+			flusher.Flush()
+			return
+		}
+		defer resp2.Body.Close()
+
+		buf := make([]byte, 4096)
+		for {
+			select {
+			case <-r.Context().Done():
+				return
+			default:
+				n, err := resp2.Body.Read(buf)
+				if n > 0 {
+					w.Write(buf[:n])
+					flusher.Flush()
+				}
+				if err != nil {
+					return
+				}
+			}
+		}
+	}
 }
 
 // DELETE /api/nodes/{nodeID} — remove a node

@@ -17,6 +17,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/tls"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -2632,6 +2633,7 @@ func migrateDatabaseDataBackground(db *sql.DB, secret string, taskID, dbID int64
 		return fmt.Errorf("old node %q not found", oldNodeID)
 	}
 
+	viaTunnel := false
 	if netdaemon.GlobalTunnel != nil {
 		if proxyAddr := netdaemon.GlobalTunnel.GetNodeProxyAddr(oldNodeID, port); proxyAddr != "" {
 			ip = "127.0.0.1"
@@ -2641,17 +2643,11 @@ func migrateDatabaseDataBackground(db *sql.DB, secret string, taskID, dbID int64
 					port = parsedPort
 				}
 			}
+			viaTunnel = true
 		}
 	}
 
-	caFile, _ := os.ReadFile("/etc/featherdeploy/ca.crt")
-	certFile, _ := os.ReadFile("/etc/featherdeploy/node.crt")
-	keyFile, _ := os.ReadFile("/etc/featherdeploy/node.key")
-	tlsCfg, _ := pki.TLSConfig(string(certFile), string(keyFile), string(caFile))
-	client := &http.Client{
-		Transport: &http.Transport{TLSClientConfig: tlsCfg},
-		Timeout:   0, // Long-lived transfer
-	}
+	client, scheme := nodeHTTPClient(viaTunnel, 0) // 0 = no timeout for long transfers
 
 	// 1. Trigger backup on old node
 	payload := map[string]any{
@@ -2659,7 +2655,7 @@ func migrateDatabaseDataBackground(db *sql.DB, secret string, taskID, dbID int64
 		"jwt_secret": secret,
 	}
 	body, _ := json.Marshal(payload)
-	url := fmt.Sprintf("https://%s:%d/api/node/db-backup", ip, port)
+	url := fmt.Sprintf("%s://%s:%d/api/node/db-backup", scheme, ip, port)
 	resp, err := client.Post(url, "application/json", bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("backup request: %w", err)
@@ -3715,6 +3711,32 @@ func extractTarGz(archivePath, destDir string, log *logBuf) error {
 	return nil
 }
 
+// nodeHTTPClient builds the appropriate HTTP client for talking to a node.
+// When viaTunnel is true the request goes over the yamux tunnel proxy (plain HTTP,
+// no mTLS needed because the tunnel itself is the encrypted channel).
+// When viaTunnel is false we are talking directly to the node over the public network
+// and need a full mTLS client.
+func nodeHTTPClient(viaTunnel bool, timeout time.Duration) (*http.Client, string) {
+	if viaTunnel {
+		return &http.Client{Timeout: timeout}, "http"
+	}
+	caPEM, _ := os.ReadFile("/etc/featherdeploy/ca.crt")
+	certPEM, _ := os.ReadFile("/etc/featherdeploy/node.crt")
+	keyPEM, _ := os.ReadFile("/etc/featherdeploy/node.key")
+	tlsCfg, err := pki.TLSConfig(string(certPEM), string(keyPEM), string(caPEM))
+	if err != nil {
+		slog.Warn("nodeHTTPClient: mTLS config failed, falling back to insecure", "err", err)
+		return &http.Client{
+			Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
+			Timeout:   timeout,
+		}, "https"
+	}
+	return &http.Client{
+		Transport: &http.Transport{TLSClientConfig: tlsCfg},
+		Timeout:   timeout,
+	}, "https"
+}
+
 func dispatchToNode(db *sql.DB, nodeID string, depID, svcID, userID int64, secret string) error {
 	var ip string
 	var port int
@@ -3724,6 +3746,7 @@ func dispatchToNode(db *sql.DB, nodeID string, depID, svcID, userID int64, secre
 	}
 
 	// Route traffic over the secure tunnel if a proxy is available
+	viaTunnel := false
 	if netdaemon.GlobalTunnel != nil {
 		if proxyAddr := netdaemon.GlobalTunnel.GetNodeProxyAddr(nodeID, port); proxyAddr != "" {
 			ip = "127.0.0.1"
@@ -3734,6 +3757,7 @@ func dispatchToNode(db *sql.DB, nodeID string, depID, svcID, userID int64, secre
 					port = parsedPort
 				}
 			}
+			viaTunnel = true
 		}
 	}
 
@@ -3746,21 +3770,8 @@ func dispatchToNode(db *sql.DB, nodeID string, depID, svcID, userID int64, secre
 	}
 	body, _ := json.Marshal(payload)
 
-	// Build mTLS client
-	caPEM, _ := os.ReadFile("/etc/featherdeploy/ca.crt")
-	certPEM, _ := os.ReadFile("/etc/featherdeploy/node.crt")
-	keyPEM, _ := os.ReadFile("/etc/featherdeploy/node.key")
-
-	tlsCfg, err := pki.TLSConfig(string(certPEM), string(keyPEM), string(caPEM))
-	if err != nil {
-		return fmt.Errorf("tls config: %w", err)
-	}
-	client := &http.Client{
-		Transport: &http.Transport{TLSClientConfig: tlsCfg},
-		Timeout:   30 * time.Second,
-	}
-
-	url := fmt.Sprintf("https://%s:%d/api/node/deploy", ip, port)
+	client, scheme := nodeHTTPClient(viaTunnel, 30*time.Second)
+	url := fmt.Sprintf("%s://%s:%d/api/node/deploy", scheme, ip, port)
 	resp, err := client.Post(url, "application/json", bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("post to node: %w", err)
@@ -3783,6 +3794,7 @@ func stopContainerOnNode(db *sql.DB, nodeID, containerID string) error {
 		return fmt.Errorf("node %q not found: %w", nodeID, err)
 	}
 
+	viaTunnel := false
 	if netdaemon.GlobalTunnel != nil {
 		if proxyAddr := netdaemon.GlobalTunnel.GetNodeProxyAddr(nodeID, port); proxyAddr != "" {
 			ip = "127.0.0.1"
@@ -3792,26 +3804,15 @@ func stopContainerOnNode(db *sql.DB, nodeID, containerID string) error {
 					port = parsedPort
 				}
 			}
+			viaTunnel = true
 		}
 	}
 
 	payload := map[string]any{"container_id": containerID}
 	body, _ := json.Marshal(payload)
 
-	caPEM, _ := os.ReadFile("/etc/featherdeploy/ca.crt")
-	certPEM, _ := os.ReadFile("/etc/featherdeploy/node.crt")
-	keyPEM, _ := os.ReadFile("/etc/featherdeploy/node.key")
-
-	tlsCfg, err := pki.TLSConfig(string(certPEM), string(keyPEM), string(caPEM))
-	if err != nil {
-		return fmt.Errorf("tls config: %w", err)
-	}
-	client := &http.Client{
-		Transport: &http.Transport{TLSClientConfig: tlsCfg},
-		Timeout:   10 * time.Second,
-	}
-
-	url := fmt.Sprintf("https://%s:%d/api/node/stop", ip, port)
+	client, scheme := nodeHTTPClient(viaTunnel, 10*time.Second)
+	url := fmt.Sprintf("%s://%s:%d/api/node/stop", scheme, ip, port)
 	resp, err := client.Post(url, "application/json", bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("post to node: %w", err)
@@ -3834,6 +3835,7 @@ func dispatchDatabaseToNode(db *sql.DB, secret, nodeID string, dbID int64) error
 		return fmt.Errorf("node %q not found", nodeID)
 	}
 
+	viaTunnel := false
 	if netdaemon.GlobalTunnel != nil {
 		if proxyAddr := netdaemon.GlobalTunnel.GetNodeProxyAddr(nodeID, port); proxyAddr != "" {
 			ip = "127.0.0.1"
@@ -3843,6 +3845,7 @@ func dispatchDatabaseToNode(db *sql.DB, secret, nodeID string, dbID int64) error
 					port = parsedPort
 				}
 			}
+			viaTunnel = true
 		}
 	}
 
@@ -3852,16 +3855,8 @@ func dispatchDatabaseToNode(db *sql.DB, secret, nodeID string, dbID int64) error
 	}
 	body, _ := json.Marshal(payload)
 
-	caFile, _ := os.ReadFile("/etc/featherdeploy/ca.crt")
-	certFile, _ := os.ReadFile("/etc/featherdeploy/node.crt")
-	keyFile, _ := os.ReadFile("/etc/featherdeploy/node.key")
-	tlsCfg, _ := pki.TLSConfig(string(certFile), string(keyFile), string(caFile))
-	client := &http.Client{
-		Transport: &http.Transport{TLSClientConfig: tlsCfg},
-		Timeout:   30 * time.Second,
-	}
-
-	url := fmt.Sprintf("https://%s:%d/api/node/db-start", ip, port)
+	client, scheme := nodeHTTPClient(viaTunnel, 30*time.Second)
+	url := fmt.Sprintf("%s://%s:%d/api/node/db-start", scheme, ip, port)
 	resp, err := client.Post(url, "application/json", bytes.NewReader(body))
 	if err != nil {
 		return err
@@ -3882,6 +3877,7 @@ func migrateDatabaseData(db *sql.DB, secret, oldNodeID string, dbID int64) error
 		return fmt.Errorf("old node %q not found", oldNodeID)
 	}
 
+	viaTunnel := false
 	if netdaemon.GlobalTunnel != nil {
 		if proxyAddr := netdaemon.GlobalTunnel.GetNodeProxyAddr(oldNodeID, port); proxyAddr != "" {
 			ip = "127.0.0.1"
@@ -3891,17 +3887,11 @@ func migrateDatabaseData(db *sql.DB, secret, oldNodeID string, dbID int64) error
 					port = parsedPort
 				}
 			}
+			viaTunnel = true
 		}
 	}
 
-	caFile, _ := os.ReadFile("/etc/featherdeploy/ca.crt")
-	certFile, _ := os.ReadFile("/etc/featherdeploy/node.crt")
-	keyFile, _ := os.ReadFile("/etc/featherdeploy/node.key")
-	tlsCfg, _ := pki.TLSConfig(string(certFile), string(keyFile), string(caFile))
-	client := &http.Client{
-		Transport: &http.Transport{TLSClientConfig: tlsCfg},
-		Timeout:   2 * time.Minute,
-	}
+	client, scheme := nodeHTTPClient(viaTunnel, 2*time.Minute)
 
 	// 1. Trigger backup on old node
 	payload := map[string]any{
@@ -3909,7 +3899,7 @@ func migrateDatabaseData(db *sql.DB, secret, oldNodeID string, dbID int64) error
 		"jwt_secret": secret,
 	}
 	body, _ := json.Marshal(payload)
-	url := fmt.Sprintf("https://%s:%d/api/node/db-backup", ip, port)
+	url := fmt.Sprintf("%s://%s:%d/api/node/db-backup", scheme, ip, port)
 	resp, err := client.Post(url, "application/json", bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("backup request: %w", err)

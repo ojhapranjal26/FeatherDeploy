@@ -347,6 +347,65 @@ func runServe() {
 		w.WriteHeader(http.StatusNoContent)
 	})
 
+	// Brain proxies this endpoint to stream live node logs to the UI
+	r.Get("/api/node/logs", func(w http.ResponseWriter, req *http.Request) {
+		// Only allow from localhost (tunnel proxy), never public internet
+		host, _, _ := net.SplitHostPort(req.RemoteAddr)
+		if host != "127.0.0.1" && host != "::1" {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		w.Header().Set("X-Accel-Buffering", "no")
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "streaming not supported", http.StatusInternalServerError)
+			return
+		}
+
+		cmd := exec.CommandContext(req.Context(),
+			"journalctl", "-u", "featherdeploy-node", "-n", "100", "--follow", "--no-pager", "--output=short-iso")
+		stdout, err := cmd.StdoutPipe()
+		if err != nil {
+			fmt.Fprintf(w, "data: {\"error\":\"journalctl: %s\"}\n\n", err)
+			flusher.Flush()
+			return
+		}
+		if err := cmd.Start(); err != nil {
+			fmt.Fprintf(w, "data: {\"error\":\"journalctl start: %s\"}\n\n", err)
+			flusher.Flush()
+			return
+		}
+		defer cmd.Wait()
+
+		buf := make([]byte, 4096)
+		for {
+			select {
+			case <-req.Context().Done():
+				return
+			default:
+				n, readErr := stdout.Read(buf)
+				if n > 0 {
+					lines := strings.Split(string(buf[:n]), "\n")
+					for _, line := range lines {
+						line = strings.TrimSpace(line)
+						if line == "" {
+							continue
+						}
+						data, _ := json.Marshal(map[string]string{"line": line})
+						fmt.Fprintf(w, "data: %s\n\n", data)
+					}
+					flusher.Flush()
+				}
+				if readErr != nil {
+					return
+				}
+			}
+		}
+	})
+
 	// Brain discovery: poll cluster_state (via local rqlite) for brain changes
 	go func() {
 		var knownBrain string
