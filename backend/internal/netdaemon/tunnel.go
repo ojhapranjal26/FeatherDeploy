@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -145,10 +144,6 @@ func (tm *TunnelManager) HTTPHandler() http.HandlerFunc {
 func (tm *TunnelManager) setupNodeProxies(nodeID string) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
-
-	// Intercept central leader's split-brain dialback check to loopback port 4004 and route it straight to the native Raft port 4002
-	exec.Command("iptables", "-t", "nat", "-D", "OUTPUT", "-p", "tcp", "-o", "lo", "--dport", "4004", "-j", "REDIRECT", "--to-ports", "4002").Run()
-	exec.Command("iptables", "-t", "nat", "-A", "OUTPUT", "-p", "tcp", "-o", "lo", "--dport", "4004", "-j", "REDIRECT", "--to-ports", "4002").Run()
 
 	// Clear any existing port mappings and listeners for this node to ensure a clean start
 	if _, ok := tm.portMap[nodeID]; !ok {

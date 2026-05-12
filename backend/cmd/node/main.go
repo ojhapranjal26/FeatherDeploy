@@ -160,12 +160,7 @@ func runJoin(args []string) {
 		installSSHKey(reply.SSHPublicKey)
 	}
 
-	// Write and start rqlite service (join main Raft cluster)
-	// Since we are using a tunnel, we join via loopback port 4002 which is proxied directly to the brain's pure Raft cluster socket.
-	rqliteJoinAddr := "127.0.0.1:4002"
-
-	// Preserve the literal etcdMain string to satisfy etcd's cluster consensus validation checks
-	etcdMain := reply.EtcdMain
+	// Worker node relies entirely on the tunnel to reach brain services.
 
 	// Connectivity check: ensure we can reach the main server's WebSocket tunnel
 	wsURL := strings.Replace(mainURL, "http", "ws", 1) + "/api/cluster/tunnel"
@@ -200,20 +195,8 @@ func runJoin(args []string) {
 
 	// Write all service unit files before reloading systemd to prevent missing unit errors
 	writeNodeServeService()
-	writeRqliteService(nodeID, rqliteJoinAddr, nodeIP)
-	writeEtcdService(nodeID, etcdMain, nodeIP)
-
-	// Verify binaries before starting
-	for _, bin := range []string{"rqlited", "etcd"} {
-		if _, err := exec.LookPath(bin); err != nil {
-			fatalf("required binary not found: %s. Install failed?", bin)
-		}
-	}
 
 	runCmd("systemctl", "daemon-reload")
-	runCmd("systemctl", "enable", "--now", "rqlite-node")
-	runCmd("systemctl", "enable", "--now", "etcd-node")
-	waitForRqlite(60)
 
 
 	// Explicitly stop the temporary setup tunnel so the background service
@@ -227,7 +210,7 @@ func runJoin(args []string) {
 	fmt.Println("==> Node joined successfully!")
 	fmt.Printf("    Node ID: %s\n", nodeID)
 	fmt.Println("    Panel:   will mirror the main server panel (if available)")
-	fmt.Println("    rqlite:  http://127.0.0.1:4001 (cluster member)")
+	fmt.Println("    rqlite:  http://127.0.0.1:4001 (proxied to brain)")
 }
 
 // ─── serve ────────────────────────────────────────────────────────────────────
@@ -606,77 +589,6 @@ func runServe() {
 	}
 }
 
-// ─── rqlite service ──────────────────────────────────────────────────────────
-
-const rqliteServiceTmpl = `[Unit]
-Description=rqlite node
-After=network.target featherdeploy-node.service
-
-[Service]
-User=root
-ExecStart=/usr/local/bin/rqlited \
-  -node-id=%s \
-  -http-addr=127.0.0.1:4003 \
-  -raft-addr=127.0.0.1:4004 \
-  -http-adv-addr=127.0.0.1:4003 \
-  -raft-adv-addr=127.0.0.1:4004 \
-  -join=%s \
-  %s
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-`
-
-func writeRqliteService(nodeID, mainRaft, myIP string) {
-	content := fmt.Sprintf(rqliteServiceTmpl,
-		nodeID, mainRaft, rqliteData)
-	writeFile(rqliteUnit, content, 0644)
-}
-
-const etcdServiceTmpl = `[Unit]
-Description=etcd Key-Value Store (Node)
-After=network.target featherdeploy-node.service
-
-[Service]
-Type=simple
-User=root
-ExecStartPre=/bin/bash -c 'mkdir -p %s/etcd-data && chown -R root:root %s/etcd-data'
-ExecStart=/usr/local/bin/etcd \
-  --name=%s \
-  --data-dir=%s/etcd-data \
-  --listen-client-urls=http://127.0.0.1:2381 \
-  --advertise-client-urls=http://127.0.0.1:2381 \
-  --listen-peer-urls=http://127.0.0.1:2382 \
-  --initial-advertise-peer-urls=http://%s:2380 \
-  --initial-cluster=%s,%s=http://%s:2380 \
-  --initial-cluster-token=etcd-cluster-1 \
-  --initial-cluster-state=existing
-Restart=always
-RestartSec=5s
-
-[Install]
-WantedBy=multi-user.target
-`
-
-func writeEtcdService(nodeID, etcdMain, myIP string) {
-	// Parse the main server's IP from etcdMain string (e.g. main=http://103.91.187.212:2380)
-	parts := strings.Split(etcdMain, "://")
-	if len(parts) > 1 {
-		hostPort := strings.Split(parts[1], ":")
-		if len(hostPort) > 0 {
-			mainIP := hostPort[0]
-			// Intercept outgoing traffic targeting the brain's external IP on port 2380 and route it to our secure loopback tunnel proxy port 2380
-			exec.Command("iptables", "-t", "nat", "-D", "OUTPUT", "-p", "tcp", "-d", mainIP, "--dport", "2380", "-j", "DNAT", "--to-destination", "127.0.0.1:2380").Run()
-			exec.Command("iptables", "-t", "nat", "-A", "OUTPUT", "-p", "tcp", "-d", mainIP, "--dport", "2380", "-j", "DNAT", "--to-destination", "127.0.0.1:2380").Run()
-		}
-	}
-
-	content := fmt.Sprintf(etcdServiceTmpl,
-		dataDir, dataDir, nodeID, dataDir, myIP, etcdMain, nodeID, myIP)
-	writeFile("/etc/systemd/system/etcd-node.service", content, 0644)
-}
 
 // ─── featherdeploy-node serve service ────────────────────────────────────────
 

@@ -675,21 +675,8 @@ func (h *NodeHandler) CompleteJoin(w http.ResponseWriter, r *http.Request) {
 	// Trigger firewall reconciliation to allow this node IP (synchronously to avoid race)
 	deploy.ReconcileNodeRqliteIPTables(h.db)
 
-	// Add node to etcd cluster
-	etcdPeerURL := fmt.Sprintf("http://%s:2380", nodeIP)
-	
-	// etcdctl member add <name> --peer-urls=<url>
-	// We use sudo because etcd is usually root-owned or requires specific perms
-	// and we use the absolute path to etcdctl.
-	slog.Info("complete-join: adding etcd member", "id", nodeID, "url", etcdPeerURL)
-	cmd := exec.Command("sudo", "/usr/local/bin/etcdctl", "member", "add", nodeID, "--peer-urls="+etcdPeerURL)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		slog.Error("complete-join: etcd member add failed", "err", err, "out", string(out))
-		// We continue even if this fails, as the node might already be in the cluster
-		// or etcd might not be running yet.
-	} else {
-		slog.Info("complete-join: etcd member added successfully")
-	}
+	// Worker nodes act strictly as API clients and DO NOT join the central Etcd Raft consensus cluster.
+	// This prevents the brain server from losing quorum and halting when worker nodes disconnect.
 
 	// Fetch SSH public key so the node can add it to authorized_keys
 	sshPubKey := heartbeat.GetSSHPublicKey(h.db)
