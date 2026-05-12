@@ -619,7 +619,7 @@ ExecStart=/usr/local/bin/rqlited \
   -http-addr=127.0.0.1:4003 \
   -raft-addr=127.0.0.1:4004 \
   -http-adv-addr=127.0.0.1:4003 \
-  -raft-adv-addr=127.0.0.1:4002 \
+  -raft-adv-addr=127.0.0.1:4004 \
   -join=%s \
   %s
 Restart=always
