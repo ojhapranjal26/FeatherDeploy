@@ -615,7 +615,7 @@ echo "  Node agent installed: $NODE_BINARY"
 # -- 8. Create system user (MUST happen before rqlite service is written/started)
 echo "==> Ensuring featherdeploy system user exists..."
 if ! id -u "$SVC_USER" >/dev/null 2>&1; then
-  useradd --system --home-dir /var/lib/featherdeploy --create-home --shell /usr/sbin/nologin "$SVC_USER"
+  useradd --system --home-dir /var/lib/featherdeploy --create-home --shell /bin/bash "$SVC_USER"
   echo "  Created system user: ${SVC_USER}  (no password -- service account only)"
 else
   usermod -d /var/lib/featherdeploy "$SVC_USER" 2>/dev/null || true

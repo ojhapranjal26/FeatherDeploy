@@ -186,6 +186,15 @@ CREATE TABLE IF NOT EXISTS user_sessions (
     revoked     INTEGER  NOT NULL DEFAULT 0
 );
 
+-- 015: node_ip_history — tracks changes to node IP addresses over time
+CREATE TABLE IF NOT EXISTS node_ip_history (
+    id         INTEGER  PRIMARY KEY AUTOINCREMENT,
+    node_id    INTEGER  NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+    old_ip     TEXT     NOT NULL,
+    new_ip     TEXT     NOT NULL,
+    changed_at DATETIME NOT NULL DEFAULT (datetime('now'))
+);
+
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_project_members_user    ON project_members(user_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_user           ON user_sessions(user_id);

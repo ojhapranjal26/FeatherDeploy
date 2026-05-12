@@ -36,6 +36,9 @@ type TunnelManager struct {
 	// ValidateToken is called during handshake to verify the node token.
 	// Return the nodeID if valid, empty string if invalid.
 	ValidateToken func(token string) string
+
+	// OnNodeConnect is called when a node successfully connects to the tunnel.
+	OnNodeConnect func(nodeID, ip string)
 }
 
 func NewTunnelManager() *TunnelManager {
@@ -105,6 +108,14 @@ func (tm *TunnelManager) HTTPHandler() http.HandlerFunc {
 
 		// 5. Set up local proxy ports for this node.
 		tm.setupNodeProxies(nodeID)
+
+		if tm.OnNodeConnect != nil {
+			ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+			if ip == "" {
+				ip = r.RemoteAddr
+			}
+			go tm.OnNodeConnect(nodeID, ip)
+		}
 
 		// 5.5 Accept incoming streams from the node (node-to-brain).
 		go func() {

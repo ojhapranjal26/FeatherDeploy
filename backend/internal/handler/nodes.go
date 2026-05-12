@@ -93,6 +93,10 @@ func (h *NodeHandler) EnsureLocalPKI() error {
 	}
 
 	confDir := "/etc/featherdeploy"
+	if err := os.MkdirAll(confDir, 0700); err != nil {
+		return fmt.Errorf("create config dir: %w", err)
+	}
+
 	caFile := confDir + "/ca.crt"
 	nodeCertFile := confDir + "/node.crt"
 	nodeKeyFile := confDir + "/node.key"
@@ -130,6 +134,37 @@ func (h *NodeHandler) EnsureLocalPKI() error {
 	}
 
 	return nil
+}
+
+// GET /api/nodes/{nodeID}/ip-history
+func (h *NodeHandler) IPHistory(w http.ResponseWriter, r *http.Request) {
+	nodeID, err := strconv.ParseInt(chi.URLParam(r, "nodeID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errMap("invalid node ID"))
+		return
+	}
+
+	rows, err := h.db.QueryContext(r.Context(),
+		`SELECT old_ip, new_ip, changed_at FROM node_ip_history WHERE node_id=? ORDER BY changed_at DESC`, nodeID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errMap("database error"))
+		return
+	}
+	defer rows.Close()
+
+	type HistoryEntry struct {
+		OldIP     string `json:"old_ip"`
+		NewIP     string `json:"new_ip"`
+		ChangedAt string `json:"changed_at"`
+	}
+	var history []HistoryEntry
+	for rows.Next() {
+		var e HistoryEntry
+		if err := rows.Scan(&e.OldIP, &e.NewIP, &e.ChangedAt); err == nil {
+			history = append(history, e)
+		}
+	}
+	writeJSON(w, http.StatusOK, history)
 }
 
 // GET /api/nodes — list all nodes (superadmin/admin only)

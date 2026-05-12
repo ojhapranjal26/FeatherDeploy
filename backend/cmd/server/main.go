@@ -600,6 +600,23 @@ func serve() {
 		}
 		return fmt.Sprintf("node-%d", id)
 	}
+
+	TunnelMgr.OnNodeConnect = func(nodeID, newIP string) {
+		if strings.HasPrefix(nodeID, "node-") {
+			idStr := strings.TrimPrefix(nodeID, "node-")
+			var oldIP string
+			err := db.QueryRow(`SELECT ip FROM nodes WHERE id = ?`, idStr).Scan(&oldIP)
+			if err == nil && oldIP != newIP {
+				// Record history and update
+				if oldIP != "" {
+					db.Exec(`INSERT INTO node_ip_history (node_id, old_ip, new_ip) VALUES (?, ?, ?)`, idStr, oldIP, newIP)
+				}
+				db.Exec(`UPDATE nodes SET ip = ? WHERE id = ?`, newIP, idStr)
+				slog.Info("tunnel server: node ip updated", "node", nodeID, "old_ip", oldIP, "new_ip", newIP)
+			}
+		}
+	}
+
 	r.Get("/api/cluster/tunnel", TunnelMgr.HTTPHandler())
 
 	// ── Storage Object API — service key auth (X-Storage-Key), no JWT required ───
@@ -726,6 +743,7 @@ func serve() {
 		r.Group(func(r chi.Router) {
 			r.Use(mw.RequireRole(model.RoleSuperAdmin, model.RoleAdmin))
 			r.Get("/api/nodes", nodeH.List)
+			r.Get("/api/nodes/{nodeID}/ip-history", nodeH.IPHistory)
 			r.Post("/api/nodes", nodeH.Add)
 			r.Delete("/api/nodes/{nodeID}", nodeH.Delete)
 			r.Post("/api/nodes/{nodeID}/token", nodeH.RegenerateToken)
