@@ -657,12 +657,14 @@ func (h *NodeHandler) CompleteJoin(w http.ResponseWriter, r *http.Request) {
 	// Generate a permanent tunnel token (separate from the one-time registration join_token)
 	tunnelToken := randomHex20()
 
+	nodeID := fmt.Sprintf("node-%d", node.ID)
+
 	// Update node record: mark connected, save cert, clear join token, save real IP
 	_, err = h.db.ExecContext(r.Context(),
 		`UPDATE nodes SET status='connected', ip=?, hostname=?, os_info=?, node_id=?, node_cert_pem=?, rqlite_addr=?,
 		 join_token=NULL, token_expires_at=NULL, last_seen=datetime('now'),
 		 port=7443, tunnel_token=?, updated_at=datetime('now') WHERE id=?`,
-		nodeIP, payload.Hostname, payload.OSInfo, payload.Hostname, nodeCert.CertPEM, payload.RqliteAddr, tunnelToken, node.ID,
+		nodeIP, payload.Hostname, payload.OSInfo, nodeID, nodeCert.CertPEM, payload.RqliteAddr, tunnelToken, node.ID,
 	)
 	if err != nil {
 		slog.Error("complete-join: update node", "err", err)
@@ -674,10 +676,6 @@ func (h *NodeHandler) CompleteJoin(w http.ResponseWriter, r *http.Request) {
 	deploy.ReconcileNodeRqliteIPTables(h.db)
 
 	// Add node to etcd cluster
-	nodeID := payload.Hostname
-	if nodeID == "" {
-		nodeID = "node-" + randomHex20()[:8]
-	}
 	etcdPeerURL := fmt.Sprintf("http://%s:2380", nodeIP)
 	
 	// etcdctl member add <name> --peer-urls=<url>

@@ -112,6 +112,7 @@ func runJoin(args []string) {
 	}
 
 	var reply struct {
+		NodeID       string `json:"node_id"`
 		CACertPEM    string `json:"ca_cert_pem"`
 		NodeCertPEM  string `json:"node_cert_pem"`
 		NodeKeyPEM   string `json:"node_key_pem"`
@@ -143,12 +144,15 @@ func runJoin(args []string) {
 	writeFile(configDir+"/tunnel_token", reply.TunnelToken, 0600) // permanent tunnel auth
 	writeFile(configDir+"/main_url", mainURL, 0644)
 
-	// Node ID = hostname
+	// Node ID = assigned node_id or fallback to hostname
 	nodeIP := reply.NodeIP
 	if nodeIP == "" {
 		nodeIP = localIP()
 	}
-	nodeID := hostname()
+	nodeID := reply.NodeID
+	if nodeID == "" {
+		nodeID = hostname()
+	}
 	writeFile(nodeIDFile, nodeID, 0644)
 
 	// Install SSH public key for passwordless access from main server
@@ -185,7 +189,7 @@ func runJoin(args []string) {
 	
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel() // Stop temporary tunnel when script finishes
-	go tunnelMgr.StartClient(ctx, wsURL, hostname(), reply.TunnelToken, tunnelTLSCfg)
+	go tunnelMgr.StartClient(ctx, wsURL, nodeID, reply.TunnelToken, tunnelTLSCfg)
 
 	// Wait for connection to establish
 	time.Sleep(4 * time.Second)
