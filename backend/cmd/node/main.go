@@ -16,7 +16,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"net/url"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -32,6 +31,8 @@ import (
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/pki"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/coordination"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/netdaemon"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/proxyengine"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/transfer"
 )
 
 const (
@@ -94,29 +95,11 @@ func runJoin(args []string) {
 	must(os.MkdirAll(dataDir, 0755))
 	must(os.MkdirAll(rqliteData, 0700))
 
-	// Generate WireGuard keypair if wg is available
-	wgPubKey := ""
-	wgPrivKey := ""
-	if _, err := exec.LookPath("wg"); err == nil {
-		os.MkdirAll("/etc/wireguard", 0700)
-		if privOut, err := exec.Command("wg", "genkey").Output(); err == nil {
-			wgPrivKey = strings.TrimSpace(string(privOut))
-			os.WriteFile("/etc/wireguard/privatekey", []byte(wgPrivKey+"\n"), 0600)
-			cmd := exec.Command("wg", "pubkey")
-			cmd.Stdin = strings.NewReader(wgPrivKey + "\n")
-			if pubOut, err := cmd.Output(); err == nil {
-				wgPubKey = strings.TrimSpace(string(pubOut))
-				os.WriteFile("/etc/wireguard/publickey", []byte(wgPubKey+"\n"), 0644)
-			}
-		}
-	}
-
 	// POST /api/nodes/{token}/complete-join
 	payload := map[string]string{
-		"rqlite_addr":   nodeAddr,
-		"hostname":      hostname(),
-		"os_info":       getOSInfo(),
-		"wg_public_key": wgPubKey,
+		"rqlite_addr": nodeAddr,
+		"hostname":    hostname(),
+		"os_info":     getOSInfo(),
 	}
 	body, _ := json.Marshal(payload)
 	resp, err := http.Post(mainURL+"/api/nodes/"+token+"/complete-join",
@@ -131,20 +114,19 @@ func runJoin(args []string) {
 	}
 
 	var reply struct {
-		NodeID           string `json:"node_id"`
-		CACertPEM        string `json:"ca_cert_pem"`
-		NodeCertPEM      string `json:"node_cert_pem"`
-		NodeKeyPEM       string `json:"node_key_pem"`
-		EncryptedEnv     string `json:"encrypted_env"`
-		RqliteMain       string `json:"rqlite_main"`
-		EtcdMain         string `json:"etcd_main"`
-		SSHPublicKey     string `json:"ssh_public_key"`
-		NodeIP           string `json:"node_ip"`
-		TunnelToken      string `json:"tunnel_token"`
-		WgMeshIP         string `json:"wg_mesh_ip"`
-		BrainWgPublicKey string `json:"brain_wg_public_key"`
-		BrainWgMeshIP    string `json:"brain_wg_mesh_ip"`
-		BrainPublicIP    string `json:"brain_public_ip"`
+		NodeID       string `json:"node_id"`
+		NodeType     string `json:"node_type"` // "brain" or "worker"
+		CACertPEM    string `json:"ca_cert_pem"`
+		NodeCertPEM  string `json:"node_cert_pem"`
+		NodeKeyPEM   string `json:"node_key_pem"`
+		EncryptedEnv string `json:"encrypted_env"`
+		RqliteMain   string `json:"rqlite_main"`
+		EtcdMain     string `json:"etcd_main"`
+		SSHPublicKey string `json:"ssh_public_key"`
+		NodeIP       string `json:"node_ip"`
+		TunnelToken  string `json:"tunnel_token"`
+		LeaderNodeID string `json:"leader_node_id"`
+		LeaderIP     string `json:"leader_ip"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&reply); err != nil {
 		fatalf("decode response: %v", err)
@@ -161,19 +143,24 @@ func runJoin(args []string) {
 		fatalf("decrypt env: %v", err)
 	}
 	
-	if reply.BrainWgMeshIP != "" {
-		decryptedEnv = strings.ReplaceAll(decryptedEnv, "127.0.0.1:4001", reply.BrainWgMeshIP+":4001")
-		decryptedEnv = strings.ReplaceAll(decryptedEnv, "127.0.0.1:4002", reply.BrainWgMeshIP+":4002")
-		decryptedEnv = strings.ReplaceAll(decryptedEnv, "127.0.0.1:2379", reply.BrainWgMeshIP+":2379")
-		decryptedEnv = strings.ReplaceAll(decryptedEnv, "127.0.0.1:2380", reply.BrainWgMeshIP+":2380")
-	}
-
 	writeFile(envFile, decryptedEnv, 0600)
 
-	// Persist tokens and connection info
+	// Persist tokens, connection info, and node role
 	writeFile(configDir+"/join_token", token, 0600)
 	writeFile(configDir+"/tunnel_token", reply.TunnelToken, 0600)
 	writeFile(configDir+"/main_url", mainURL, 0644)
+
+	// Save node_type so the serve command knows its role (brain vs worker)
+	nodeType := reply.NodeType
+	if nodeType == "" {
+		nodeType = "worker"
+	}
+	writeFile(configDir+"/node_type", nodeType, 0644)
+
+	// Save leader info for rqlite cluster join (brain nodes only need this)
+	if reply.LeaderIP != "" {
+		writeFile(configDir+"/leader_ip", reply.LeaderIP, 0644)
+	}
 
 	// Node ID = assigned node_id or fallback to hostname
 	nodeIP := reply.NodeIP
@@ -191,39 +178,8 @@ func runJoin(args []string) {
 		installSSHKey(reply.SSHPublicKey)
 	}
 
-	// Setup private WireGuard mesh interface if parameters are present
-	if reply.WgMeshIP != "" && reply.BrainWgPublicKey != "" && wgPrivKey != "" {
-		fmt.Printf("==> Configuring private WireGuard mesh interface wg0 (%s)...\n", reply.WgMeshIP)
-		brainHost := reply.BrainPublicIP
-		if brainHost == "" {
-			brainHost = "127.0.0.1"
-			if u, err := url.Parse(mainURL); err == nil {
-				brainHost = u.Hostname()
-			} else if strings.Contains(mainURL, "://") {
-				parts := strings.Split(mainURL, "://")
-				sub := strings.Split(parts[1], ":")[0]
-				sub = strings.Split(sub, "/")[0]
-				brainHost = sub
-			}
-		}
-		wgConf := fmt.Sprintf(`[Interface]
-PrivateKey = %s
-Address = %s/24
-SaveConfig = false
-
-[Peer]
-PublicKey = %s
-AllowedIPs = 10.99.0.0/24
-Endpoint = %s:51820
-PersistentKeepalive = 25
-`, wgPrivKey, reply.WgMeshIP, reply.BrainWgPublicKey, brainHost)
-		writeFile("/etc/wireguard/wg0.conf", wgConf, 0600)
-		runCmd("systemctl", "enable", "wg-quick@wg0")
-		runCmd("systemctl", "restart", "wg-quick@wg0")
-		fmt.Println("  ✓ WireGuard interface wg0 connected to brain mesh")
-	}
-
-	// Worker node relies entirely on the tunnel to reach brain services.
+	fmt.Printf("==> Node type: %s\n", nodeType)
+	fmt.Printf("==> Node ID: %s\n", nodeID)
 
 	// Connectivity check: ensure we can reach the main server's WebSocket tunnel
 	wsURL := strings.Replace(mainURL, "http", "ws", 1) + "/api/cluster/tunnel"
@@ -241,14 +197,15 @@ PersistentKeepalive = 25
 	// Wait for connection to establish
 	time.Sleep(4 * time.Second)
 
-	if reply.BrainWgMeshIP == "" {
-		// Setup local proxies so this node can reach the brain's services via the tunnel
-		tunnelMgr.ProxyNodeToBrain(4001, 4001)
-		tunnelMgr.ProxyNodeToBrain(4002, 4002)
-		tunnelMgr.ProxyNodeToBrain(2379, 2379)
-		tunnelMgr.ProxyNodeToBrain(2380, 2380)
+	// Always set up tunnel proxies for brain services.
+	// rqlite/etcd traffic reaches the brain through the persistent yamux tunnel stream.
+	tunnelMgr.ProxyNodeToBrain(4001, 4001) // rqlite HTTP
+	tunnelMgr.ProxyNodeToBrain(4002, 4002) // rqlite Raft
+	tunnelMgr.ProxyNodeToBrain(2379, 2379) // etcd client
+	tunnelMgr.ProxyNodeToBrain(2380, 2380) // etcd peer
 
-		fmt.Println("==> Checking connectivity through tunnel...")
+	if nodeType == "brain" {
+		fmt.Println("==> Checking connectivity through tunnel (brain node)...")
 		httpClient := &http.Client{Timeout: 5 * time.Second}
 		if resp, err := httpClient.Get("http://127.0.0.1:4001/readyz"); err != nil {
 			fmt.Printf("  WARNING: cannot reach main rqlite via tunnel: %v\n", err)
@@ -257,14 +214,7 @@ PersistentKeepalive = 25
 			fmt.Println("  ✓ Rqlite connectivity confirmed via tunnel")
 		}
 	} else {
-		fmt.Println("==> Checking connectivity through WireGuard mesh...")
-		httpClient := &http.Client{Timeout: 5 * time.Second}
-		if resp, err := httpClient.Get(fmt.Sprintf("http://%s:4001/readyz", reply.BrainWgMeshIP)); err != nil {
-			fmt.Printf("  WARNING: cannot reach main rqlite via WireGuard mesh: %v\n", err)
-		} else {
-			resp.Body.Close()
-			fmt.Println("  ✓ Rqlite connectivity confirmed via WireGuard mesh")
-		}
+		fmt.Println("==> Worker node: skipping rqlite check (workers use etcd only)")
 	}
 
 	// Write all service unit files before reloading systemd to prevent missing unit errors
@@ -282,6 +232,7 @@ PersistentKeepalive = 25
 	runCmd("systemctl", "enable", "--now", "featherdeploy-node")
 
 	fmt.Println("==> Node joined successfully!")
+
 	fmt.Printf("    Node ID: %s\n", nodeID)
 	fmt.Println("    Panel:   will mirror the main server panel (if available)")
 	fmt.Println("    rqlite:  http://127.0.0.1:4001 (proxied to brain)")
@@ -297,6 +248,14 @@ func runServe() {
 	if data, err := os.ReadFile(nodeIDFile); err == nil {
 		myID = strings.TrimSpace(string(data))
 	}
+
+	// Read node_type to determine role (brain vs worker)
+	nodeType := "worker"
+	if data, err := os.ReadFile(configDir + "/node_type"); err == nil {
+		nodeType = strings.TrimSpace(string(data))
+	}
+	isBrainNode := nodeType == "brain"
+	slog.Info("featherdeploy-node: role", "node_id", myID, "node_type", nodeType)
 
 	// ─── FeatherTunnel: Reverse Tunneling ──────────────────────────────────────
 	// Start the tunnel FIRST so that proxies are available for DB/etcd connections
@@ -315,54 +274,49 @@ func runServe() {
 		slog.Info("tunnel client: connecting to brain", "url", wsURL, "node", myID)
 		go tunnelMgr.StartClient(context.Background(), wsURL, myID, nodeToken, tunnelTLSCfg)
 
-		// Setup persistent proxies to the brain's services only if WireGuard mesh is not used
-		usesMesh := false
-		if envData, err := os.ReadFile(envFile); err == nil && strings.Contains(string(envData), "10.99.0.") {
-			usesMesh = true
-		}
-		if !usesMesh {
-			tunnelMgr.ProxyNodeToBrain(4001, 4001)
-			tunnelMgr.ProxyNodeToBrain(4002, 4002)
-			tunnelMgr.ProxyNodeToBrain(2379, 2379)
-			tunnelMgr.ProxyNodeToBrain(2380, 2380)
+		// Set up persistent proxies to the brain's services via the tunnel.
+		// etcd (2379/2380) is always proxied — all node types need service discovery.
+		tunnelMgr.ProxyNodeToBrain(2379, 2379) // etcd client
+		tunnelMgr.ProxyNodeToBrain(2380, 2380) // etcd peer
+
+		if isBrainNode {
+			// Brain nodes also proxy rqlite for replica participation
+			tunnelMgr.ProxyNodeToBrain(4001, 4001) // rqlite HTTP
+			tunnelMgr.ProxyNodeToBrain(4002, 4002) // rqlite Raft
+			slog.Info("tunnel client: brain node — proxying rqlite + etcd")
+		} else {
+			slog.Info("tunnel client: worker node — proxying etcd only (no rqlite)")
 		}
 	}
 
 	// Wait a moment for tunnel to initialize
 	time.Sleep(2 * time.Second)
 
-	// Connect to the Brain's rqlite via the tunnel proxy or WireGuard mesh.
-	// We retry until the connection is established.
+	// Only brain nodes connect to rqlite (for DB replica participation).
+	// Worker nodes skip rqlite entirely — they only use etcd for service discovery.
 	var db *sql.DB
 	var err error
-	rqliteHost := "127.0.0.1"
-	if envData, e := os.ReadFile(envFile); e == nil {
-		lines := strings.Split(string(envData), "\n")
-		for _, line := range lines {
-			if strings.HasPrefix(line, "RQLITE_URL=") {
-				if strings.Contains(line, "10.99.0.") {
-					// Extract IP
-					rqliteHost = strings.Split(strings.TrimPrefix(line, "RQLITE_URL=http://"), ":")[0]
-				}
+	if isBrainNode {
+		rqliteConnectURL := "http://127.0.0.1:4001"
+		for i := 0; i < 30; i++ {
+			db, err = appDb.OpenRqlite(rqliteConnectURL)
+			if err == nil {
 				break
 			}
+			slog.Info("waiting for brain rqlite via tunnel...", "attempt", i+1, "url", rqliteConnectURL, "err", err)
+			time.Sleep(2 * time.Second)
 		}
-	}
-	rqliteConnectURL := fmt.Sprintf("http://%s:4001", rqliteHost)
-
-	for i := 0; i < 30; i++ {
-		db, err = appDb.OpenRqlite(rqliteConnectURL)
-		if err == nil {
-			break
+		if err != nil {
+			slog.Error("brain node: could not connect to rqlite", "err", err)
+		} else {
+			slog.Info("brain node: connected to rqlite via tunnel")
 		}
-		slog.Info("waiting for brain rqlite...", "attempt", i+1, "url", rqliteConnectURL, "err", err)
-		time.Sleep(2 * time.Second)
-	}
-	if err != nil {
-		slog.Error("could not connect to brain rqlite", "err", err)
+	} else {
+		slog.Info("worker node: skipping rqlite (not eligible for leader election)")
 	}
 
-	// Start node heartbeat + brain-election goroutine
+	// Start node heartbeat goroutine (runs for all node types)
+	// The heartbeat pings the brain's HTTP API via the tunnel to report CPU/RAM/disk stats.
 	if db != nil {
 		go runNodeHeartbeat(db, myID)
 	}
@@ -373,12 +327,9 @@ func runServe() {
 	}
 
 	// ─── etcd Coordination Layer ──────────────────────────────────────────────
-	// Initialize etcd client for real-time coordination
-	etcdHost := "127.0.0.1"
-	if rqliteHost != "127.0.0.1" {
-		etcdHost = rqliteHost // Brain mesh IP
-	}
-	etcdClient, err := coordination.NewClient([]string{fmt.Sprintf("http://%s:2379", etcdHost)})
+	// etcd client connects via the tunnel proxy on 127.0.0.1:2379.
+	// Private cluster traffic stays inside the persistent tunnel stream.
+	etcdClient, err := coordination.NewClient([]string{"http://127.0.0.1:2379"})
 	if err != nil {
 		slog.Warn("could not connect to etcd proxy, real-time coordination disabled", "err", err)
 	} else {
@@ -386,11 +337,16 @@ func runServe() {
 		// Start real-time heartbeat in etcd
 		go func() {
 			slog.Info("etcd: registering node heartbeat", "id", myID)
-			_, err := etcdClient.RegisterNode(context.Background(), myID, 15)
+			_, err := etcdClient.RegisterNode(context.Background(), myID, localIP(), 443, 15)
 			if err != nil {
 				slog.Error("etcd: node registration failed", "err", err)
 			}
 		}()
+
+		// Start the Proxy Engine for the worker node (handles mapping local containers and assigned edge domains)
+		engine := proxyengine.NewEngine(etcdClient.EtcdClient(), myID, isBrainNode, nil) // assignedDomains can be fetched via API later
+		engine.Start(context.Background())
+		slog.Info("proxyengine: started on worker node")
 	}
 
 	r := chi.NewRouter()
@@ -423,83 +379,59 @@ func runServe() {
 		w.WriteHeader(http.StatusNoContent)
 	})
 
-	// Brain triggers wireguard key reroll/rotation here
-	r.Post("/api/node/rotate-wireguard-keys", func(w http.ResponseWriter, req *http.Request) {
+	// POST /api/node/artifact-chunk/{transferID}/{chunkN} — receive a chunk of a multipart
+	// artifact transfer from the brain. Brain splits the archive into 4 MB chunks and sends
+	// them in order over the tunnel. Supports resume: if connection drops, brain resumes
+	// from the last confirmed chunk. The final chunk triggers auto-assembly.
+	r.Post("/api/node/artifact-chunk/{transferID}/{chunkN}", func(w http.ResponseWriter, req *http.Request) {
 		host, _, _ := net.SplitHostPort(req.RemoteAddr)
 		if host != "127.0.0.1" && host != "::1" {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
-		var payload struct {
-			BrainWgPublicKey string `json:"brain_wg_public_key"`
-			WgMeshIP         string `json:"wg_mesh_ip"`
-			BrainPublicIP    string `json:"brain_public_ip"`
+		transferIDStr := chi.URLParam(req, "transferID")
+		chunkNStr := chi.URLParam(req, "chunkN")
+		transferID, tErr := strconv.ParseInt(transferIDStr, 10, 64)
+		chunkN, cErr := strconv.Atoi(chunkNStr)
+		if tErr != nil || cErr != nil {
+			http.Error(w, "invalid params", http.StatusBadRequest)
+			return
 		}
-		if err := json.NewDecoder(req.Body).Decode(&payload); err != nil || payload.BrainWgPublicKey == "" || payload.WgMeshIP == "" {
-			http.Error(w, "invalid payload", http.StatusBadRequest)
+		totalChunksStr := req.Header.Get("X-Total-Chunks")
+		totalChunks, _ := strconv.Atoi(totalChunksStr)
+		destPathHdr := req.Header.Get("X-Dest-Path")
+
+		data, err := io.ReadAll(req.Body)
+		if err != nil {
+			http.Error(w, "read body: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 
-		// Ensure wg binary exists
-		if _, err := exec.LookPath("wg"); err != nil {
-			http.Error(w, "wireguard tools not available on node", http.StatusInternalServerError)
+		asm := &transfer.Assembler{DataDir: dataDir, TransferID: transferID}
+		if err := asm.WriteChunk(chunkN, data); err != nil {
+			http.Error(w, "write chunk: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
+		slog.Info("artifact chunk received", "transfer", transferID, "chunk", chunkN, "total", totalChunks)
 
-		slog.Info("node: rerolling WireGuard keys as requested by brain")
-		wgPubKey := ""
-		wgPrivKey := ""
-		os.MkdirAll("/etc/wireguard", 0700)
-		if privOut, err := exec.Command("wg", "genkey").Output(); err == nil {
-			wgPrivKey = strings.TrimSpace(string(privOut))
-			os.WriteFile("/etc/wireguard/privatekey", []byte(wgPrivKey+"\n"), 0600)
-			cmd := exec.Command("wg", "pubkey")
-			cmd.Stdin = strings.NewReader(wgPrivKey + "\n")
-			if pubOut, err := cmd.Output(); err == nil {
-				wgPubKey = strings.TrimSpace(string(pubOut))
-				os.WriteFile("/etc/wireguard/publickey", []byte(wgPubKey+"\n"), 0644)
+		// If this is the last chunk and we have all of them, assemble
+		if totalChunks > 0 && chunkN == totalChunks-1 {
+			received, _ := asm.ReceivedChunks()
+			if len(received) == totalChunks {
+				destFile := destPathHdr
+				if destFile == "" {
+					destFile = filepath.Join(dataDir, fmt.Sprintf("artifact-%d.tar.gz", transferID))
+				}
+				if err := asm.Assemble(totalChunks, destFile); err != nil {
+					slog.Error("artifact assembly failed", "transfer", transferID, "err", err)
+					http.Error(w, "assemble: "+err.Error(), http.StatusInternalServerError)
+					return
+				}
+				asm.Cleanup()
+				slog.Info("artifact assembled successfully", "transfer", transferID, "dest", destFile)
 			}
 		}
-
-		if wgPrivKey == "" || wgPubKey == "" {
-			http.Error(w, "failed to generate wireguard keys", http.StatusInternalServerError)
-			return
-		}
-
-		// Extract Brain Hostname/IP from payload or fallback to mainURL
-		brainHost := payload.BrainPublicIP
-		if brainHost == "" {
-			brainHost = "127.0.0.1"
-			if u, err := url.Parse(mainURL); err == nil && u.Hostname() != "" {
-				brainHost = u.Hostname()
-			} else if strings.Contains(mainURL, "://") {
-				parts := strings.Split(mainURL, "://")
-				sub := strings.Split(parts[1], ":")[0]
-				sub = strings.Split(sub, "/")[0]
-				brainHost = sub
-			}
-		}
-
-		wgConf := fmt.Sprintf(`[Interface]
-PrivateKey = %s
-Address = %s/24
-SaveConfig = false
-
-[Peer]
-PublicKey = %s
-AllowedIPs = 10.99.0.0/24
-Endpoint = %s:51820
-PersistentKeepalive = 25
-`, wgPrivKey, payload.WgMeshIP, payload.BrainWgPublicKey, brainHost)
-		writeFile("/etc/wireguard/wg0.conf", wgConf, 0600)
-		runCmd("systemctl", "enable", "wg-quick@wg0")
-		runCmd("systemctl", "restart", "wg-quick@wg0")
-		slog.Info("node: wireguard interface wg0 re-keyed and restarted successfully")
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{
-			"wg_public_key": wgPubKey,
-		})
+		w.WriteHeader(http.StatusNoContent)
 	})
 
 	// Brain proxies this endpoint to stream live node logs to the UI

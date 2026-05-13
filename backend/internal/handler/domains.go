@@ -89,7 +89,7 @@ func (h *DomainHandler) Add(w http.ResponseWriter, r *http.Request) {
 	d.TLS = tls == 1
 	d.Verified = verified == 1
 	writeJSON(w, http.StatusCreated, d)
-	go caddypkg.Reload(h.db)
+	go caddypkg.PublishRoutes(h.db)
 }
 
 // DELETE /api/projects/{projectID}/services/{serviceID}/domains/{domainID}
@@ -101,7 +101,7 @@ func (h *DomainHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	}
 	h.db.ExecContext(r.Context(), `DELETE FROM domains WHERE id=?`, domainID)
 	w.WriteHeader(http.StatusNoContent)
-	go caddypkg.Reload(h.db)
+	go caddypkg.PublishRoutes(h.db)
 }
 
 // POST /api/projects/{projectID}/services/{serviceID}/domains/{domainID}/verify
@@ -179,7 +179,7 @@ func (h *DomainHandler) Verify(w http.ResponseWriter, r *http.Request) {
 		"server_ip":   serverIP,
 		"dns_error":   dnsErrStr,
 	})
-	go caddypkg.Reload(h.db)
+	go caddypkg.PublishRoutes(h.db)
 }
 
 // detectOwnPublicIP uses a UDP "connect" trick to determine the host's

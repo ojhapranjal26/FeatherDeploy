@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -20,7 +21,6 @@ import (
 	"time"
 
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/coordination"
-	"github.com/ojhapranjal26/featherdeploy/backend/internal/netdaemon"
 )
 
 var (
@@ -94,10 +94,10 @@ func WritePanelSnippet(panelDomain, backendAddr string) {
 	}
 }
 
-// Reload regenerates the services Caddyfile from the DB and signals Caddy to
-// reload. It uses a mutex to prevent concurrent writes and a 500ms debounce
-// timer to collapse rapid sequential requests (e.g. from a bulk deploy).
-func Reload(db *sql.DB) {
+// PublishRoutes generates structured JSON Route objects for all active services
+// and pushes them to Etcd. The proxyengines on the nodes watch Etcd and load
+// the routes dynamically via the Caddy Admin API.
+func PublishRoutes(db *sql.DB) {
 	reloadMu.Lock()
 	defer reloadMu.Unlock()
 
@@ -106,49 +106,99 @@ func Reload(db *sql.DB) {
 	}
 
 	reloadTimer = time.AfterFunc(1000*time.Millisecond, func() {
-		performReload(db)
+		publishRoutes(db)
 	})
 }
 
-func performReload(db *sql.DB) {
+func publishRoutes(db *sql.DB) {
 	executionMu.Lock()
 	defer executionMu.Unlock()
 
-	// Skip when Caddy is not installed (dev / CI)
-	if !caddyInstalled() {
+	if EtcdClient == nil {
+		slog.Warn("caddy: skipping route publish, etcd client is nil")
 		return
 	}
 
-	content, err := buildConfig(db)
+	rows, err := db.Query(`
+		SELECT d.domain, d.tls,
+		       COALESCE(s.cluster_port, s.host_port) AS proxy_port,
+		       s.project_id, s.name AS svc_name,
+		       COALESCE(s.node_id, 'main') AS node_id
+		FROM   domains d
+		JOIN   services s ON s.id = d.service_id
+		WHERE  s.host_port > 0
+		  AND  s.status    = 'running'
+		ORDER  BY d.domain
+	`)
 	if err != nil {
-		slog.Warn("caddy: build config", "err", err)
+		slog.Warn("caddy: query domains", "err", err)
 		return
 	}
+	defer rows.Close()
 
-	if content == "" {
-		slog.Info("caddy: skipping reload, no active sites generated")
-		return
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// We use a timestamp for the version ID
+	version := time.Now().Unix()
+	count := 0
+
+	// Track which domains we actively wrote
+	activeDomains := make(map[string]bool)
+
+	for rows.Next() {
+		var domain string
+		var tlsInt, hostPort int
+		var projectID int64
+		var svcName, targetNode string
+		if rows.Scan(&domain, &tlsInt, &hostPort, &projectID, &svcName, &targetNode) != nil {
+			continue
+		}
+		domain = strings.TrimSpace(strings.ToLower(domain))
+		if domain == "" || hostPort <= 0 {
+			continue
+		}
+
+		// We no longer rely on Etcd service discovery here because the target_node 
+		// handles the routing directly via proxyengine and the Node API heartbeat.
+		// We just tell the proxy engines: "Proxy this domain to target_node:hostPort".
+		
+		route := map[string]any{
+			"domain":      domain,
+			"service":     svcName,
+			"target_node": targetNode,
+			"target_ip":   "", // resolved dynamically by proxyengine via node heartbeat
+			"target_port": hostPort,
+			"mode":        "proxy",
+			"version":     version,
+		}
+		
+		payload, _ := json.Marshal(route)
+		EtcdClient.Put(ctx, "/routing/"+domain, string(payload))
+		activeDomains[domain] = true
+		count++
 	}
 
-	slog.Info("caddy: generated config", "sites", strings.Count(content, "reverse_proxy"), "bytes", len(content))
-
-	if err := writeServicesFile(content); err != nil {
-		slog.Warn("caddy: write services file", "err", err)
-		return
+	// Optional: Cleanup stale domains from Etcd that are no longer in the DB
+	if resp, err := EtcdClient.GetPrefix(ctx, "/routing/"); err == nil {
+		for _, kv := range resp.Kvs {
+			key := string(kv.Key)
+			domain := strings.TrimPrefix(key, "/routing/")
+			if !activeDomains[domain] {
+				EtcdClient.Delete(ctx, key)
+			}
+		}
 	}
-	slog.Info("caddy: services file written", "path", servicesFile)
 
-	ensureImport()
-	reloadCaddy()
+	slog.Info("caddy: published structured routes to etcd", "count", count, "version", version)
 }
+
 
 // caddyInstalled checks whether caddy is present on the system.
 func caddyInstalled() bool {
 	if _, err := exec.LookPath("caddy"); err == nil {
 		return true
 	}
-	// exec.LookPath relies on the current PATH which may be restricted inside
-	// a systemd service.  Check common install locations directly.
 	for _, p := range []string{"/usr/bin/caddy", "/usr/local/bin/caddy"} {
 		if _, err := os.Stat(p); err == nil {
 			return true
@@ -168,123 +218,6 @@ func caddyBin() string {
 		}
 	}
 	return "caddy"
-}
-
-// buildConfig queries all (domain, tls, proxy_port) rows and returns a Caddyfile
-// snippet with one site block per domain.
-//
-// Only domains that meet ALL of the following are included:
-//   - DNS has been verified (d.verified = 1) — prevents broken TLS provisioning
-//     for domains not yet pointing at this server.
-//   - The backing service is actively running (s.status = 'running') — prevents
-//     502 errors when a container is stopped, crashed, or not yet deployed.
-//   - The service has a published host port (s.host_port > 0).
-//
-// Proxy target port selection (preferred → fallback):
-//   1. s.cluster_port — the fdnet Go TCP proxy port (0.0.0.0:30000+, real kernel
-//      socket).  Always reliable because fdnet's net.Listen() call creates an
-//      actual kernel TCP socket that Caddy can connect to regardless of how the
-//      container's slirp4netns port-forwarding is set up.
-//   2. s.host_port — the slirp4netns userspace port-forward (127.0.0.1:10000+).
-//      Used as a fallback for services deployed before the cluster_port column
-//      was added (backward compatibility).  This can fail for services beyond
-//      the first when the slirp4netns port-forwarding helper doesn't bind all
-//      published ports reliably.
-func buildConfig(db *sql.DB) (string, error) {
-	rows, err := db.Query(`
-		SELECT d.domain, d.tls,
-		       COALESCE(s.cluster_port, s.host_port) AS proxy_port,
-		       n.ip AS node_ip,
-		       n.wg_mesh_ip,
-		       s.project_id, s.name AS svc_name,
-		       COALESCE(s.node_id, 'main') AS node_id
-		FROM   domains d
-		JOIN   services s ON s.id = d.service_id
-		LEFT JOIN nodes n ON n.node_id = s.node_id
-		WHERE  s.host_port > 0
-		  AND  s.status    = 'running'
-		ORDER  BY d.domain
-	`)
-	if err != nil {
-		return "", fmt.Errorf("query domains: %w", err)
-	}
-	defer rows.Close()
-
-	var sb strings.Builder
-	sb.WriteString("# Auto-generated by FeatherDeploy — do not edit manually\n")
-	serverIP := os.Getenv("SERVER_IP")
-	myHostname, _ := os.Hostname()
-
-	for rows.Next() {
-		var domain string
-		var tlsInt, hostPort int
-		var nodeIP, wgMeshIP sql.NullString
-		var projectID int64
-		var svcName, nodeIDStr string
-		if rows.Scan(&domain, &tlsInt, &hostPort, &nodeIP, &wgMeshIP, &projectID, &svcName, &nodeIDStr) != nil {
-			continue
-		}
-		domain = strings.TrimSpace(strings.ToLower(domain))
-		if domain == "" || hostPort <= 0 {
-			continue
-		}
-
-		targetIP := "127.0.0.1"
-		if nodeIP.Valid && nodeIP.String != "" {
-			targetIP = nodeIP.String
-		}
-		if wgMeshIP.Valid && wgMeshIP.String != "" {
-			targetIP = wgMeshIP.String
-		}
-
-		isLocal := nodeIDStr == "main" || nodeIDStr == myHostname || (serverIP != "" && targetIP == serverIP)
-
-		// If the service runs on the local brain node, force loopback routing to prevent external interface hairpin NAT drops.
-		if isLocal {
-			targetIP = "127.0.0.1"
-		}
-
-		// Try to resolve from Etcd for live endpoint metadata (highest priority)
-		if EtcdClient != nil {
-			// Use a 2-second timeout for discovery to prevent a hung etcd from
-			// blocking the entire Caddy reload.
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			if ip, port, err := EtcdClient.DiscoverService(ctx, projectID, svcName); err == nil {
-				cancel()
-				// Basic validation: ensure we didn't get empty/zero data that would
-				// result in a broken 'reverse_proxy :0' config.
-				if ip != "" && port > 0 {
-					targetIP = ip
-					hostPort = port
-					if isLocal || (serverIP != "" && targetIP == serverIP) {
-						targetIP = "127.0.0.1"
-					}
-				}
-			} else {
-				cancel()
-			}
-		}
-
-		// If the container runs on a remote worker node, ensure its traffic is tunneled securely
-		if !isLocal && targetIP != "127.0.0.1" && netdaemon.GlobalTunnel != nil {
-			// If targetIP is a private WireGuard Mesh IP (10.99.0.X), route directly to it over the kernel wg0 interface
-			if !strings.HasPrefix(targetIP, "10.99.0.") {
-				localProxyPort := netdaemon.GlobalTunnel.EnsureServiceProxy(nodeIDStr, hostPort)
-				if localProxyPort > 0 {
-					targetIP = "127.0.0.1"
-					hostPort = localProxyPort
-				}
-			}
-		}
-
-		if tlsInt == 1 {
-			// No scheme prefix → Caddy auto-provisions HTTPS via Let's Encrypt
-			fmt.Fprintf(&sb, "\n%s {\n\tlog {\n\t\toutput stdout\n\t}\n\treverse_proxy %s:%d {\n\t\theader_up Host {host}\n\t\theader_up X-Real-IP {remote_host}\n\t}\n}\n", domain, targetIP, hostPort)
-		} else {
-			fmt.Fprintf(&sb, "\nhttp://%s {\n\tlog {\n\t\toutput stdout\n\t}\n\treverse_proxy %s:%d {\n\t\theader_up Host {host}\n\t\theader_up X-Real-IP {remote_host}\n\t}\n}\n", domain, targetIP, hostPort)
-		}
-	}
-	return sb.String(), nil
 }
 
 // writeServicesFile writes content to servicesFile.  It tries, in order:

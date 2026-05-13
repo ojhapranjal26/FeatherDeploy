@@ -41,6 +41,7 @@ import (
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/detect"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/netdaemon"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/coordination"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/transfer"
 	"github.com/golang-jwt/jwt/v5"
 )
 
@@ -446,16 +447,6 @@ func Run(ctx context.Context, db *sql.DB, jwtSecret string, depID, svcID, userID
 		return
 	}
 
-	// If the selected node is NOT us, dispatch to it and exit
-	if actualNodeID != "main" && actualNodeID != myID {
-		log.add("[scheduler] dispatching deployment to node %q", actualNodeID)
-		if err := dispatchToNode(db, actualNodeID, depID, svcID, userID, jwtSecret); err != nil {
-			log.add("ERROR: dispatch failed: %v", err)
-			markFailed(db, depID, svcID, log.text())
-			return
-		}
-		return
-	}
 
 	db.Exec(`UPDATE deployments SET node_id=? WHERE id=?`, actualNodeID, depID)
 	db.Exec(`UPDATE services SET node_id=? WHERE id=?`, actualNodeID, svcID)
@@ -654,6 +645,36 @@ func Run(ctx context.Context, db *sql.DB, jwtSecret string, depID, svcID, userID
 		log.add("[env] injected env vars into build context")
 	}
 
+	// ── 6a. Dispatch to worker node if needed ─────────────────────────────────
+	if actualNodeID != "main" && actualNodeID != myID {
+		log.add("[orchestrator] packaging fully resolved source tree for transfer to %s", actualNodeID)
+		
+		tarPath := filepath.Join(buildTmpDir(), fmt.Sprintf("artifact-transfer-%d.tar.gz", depID))
+		if err := compressWorkDir(workDir, tarPath); err != nil {
+			log.add("ERROR: failed to package source tree: %v", err)
+			markFailed(db, depID, svcID, log.text())
+			return
+		}
+		defer os.Remove(tarPath)
+
+		destPath := fmt.Sprintf("/var/lib/featherdeploy/artifacts/svc-%d/dep-%d.tar.gz", svcID, depID)
+		if err := SendArtifactToNode(db, actualNodeID, depID, tarPath, destPath); err != nil {
+			log.add("ERROR: artifact transfer failed: %v", err)
+			markFailed(db, depID, svcID, log.text())
+			return
+		}
+
+		db.Exec(`UPDATE deployments SET deploy_type='artifact', artifact_path=? WHERE id=?`, destPath, depID)
+		
+		log.add("[scheduler] dispatching deployment to node %q", actualNodeID)
+		if err := dispatchToNode(db, actualNodeID, depID, svcID, userID, jwtSecret); err != nil {
+			log.add("ERROR: dispatch failed: %v", err)
+			markFailed(db, depID, svcID, log.text())
+			return
+		}
+		return
+	}
+
 	// ── 6b. Podman build ──────────────────────────────────────────────────────
 	imageName := fmt.Sprintf("featherdeploy/svc-%d:dep-%d", svcID, depID)
 	stableImage := fmt.Sprintf("featherdeploy/svc-%d:stable", svcID)
@@ -811,17 +832,27 @@ func Run(ctx context.Context, db *sql.DB, jwtSecret string, depID, svcID, userID
 		newContainerID, hostPort, svcID)
 
 	// Cluster discovery registration (Etcd)
+	// For worker nodes: register node_id+port so Caddy can route via tunnel proxy.
+	// For brain/main: register the actual IP+port via fdnet cluster proxy.
 	if EtcdClient != nil {
-		nodeIP := detectNodeIP(db)
 		regPort := hostPort
 		if clusterPortVal > 0 {
 			regPort = clusterPortVal
 		}
+		// actualNodeID is either "main" or "node-N"
+		// If this is a remote worker, we register node_id as the "ip" field
+		// so Caddy's buildConfig can identify it as a tunnel-routed service.
+		regIP := detectNodeIP(db)
+		// For non-main nodes, the registered "ip" is the node_id prefixed with "@"
+		// so the Caddy config builder can detect it and call EnsureServiceProxy.
+		if actualNodeID != "main" {
+			regIP = "@" + actualNodeID // e.g. "@node-2"
+		}
 		discoveryCtx, discoveryCancel := context.WithTimeout(ctx, 10*time.Second)
-		if err := EtcdClient.RegisterService(discoveryCtx, projectID, svcName, nodeIP, regPort); err != nil {
+		if err := EtcdClient.RegisterService(discoveryCtx, projectID, svcName, regIP, regPort); err != nil {
 			log.add("[etcd] warning: could not register service for discovery: %v", err)
 		} else {
-			log.add("[etcd] service registered successfully for discovery (ip=%s, port=%d)", nodeIP, regPort)
+			log.add("[etcd] service registered successfully for discovery (node=%s, port=%d)", actualNodeID, regPort)
 		}
 		discoveryCancel()
 	}
@@ -841,7 +872,7 @@ func Run(ctx context.Context, db *sql.DB, jwtSecret string, depID, svcID, userID
 			if err == nil {
 				conn.Close()
 				// App is up — reload Caddy so traffic starts flowing immediately.
-				caddy.Reload(db)
+				caddy.PublishRoutes(db)
 				return
 			}
 
@@ -863,7 +894,7 @@ func Run(ctx context.Context, db *sql.DB, jwtSecret string, depID, svcID, userID
 					"\n%s",
 					hPort, hPort, sID, logs),
 			dID)
-		caddy.Reload(db)
+		caddy.PublishRoutes(db)
 	}(hostPort, depID, svcID)
 
 	// Tag the freshly built image as the stable snapshot so it can be used as
@@ -3767,30 +3798,19 @@ func nodeHTTPClient(viaTunnel bool, timeout time.Duration) (*http.Client, string
 }
 
 func dispatchToNode(db *sql.DB, nodeID string, depID, svcID, userID int64, secret string) error {
-	var ip, wgMeshIP string
+	var ip string
 	var port int
-	err := db.QueryRow(`SELECT ip, port, wg_mesh_ip FROM nodes WHERE node_id=?`, nodeID).Scan(&ip, &port, &wgMeshIP)
+	err := db.QueryRow(`SELECT ip, port FROM nodes WHERE node_id=?`, nodeID).Scan(&ip, &port)
 	if err != nil {
 		return fmt.Errorf("node %q not found in DB: %w", nodeID, err)
 	}
 
-	if wgMeshIP != "" {
-		ip = wgMeshIP
-	}
-
-	// Route traffic over the secure tunnel if a proxy is available and we're not using WireGuard mesh
+	// All inter-node dispatch routes through the persistent tunnel.
 	viaTunnel := false
-	if wgMeshIP == "" {
-		if tunnelIP, tunnelPort, isTunnel := resolveNodeTunnel(nodeID, port); tunnelIP != "" {
-			ip = tunnelIP
-			port = tunnelPort
-			viaTunnel = isTunnel
-		}
-	} else {
-		// Even if viaTunnel is false, we are using the secure WireGuard mesh.
-		// However, nodeHTTPClient uses viaTunnel to skip hostname verification because
-		// it connects to an IP instead of a hostname. We need to skip verification for WireGuard IPs too.
-		viaTunnel = true
+	if tunnelIP, tunnelPort, isTunnel := resolveNodeTunnel(nodeID, port); tunnelIP != "" {
+		ip = tunnelIP
+		port = tunnelPort
+		viaTunnel = isTunnel
 	}
 	
 	// Prepare payload
@@ -3813,6 +3833,64 @@ func dispatchToNode(db *sql.DB, nodeID string, depID, svcID, userID int64, secre
 	if resp.StatusCode != http.StatusAccepted {
 		b, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("node rejected deploy (%d): %s", resp.StatusCode, b)
+	}
+
+	return nil
+}
+
+func compressWorkDir(workDir, tarball string) error {
+	cmd := exec.Command("tar", "-czf", tarball, "-C", workDir, ".")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("tar failed: %v, output: %s", err, out)
+	}
+	return nil
+}
+
+func SendArtifactToNode(db *sql.DB, nodeID string, depID int64, tarballPath string, destPath string) error {
+	var ip string
+	var port int
+	err := db.QueryRow(`SELECT ip, port FROM nodes WHERE node_id=?`, nodeID).Scan(&ip, &port)
+	if err != nil {
+		return fmt.Errorf("node %q not found in DB: %w", nodeID, err)
+	}
+
+	viaTunnel := false
+	if tunnelIP, tunnelPort, isTunnel := resolveNodeTunnel(nodeID, port); tunnelIP != "" {
+		ip = tunnelIP
+		port = tunnelPort
+		viaTunnel = isTunnel
+	}
+
+	chunker := &transfer.Chunker{FilePath: tarballPath, ChunkSize: transfer.DefaultChunkSize}
+	totalChunks, _, err := chunker.ChunkCount()
+	if err != nil {
+		return err
+	}
+
+	client, scheme := nodeHTTPClient(viaTunnel, 30*time.Second)
+
+	for i := 0; i < totalChunks; i++ {
+		data, err := chunker.ReadChunk(i)
+		if err != nil {
+			return fmt.Errorf("read chunk %d: %w", i, err)
+		}
+		url := fmt.Sprintf("%s://%s:%d/api/node/artifact-chunk/%d/%d", scheme, ip, port, depID, i)
+		req, _ := http.NewRequest("POST", url, bytes.NewReader(data))
+		req.Header.Set("X-Total-Chunks", strconv.Itoa(totalChunks))
+		if destPath != "" {
+			req.Header.Set("X-Dest-Path", destPath)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			return fmt.Errorf("post chunk %d: %w", i, err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			b, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			return fmt.Errorf("node rejected chunk %d (%d): %s", i, resp.StatusCode, b)
+		}
+		resp.Body.Close()
 	}
 
 	return nil
@@ -3937,26 +4015,10 @@ func detectNodeIP(db *sql.DB) string {
 	// 1. Try to look up our IP from the nodes table using our hostname (for worker nodes)
 	if db != nil {
 		h, _ := os.Hostname()
-		var ip, wgMeshIP string
-		err := db.QueryRow(`SELECT ip, wg_mesh_ip FROM nodes WHERE hostname=? OR node_id=?`, h, h).Scan(&ip, &wgMeshIP)
-		if err == nil {
-			if wgMeshIP != "" {
-				return wgMeshIP
-			}
-			if ip != "" && !isPrivateIP(ip) {
-				return ip
-			}
-		}
-
-		// Check if we are the brain node (brain nodes are in cluster_state, not nodes)
-		var brainWgMeshIP string
-		if err := db.QueryRow(`SELECT wg_mesh_ip FROM cluster_state WHERE id=1`).Scan(&brainWgMeshIP); err == nil && brainWgMeshIP != "" {
-			var brainID string
-			if err := db.QueryRow(`SELECT brain_id FROM cluster_state WHERE id=1`).Scan(&brainID); err == nil {
-				if brainID == "main" || brainID == h {
-					return brainWgMeshIP
-				}
-			}
+		var ip string
+		err := db.QueryRow(`SELECT ip FROM nodes WHERE hostname=? OR node_id=?`, h, h).Scan(&ip)
+		if err == nil && ip != "" && !isPrivateIP(ip) {
+			return ip
 		}
 	}
 

@@ -147,6 +147,7 @@ type CreateServiceRequest struct {
 	AppPort      int    `json:"app_port"      validate:"omitempty,min=1,max=65535"`
 	HostPort     int    `json:"host_port"     validate:"omitempty,min=1,max=65535"`
 	Domain       string `json:"domain"        validate:"omitempty,max=253"`
+	TargetNodeID string `json:"target_node_id" validate:"omitempty,max=64"`
 }
 
 type UpdateServiceRequest struct {

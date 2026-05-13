@@ -199,17 +199,13 @@ func Run() {
 	// Detect the server's public IP so DNS verification works correctly.
 	serverIP := installerDetectPublicIP()
 
-	wgPubKey, wgMeshIP := setupWireGuardBrain()
-
 	envContent := fmt.Sprintf(`# FeatherDeploy — generated %s
 RQLITE_URL=%s
 JWT_SECRET=%s
 ADDR=127.0.0.1:%s
 ORIGIN=%s
 SERVER_IP=%s
-WG_PUBLIC_KEY=%s
-WG_MESH_IP=%s
-`, time.Now().Format(time.RFC3339), rqliteURL, jwtSecret, backendPort, frontendOrigin, serverIP, wgPubKey, wgMeshIP)
+`, time.Now().Format(time.RFC3339), rqliteURL, jwtSecret, backendPort, frontendOrigin, serverIP)
 
 	writeFile(envFile, envContent, 0600)
 	mustRun("chown", "root:"+svcUser, envFile)
@@ -225,8 +221,6 @@ WG_MESH_IP=%s
 	if err := createSuperAdmin(db, adminEmail, adminName, adminPassword); err != nil {
 		die("failed to create superadmin: %v", err)
 	}
-	// Persist master brain WireGuard parameters into global cluster state
-	_, _ = db.Exec(`UPDATE cluster_state SET wg_public_key=?, wg_mesh_ip=? WHERE id=1`, wgPubKey, wgMeshIP)
 	db.Close()
 	fmt.Printf("  ✓ superadmin created (%s)\n", adminEmail)
 
@@ -1566,10 +1560,7 @@ WantedBy=multi-user.target
 `
 
 func writeRqliteService(svcUser string) {
-	publicIP := readEnvVar(envFile, "WG_MESH_IP")
-	if publicIP == "" {
-		publicIP = installerDetectPublicIP()
-	}
+	publicIP := installerDetectPublicIP()
 	if publicIP == "" {
 		publicIP = "127.0.0.1"
 	}
@@ -1607,10 +1598,7 @@ WantedBy=multi-user.target
 `
 
 func writeEtcdService(svcUser string) {
-	publicIP := readEnvVar(envFile, "WG_MESH_IP")
-	if publicIP == "" {
-		publicIP = installerDetectPublicIP()
-	}
+	publicIP := installerDetectPublicIP()
 	if publicIP == "" {
 		publicIP = "127.0.0.1"
 	}
@@ -1975,20 +1963,7 @@ func RunUpdate() {
 		}
 	}
 
-	// ── Ensure WireGuard Mesh is initialized for existing clusters ────────────
-	if readEnvVar(envFile, "WG_PUBLIC_KEY") == "" {
-		if wgPubKey, wgMeshIP := setupWireGuardBrain(); wgPubKey != "" {
-			if f, err := os.OpenFile(envFile, os.O_APPEND|os.O_WRONLY, 0640); err == nil {
-				fmt.Fprintf(f, "WG_PUBLIC_KEY=%s\nWG_MESH_IP=%s\n", wgPubKey, wgMeshIP)
-				f.Close()
-				fmt.Printf("  ✓ WG_PUBLIC_KEY written to env file\n")
-			}
-			if udb, err := appDb.OpenRqlite(rqliteURL); err == nil {
-				_, _ = udb.Exec(`UPDATE cluster_state SET wg_public_key=?, wg_mesh_ip=? WHERE id=1`, wgPubKey, wgMeshIP)
-				udb.Close()
-			}
-		}
-	}
+	// (No WireGuard setup required: cluster transport uses persistent tunnel)
 
 	// ── Reload Caddy ──────────────────────────────────────────────────────────
 	if runSilent("systemctl", "is-active", "--quiet", "caddy") == nil {

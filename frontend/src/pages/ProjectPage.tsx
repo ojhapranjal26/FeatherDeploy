@@ -1137,6 +1137,7 @@ export function ProjectPage() {
   })
 
   const [newSvcName, setNewSvcName] = useState('')
+  const [newSvcTargetNode, setNewSvcTargetNode] = useState('auto')
 
   function resetNewDatabaseForm() {
     setNewDbName('')
@@ -1148,11 +1149,12 @@ export function ProjectPage() {
   }
 
   const createSvcMutation = useMutation({
-    mutationFn: () => servicesApi.create(projectId!, { name: newSvcName }),
+    mutationFn: () => servicesApi.create(projectId!, { name: newSvcName, target_node_id: newSvcTargetNode }),
     onSuccess: (service) => {
       qc.invalidateQueries({ queryKey: ['services', projectId] })
       setNewServiceOpen(false)
       setNewSvcName('')
+      setNewSvcTargetNode('auto')
       toast.success('Service created — configure your source in the Settings tab.')
       navigate(`/projects/${projectId}/services/${service.id}`)
     },
@@ -1537,6 +1539,26 @@ export function ProjectPage() {
               onKeyDown={e => e.key === 'Enter' && newSvcName.length >= 2 && createSvcMutation.mutate()}
             />
             <p className="text-xs text-muted-foreground">Lowercase letters, numbers and hyphens only.</p>
+          </div>
+          <div className="space-y-3 py-2">
+            <Label htmlFor="svc-target-node">Target Node (Initial Deploy)</Label>
+            <Select value={newSvcTargetNode} onValueChange={v => v && setNewSvcTargetNode(v)}>
+              <SelectTrigger id="svc-target-node" className="mt-1.5">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="auto">Auto (Least Loaded)</SelectItem>
+                <SelectItem value="main">Main (Brain Node)</SelectItem>
+                {(nodes ?? []).map((node) => (
+                  <SelectItem key={node.node_id} value={node.node_id}>
+                    {node.node_id} {node.status === 'connected' ? ' (Online)' : ' (Offline)'}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-[11px] text-muted-foreground leading-relaxed">
+              Select which node should host this service.
+            </p>
           </div>
           <DialogFooter>
             <Button variant="ghost" size="sm" onClick={() => setNewServiceOpen(false)}>Cancel</Button>

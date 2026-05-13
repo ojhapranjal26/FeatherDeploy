@@ -68,14 +68,17 @@ func (h *ServiceHandler) Create(w http.ResponseWriter, r *http.Request) {
 	if req.DeployType == "" {
 		req.DeployType = "git"
 	}
+	if req.TargetNodeID == "" {
+		req.TargetNodeID = "auto"
+	}
 	res, err := h.db.ExecContext(r.Context(),
 		`INSERT INTO services
 		  (project_id, name, description, deploy_type, repo_url, repo_branch, repo_folder,
-		   framework, build_command, start_command, app_port, host_port, auto_deploy)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,0)`,
+		   framework, build_command, start_command, app_port, host_port, auto_deploy, node_id)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,0,?)`,
 		projectID, req.Name, req.Description, req.DeployType, req.RepoURL,
 		req.RepoBranch, req.RepoFolder, req.Framework, req.BuildCommand, req.StartCommand,
-		req.AppPort, nullInt(req.HostPort))
+		req.AppPort, nullInt(req.HostPort), req.TargetNodeID)
 	if err != nil {
 		if isUnique(err) {
 			writeJSON(w, http.StatusConflict, errMap("service name already exists in project"))
@@ -213,7 +216,7 @@ func (h *ServiceHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	deploy.CleanupProjectRuntimeIfUnused(h.db, projectID)
 
 	// ── Update Caddy (domain removed) ────────────────────────────────────────
-	go caddypkg.Reload(h.db)
+	go caddypkg.PublishRoutes(h.db)
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -235,7 +238,7 @@ func (h *ServiceHandler) Restart(w http.ResponseWriter, r *http.Request) {
 	}
 	h.db.ExecContext(r.Context(), //nolint
 		`UPDATE services SET status='running', updated_at=datetime('now') WHERE id=?`, svcID)
-	go caddypkg.Reload(h.db)
+	go caddypkg.PublishRoutes(h.db)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "restarted"})
 }
 func splitLines(s string) []string {

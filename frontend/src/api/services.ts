@@ -36,6 +36,7 @@ export interface CreateServicePayload {
   build_command?: string
   start_command?: string
   domain?: string
+  target_node_id?: string
 }
 
 export interface UpdateServicePayload {

@@ -425,9 +425,45 @@ ALTER TABLE nodes ADD COLUMN tunnel_rotated_at DATETIME DEFAULT NULL;  -- when l
 CREATE INDEX IF NOT EXISTS idx_nodes_tunnel_token      ON nodes(tunnel_token);
 CREATE INDEX IF NOT EXISTS idx_nodes_tunnel_token_prev ON nodes(tunnel_token_prev);
 
--- 026: wireguard private mesh networking integration columns
+-- 026: wireguard private mesh networking integration columns (deprecated, kept for existing installs)
 ALTER TABLE nodes ADD COLUMN wg_public_key TEXT NOT NULL DEFAULT '';
 ALTER TABLE nodes ADD COLUMN wg_mesh_ip    TEXT NOT NULL DEFAULT '';
 
 ALTER TABLE cluster_state ADD COLUMN wg_public_key TEXT NOT NULL DEFAULT '';
 ALTER TABLE cluster_state ADD COLUMN wg_mesh_ip    TEXT NOT NULL DEFAULT '';
+
+-- 027: node_type — distinguishes brain replica nodes from plain worker nodes.
+--   brain  → eligible for leader election; runs rqlite replica; receives panel binary
+--   worker → never becomes leader; no rqlite; etcd-only for service discovery
+ALTER TABLE nodes ADD COLUMN node_type TEXT NOT NULL DEFAULT 'worker'
+                  CHECK(node_type IN ('brain','worker'));
+
+-- 028: artifact_transfers — tracks chunked multipart artifact uploads streamed
+--   from the brain to a target worker node over the mTLS tunnel.
+--   Chunks are stored as files: {data_dir}/transfers/{id}/chunk-{n}
+--   On completion all chunks are concatenated and the resulting archive is extracted.
+CREATE TABLE IF NOT EXISTS artifact_transfers (
+    id              INTEGER  PRIMARY KEY AUTOINCREMENT,
+    deployment_id   INTEGER  NOT NULL REFERENCES deployments(id) ON DELETE CASCADE,
+    target_node_id  TEXT     NOT NULL,                  -- node_id of the receiving worker
+    total_size      INTEGER  NOT NULL DEFAULT 0,        -- bytes
+    chunk_size      INTEGER  NOT NULL DEFAULT 4194304,  -- 4 MB default
+    total_chunks    INTEGER  NOT NULL DEFAULT 0,
+    received_chunks INTEGER  NOT NULL DEFAULT 0,
+    status          TEXT     NOT NULL DEFAULT 'pending'
+                             CHECK(status IN ('pending','transferring','complete','failed')),
+    error_message   TEXT     NOT NULL DEFAULT '',
+    created_at      DATETIME NOT NULL DEFAULT (datetime('now')),
+    updated_at      DATETIME NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_artifact_transfers_dep ON artifact_transfers(deployment_id);
+CREATE INDEX IF NOT EXISTS idx_artifact_transfers_node ON artifact_transfers(target_node_id);
+
+-- 029: cluster_leader — brain broadcasts current leader address to all nodes.
+--   Updated by the brain on every heartbeat / topology change.
+ALTER TABLE cluster_state ADD COLUMN leader_node_id   TEXT NOT NULL DEFAULT 'main';
+ALTER TABLE cluster_state ADD COLUMN leader_public_ip TEXT NOT NULL DEFAULT '';
+ALTER TABLE cluster_state ADD COLUMN leader_updated_at DATETIME;
+
+-- 030: assigned_domains for distributed caddy routing info
+ALTER TABLE nodes ADD COLUMN assigned_domains TEXT NOT NULL DEFAULT '[]';

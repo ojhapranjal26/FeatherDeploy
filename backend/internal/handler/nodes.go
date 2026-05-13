@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
@@ -207,31 +206,57 @@ func (h *NodeHandler) List(w http.ResponseWriter, r *http.Request) {
 			t, _ := time.Parse(time.RFC3339, lastSeen.String)
 			n.LastSeen = &t
 		}
-		// Load hostname, OS info, node_id, wg_public_key, and wg_mesh_ip
-		h.db.QueryRowContext(r.Context(), `SELECT hostname, os_info, node_id, wg_public_key, wg_mesh_ip FROM nodes WHERE id=?`, n.ID).Scan(&n.Hostname, &n.OSInfo, &n.NodeID, &n.WgPublicKey, &n.WgMeshIP)
+		// Load hostname, OS info, node_id, assigned_domains; check if tunnel is active
+		var assignedDomainsJSON string
+		h.db.QueryRowContext(r.Context(), `SELECT hostname, os_info, node_id, node_type, assigned_domains FROM nodes WHERE id=?`, n.ID).Scan(&n.Hostname, &n.OSInfo, &n.NodeID, &n.NodeType, &assignedDomainsJSON)
+		n.IsBrain = n.NodeType == model.NodeTypeBrain
+		if n.NodeID != "" && netdaemon.GlobalTunnel != nil {
+			n.TunnelConnected = netdaemon.GlobalTunnel.GetNodeProxyAddr(n.NodeID, 7443) != ""
+		}
+		if assignedDomainsJSON != "" && assignedDomainsJSON != "[]" {
+			json.Unmarshal([]byte(assignedDomainsJSON), &n.AssignedDomains)
+		} else {
+			n.AssignedDomains = make([]string, 0)
+		}
 		nodes = append(nodes, n)
 	}
 	writeJSON(w, http.StatusOK, nodes)
 }
 
+// AddNodeRequest is the payload for POST /api/nodes.
+type AddNodeRequest struct {
+	Name     string   `json:"name"      validate:"required,min=2,max=64"`
+	IP       string   `json:"ip"        validate:"required"`
+	NodeType model.NodeType `json:"node_type"` // "brain" or "worker" (default: worker)
+}
+
 // POST /api/nodes — register a new node slot and generate a join token
 func (h *NodeHandler) Add(w http.ResponseWriter, r *http.Request) {
-	var req model.AddNodeRequest
+	var req AddNodeRequest
 	if !v.DecodeAndValidate(w, r, &req) {
 		return
 	}
 
-	if req.Port == 0 {
-		req.Port = 7443
+	// Hardcode port 443 for all nodes based on the new distributed Caddy architecture
+	port := 443
+
+	// Validate node_type; default to worker if not specified
+	nodeType := req.NodeType
+	if nodeType == "" {
+		nodeType = model.NodeTypeWorker
+	}
+	if nodeType != model.NodeTypeBrain && nodeType != model.NodeTypeWorker {
+		writeJSON(w, http.StatusBadRequest, errMap("node_type must be 'brain' or 'worker'"))
+		return
 	}
 
 	token := randomHex20()
 	expires := time.Now().Add(24 * time.Hour)
 
 	_, err := h.db.ExecContext(r.Context(),
-		`INSERT INTO nodes (name, ip, port, status, join_token, token_expires_at)
-		 VALUES (?, ?, ?, 'pending', ?, ?)`,
-		req.Name, req.IP, req.Port, token, expires.Format(time.RFC3339),
+		`INSERT INTO nodes (name, ip, port, status, node_type, join_token, token_expires_at)
+		 VALUES (?, ?, ?, 'pending', ?, ?, ?)`,
+		req.Name, req.IP, port, nodeType, token, expires.Format(time.RFC3339),
 	)
 	if err != nil {
 		if isUnique(err) {
@@ -249,11 +274,14 @@ func (h *NodeHandler) Add(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]interface{}{
 		"id":               id,
 		"name":             req.Name,
+		"node_type":        nodeType,
 		"join_token":       token,
 		"token_expires_at": expires,
 		"join_command":     h.joinCommand(token),
 	})
 }
+
+
 
 // POST /api/nodes/{nodeID}/token — regenerate join token for a pending node
 func (h *NodeHandler) RegenerateToken(w http.ResponseWriter, r *http.Request) {
@@ -357,7 +385,7 @@ func (h *NodeHandler) NodeLogs(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	} else {
-		// Worker node — stream via the tunnel
+		// Worker node — stream logs via the persistent tunnel stream
 		nodeID, err := strconv.ParseInt(nodeParam, 10, 64)
 		if err != nil {
 			fmt.Fprintf(w, "data: {\"error\":\"invalid node id\"}\n\n")
@@ -366,31 +394,24 @@ func (h *NodeHandler) NodeLogs(w http.ResponseWriter, r *http.Request) {
 		}
 
 		var dbNodeID string
-		var ip, wgMeshIP string
 		var port int
 		err = h.db.QueryRowContext(r.Context(),
-			`SELECT node_id, ip, port, wg_mesh_ip FROM nodes WHERE id=?`, nodeID).Scan(&dbNodeID, &ip, &port, &wgMeshIP)
+			`SELECT node_id, port FROM nodes WHERE id=?`, nodeID).Scan(&dbNodeID, &port)
 		if err != nil {
 			fmt.Fprintf(w, "data: {\"error\":\"node not found\"}\n\n")
 			flusher.Flush()
 			return
 		}
 
-		if wgMeshIP != "" {
-			ip = wgMeshIP
-		}
-
-		// Prefer tunnel proxy — the node API always listens on port 7443
-		// The node API runs with TLS, so we must use HTTPS even through the tunnel.
-		// InsecureSkipVerify is safe here: the yamux tunnel (WebSocket/TLS) is
-		// already the encrypted transport layer.
+		// All node API traffic routes through the persistent yamux tunnel.
+		// The tunnel proxy gives us a loopback address that maps to the remote port.
 		scheme := "https"
+		ip := ""
 		tunnelPort := port
-		if wgMeshIP == "" && netdaemon.GlobalTunnel != nil {
-			// Try the stored port first, then fall back to 7443 (the node API port)
-			proxyAddr := netdaemon.GlobalTunnel.GetNodeProxyAddr(dbNodeID, port)
+		if netdaemon.GlobalTunnel != nil {
+			proxyAddr := netdaemon.GlobalTunnel.GetNodeProxyAddr(dbNodeID, 7443)
 			if proxyAddr == "" && port != 7443 {
-				proxyAddr = netdaemon.GlobalTunnel.GetNodeProxyAddr(dbNodeID, 7443)
+				proxyAddr = netdaemon.GlobalTunnel.GetNodeProxyAddr(dbNodeID, port)
 			}
 			if proxyAddr != "" {
 				ip = "127.0.0.1"
@@ -401,6 +422,11 @@ func (h *NodeHandler) NodeLogs(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 			}
+		}
+		if ip == "" {
+			fmt.Fprintf(w, "data: {\"error\":\"node tunnel not connected\"}\n\n")
+			flusher.Flush()
+			return
 		}
 
 		// The node exposes /api/node/logs as an SSE endpoint, we proxy it
@@ -602,17 +628,16 @@ func (h *NodeHandler) CompleteJoin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var payload struct {
-		RqliteAddr  string `json:"rqlite_addr"` // host:port for rqlite Raft
-		Hostname    string `json:"hostname"`
-		OSInfo      string `json:"os_info"`
-		WgPublicKey string `json:"wg_public_key"`
+		RqliteAddr string `json:"rqlite_addr"` // host:port for rqlite Raft (informational)
+		Hostname   string `json:"hostname"`
+		OSInfo     string `json:"os_info"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		writeJSON(w, http.StatusBadRequest, errMap("invalid JSON"))
 		return
 	}
 
-	// Detect actual IP
+	// Detect actual source IP (for record keeping only; not used for routing)
 	nodeIP := r.Header.Get("X-Forwarded-For")
 	if nodeIP == "" {
 		nodeIP = r.Header.Get("X-Real-IP")
@@ -623,33 +648,23 @@ func (h *NodeHandler) CompleteJoin(w http.ResponseWriter, r *http.Request) {
 	if nodeIP == "" {
 		nodeIP = r.RemoteAddr
 	}
-	// If it's a comma-separated list from X-Forwarded-For, take the first one
 	if idx := strings.Index(nodeIP, ","); idx >= 0 {
 		nodeIP = strings.TrimSpace(nodeIP[:idx])
 	}
 
-	// Verify we didn't get an internal IP if the server is public.
-	// If we got '127.0.0.1' but the node is external, this detection failed.
-	// We'll trust the payload's hostname/ip if the remote addr is a proxy.
-	if nodeIP == "127.0.0.1" || nodeIP == "::1" || strings.HasPrefix(nodeIP, "10.") || strings.HasPrefix(nodeIP, "192.168.") {
-		// Attempt fallback detection if the node reported its own perceived IP
-	}
-
-	// Load node info
+	// Load node info (including node_type so we can tell the node its role)
 	var node model.Node
 	err := h.db.QueryRowContext(r.Context(),
-		`SELECT id, name, ip, port FROM nodes WHERE join_token=?`, token).
-		Scan(&node.ID, &node.Name, &node.IP, &node.Port)
+		`SELECT id, name, ip, port, node_type FROM nodes WHERE join_token=?`, token).
+		Scan(&node.ID, &node.Name, &node.IP, &node.Port, &node.NodeType)
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, errMap("node not found"))
 		return
 	}
 
-	// Allocate deterministic static private WireGuard mesh IP (10.99.0.X)
-	wgMeshIP := ""
-	if payload.WgPublicKey != "" {
-		wgMeshIP = fmt.Sprintf("10.99.0.%d", 10+node.ID)
-	}
+	// Node ID is assigned deterministically as "node-<db_id>"
+	// This is the stable identity used for tunnel sessions and service routing.
+	nodeID := fmt.Sprintf("node-%d", node.ID)
 
 	// Sign certificate
 	ca, err := h.loadCA()
@@ -677,19 +692,13 @@ func (h *NodeHandler) CompleteJoin(w http.ResponseWriter, r *http.Request) {
 	// Generate a permanent tunnel token (separate from the one-time registration join_token)
 	tunnelToken := randomHex20()
 
-	nodeID := fmt.Sprintf("node-%d", node.ID)
-
-	effectiveIP := nodeIP
-	if wgMeshIP != "" {
-		effectiveIP = wgMeshIP
-	}
-
-	// Update node record: mark connected, save cert, clear join token, save real IP, save wireguard params
+	// Update node record: mark connected, save cert, clear join token, save source IP
+	// IP is stored for display/SSH purposes only — all cluster traffic goes through tunnel
 	_, err = h.db.ExecContext(r.Context(),
-		`UPDATE nodes SET status='connected', ip=?, hostname=?, os_info=?, node_id=?, node_cert_pem=?, rqlite_addr=?,
-		 join_token=NULL, token_expires_at=NULL, last_seen=datetime('now'),
-		 port=7443, tunnel_token=?, updated_at=datetime('now'), wg_public_key=?, wg_mesh_ip=? WHERE id=?`,
-		effectiveIP, payload.Hostname, payload.OSInfo, nodeID, nodeCert.CertPEM, payload.RqliteAddr, tunnelToken, payload.WgPublicKey, wgMeshIP, node.ID,
+		`UPDATE nodes SET status='connected', ip=?, hostname=?, os_info=?, node_id=?, node_cert_pem=?,
+		 rqlite_addr=?, join_token=NULL, token_expires_at=NULL, last_seen=datetime('now'),
+		 port=7443, tunnel_token=?, updated_at=datetime('now') WHERE id=?`,
+		nodeIP, payload.Hostname, payload.OSInfo, nodeID, nodeCert.CertPEM, payload.RqliteAddr, tunnelToken, node.ID,
 	)
 	if err != nil {
 		slog.Error("complete-join: update node", "err", err)
@@ -697,72 +706,40 @@ func (h *NodeHandler) CompleteJoin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Trigger firewall reconciliation to allow this node IP and add wg peer (synchronously to avoid race)
+	// Trigger firewall reconciliation (for iptables protection of cluster ports)
 	deploy.ReconcileNodeRqliteIPTables(h.db)
 
 	// Fetch SSH public key so the node can add it to authorized_keys
 	sshPubKey := heartbeat.GetSSHPublicKey(h.db)
 
-	// Fetch master brain WireGuard parameters to return to joining peer
-	var brainWgPubKey, brainWgMeshIP string
-	_ = h.db.QueryRowContext(r.Context(), `SELECT wg_public_key, wg_mesh_ip FROM cluster_state WHERE id=1`).Scan(&brainWgPubKey, &brainWgMeshIP)
+	// Cluster transport addresses:
+	// rqlite and etcd traffic travels through the persistent yamux tunnel.
+	// The node sets up local proxy ports (127.0.0.1:4001→brain via tunnel) during
+	// featherdeploy-node serve startup, so we advertise loopback addresses.
+	rqliteMain := "127.0.0.1:4001" // proxy port the node establishes on its own loopback
+	etcdMain := "main=http://127.0.0.1:2380"
 
-	// Determine etcd initial cluster (self + registered nodes)
-	serverIP := os.Getenv("SERVER_IP")
-	if serverIP == "" {
-		serverIP = "127.0.0.1"
+	// Fetch current cluster leader info so the joining node can connect correctly
+	var leaderNodeID, leaderPublicIP string
+	h.db.QueryRowContext(r.Context(), `SELECT leader_node_id, leader_public_ip FROM cluster_state WHERE id=1`).Scan(&leaderNodeID, &leaderPublicIP)
+	if leaderPublicIP == "" {
+		leaderPublicIP = os.Getenv("SERVER_IP")
 	}
-	publicIP := serverIP
-	if publicIP == "127.0.0.1" || publicIP == "" || isPrivateIP(publicIP) {
-		if conn, err := net.DialTimeout("udp", "1.1.1.1:80", 2*time.Second); err == nil {
-			publicIP = conn.LocalAddr().(*net.UDPAddr).IP.String()
-			conn.Close()
-		}
-		// Fallback to external lookup if still private
-		if isPrivateIP(publicIP) {
-			urls := []string{"https://ident.me", "https://ifconfig.me/ip"}
-			for _, u := range urls {
-				client := http.Client{Timeout: 2 * time.Second}
-				if resp, err := client.Get(u); err == nil {
-					if body, err := io.ReadAll(resp.Body); err == nil {
-						extIP := strings.TrimSpace(string(body))
-						if net.ParseIP(extIP) != nil {
-							publicIP = extIP
-							resp.Body.Close()
-							break
-						}
-					}
-					resp.Body.Close()
-				}
-			}
-		}
-	}
-
-	etcdMainIP := publicIP
-	rqliteMainIP := publicIP
-	if brainWgMeshIP != "" && wgMeshIP != "" {
-		etcdMainIP = brainWgMeshIP
-		rqliteMainIP = brainWgMeshIP
-	}
-
-	etcdMain := fmt.Sprintf("main=http://%s:2380", etcdMainIP)
-	rqliteMain := fmt.Sprintf("%s:4001", rqliteMainIP)
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"node_id":             nodeID,
-		"ca_cert_pem":         ca.CertPEM,
-		"node_cert_pem":       nodeCert.CertPEM,
-		"node_key_pem":        nodeCert.KeyPEM,
-		"encrypted_env":       encryptedEnv,
-		"rqlite_main":         rqliteMain,
-		"etcd_main":           etcdMain,
-		"ssh_public_key":      sshPubKey,
-		"node_ip":             nodeIP,
-		"tunnel_token":        tunnelToken,
-		"wg_mesh_ip":          wgMeshIP,
-		"brain_wg_public_key": brainWgPubKey,
-		"brain_wg_mesh_ip":    brainWgMeshIP,
-		"brain_public_ip":     publicIP,
+		"node_id":        nodeID,
+		"node_type":      string(node.NodeType),
+		"ca_cert_pem":    ca.CertPEM,
+		"node_cert_pem":  nodeCert.CertPEM,
+		"node_key_pem":   nodeCert.KeyPEM,
+		"encrypted_env":  encryptedEnv,
+		"rqlite_main":    rqliteMain,
+		"etcd_main":      etcdMain,
+		"ssh_public_key": sshPubKey,
+		"node_ip":        nodeIP,
+		"tunnel_token":   tunnelToken,
+		"leader_node_id": leaderNodeID,
+		"leader_ip":      leaderPublicIP,
 	})
 }
 
@@ -852,162 +829,113 @@ func (h *NodeHandler) SSHCommand(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// POST /api/nodes/{nodeID}/rotate-wireguard — trigger wireguard key rotation on a target worker node
+// POST /api/nodes/{nodeID}/rotate-wireguard — removed (WireGuard replaced by tunnel transport)
 func (h *NodeHandler) RotateWireguard(w http.ResponseWriter, r *http.Request) {
-	nodeID, err := strconv.ParseInt(chi.URLParam(r, "nodeID"), 10, 64)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errMap("invalid node ID"))
+	writeJSON(w, http.StatusGone, errMap("WireGuard mesh has been removed; cluster uses persistent tunnel transport instead"))
+}
+
+// GET /api/cluster/github-token — returns a short-lived GitHub App installation token.
+// Called by worker nodes over the tunnel before a git clone so they can access private repos.
+// Only reachable from loopback (127.0.0.1) — enforced at handler level.
+// The node authenticates via its tunnel_token passed in the X-Node-Token header.
+func (h *NodeHandler) ClusterGitHubToken(w http.ResponseWriter, r *http.Request) {
+	// Only allow from localhost (tunnel proxy)
+	host, _, _ := net.SplitHostPort(r.RemoteAddr)
+	if host != "127.0.0.1" && host != "::1" {
+		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
 
-	var ip, nodeStrID string
-	var wgMeshIP sql.NullString
-	var port int
-	err = h.db.QueryRowContext(r.Context(), `SELECT ip, port, node_id, wg_mesh_ip FROM nodes WHERE id=?`, nodeID).
-		Scan(&ip, &port, &nodeStrID, &wgMeshIP)
-	if err != nil {
-		writeJSON(w, http.StatusNotFound, errMap("node not found"))
+	// Validate node tunnel token
+	nodeToken := r.Header.Get("X-Node-Token")
+	if nodeToken == "" {
+		http.Error(w, "missing X-Node-Token", http.StatusUnauthorized)
+		return
+	}
+	var nodeID string
+	h.db.QueryRowContext(r.Context(),
+		`SELECT node_id FROM nodes WHERE tunnel_token=? OR tunnel_token_prev=?`, nodeToken, nodeToken).Scan(&nodeID)
+	if nodeID == "" {
+		http.Error(w, "invalid node token", http.StatusUnauthorized)
 		return
 	}
 
-	if !wgMeshIP.Valid || wgMeshIP.String == "" {
-		writeJSON(w, http.StatusBadRequest, errMap("node does not have an active wireguard mesh ip allocated"))
-		return
-	}
-
-	// Retrieve brain's wg public key
-	var brainWgPubKey string
-	err = h.db.QueryRowContext(r.Context(), `SELECT wg_public_key FROM cluster_state WHERE id=1`).Scan(&brainWgPubKey)
-	if err != nil || brainWgPubKey == "" {
-		if pubBytes, err := os.ReadFile("/etc/wireguard/publickey"); err == nil {
-			brainWgPubKey = strings.TrimSpace(string(pubBytes))
-		}
-	}
-	if brainWgPubKey == "" {
-		writeJSON(w, http.StatusInternalServerError, errMap("master brain wireguard public key not configured"))
-		return
-	}
-
-	// Determine route/client to node
-	targetIP := ip
-	targetPort := port
-	viaTunnel := false
-	if netdaemon.GlobalTunnel != nil {
-		proxyAddr := netdaemon.GlobalTunnel.GetNodeProxyAddr(nodeStrID, port)
-		if proxyAddr == "" && port != 7443 {
-			proxyAddr = netdaemon.GlobalTunnel.GetNodeProxyAddr(nodeStrID, 7443)
-		}
-		if proxyAddr != "" {
-			parts := strings.Split(proxyAddr, ":")
-			if len(parts) == 2 {
-				if p, err := strconv.Atoi(parts[1]); err == nil {
-					targetPort = p
-				}
-			}
-			targetIP = "127.0.0.1"
-			viaTunnel = true
+	// Fetch GitHub App installation token from app_settings
+	var encInstToken string
+	h.db.QueryRowContext(r.Context(), `SELECT enc_value FROM app_settings WHERE key='github_installation_token'`).Scan(&encInstToken)
+	if encInstToken != "" {
+		plainToken, err := crypto.Decrypt(encInstToken[len("fdenc:"):], h.jwtSecret)
+		if err == nil {
+			writeJSON(w, http.StatusOK, map[string]string{"token": plainToken, "type": "installation"})
+			return
 		}
 	}
 
-	// Determine public IP for the brain
-	serverIP := os.Getenv("SERVER_IP")
-	if serverIP == "" {
-		serverIP = "127.0.0.1"
-	}
-	publicIP := serverIP
-	if publicIP == "127.0.0.1" || publicIP == "" || isPrivateIP(publicIP) {
-		if conn, err := net.DialTimeout("udp", "1.1.1.1:80", 2*time.Second); err == nil {
-			publicIP = conn.LocalAddr().(*net.UDPAddr).IP.String()
-			conn.Close()
-		}
-		// Fallback to external lookup if still private
-		if isPrivateIP(publicIP) {
-			urls := []string{"https://ident.me", "https://ifconfig.me/ip"}
-			for _, u := range urls {
-				client := http.Client{Timeout: 2 * time.Second}
-				if resp, err := client.Get(u); err == nil {
-					if body, err := io.ReadAll(resp.Body); err == nil {
-						extIP := strings.TrimSpace(string(body))
-						if net.ParseIP(extIP) != nil {
-							publicIP = extIP
-							resp.Body.Close()
-							break
-						}
-					}
-					resp.Body.Close()
-				}
-			}
-		}
-	}
+	// Fallback: return empty (node will try with no token or user's OAuth)
+	writeJSON(w, http.StatusOK, map[string]string{"token": "", "type": "none"})
+}
 
-	// Construct payload for node
-	payload := map[string]string{
-		"brain_wg_public_key": brainWgPubKey,
-		"wg_mesh_ip":          wgMeshIP.String,
-		"brain_public_ip":     publicIP,
-	}
-	bodyBytes, _ := json.Marshal(payload)
+// GET /api/cluster/leader — returns the current cluster leader node_id and public IP.
+// Nodes call this to know where to direct Raft/rqlite connections.
+// Accessible both from the tunnel (127.0.0.1) and internally.
+func (h *NodeHandler) ClusterLeader(w http.ResponseWriter, r *http.Request) {
+	var leaderNodeID, leaderPublicIP string
+	h.db.QueryRowContext(r.Context(),
+		`SELECT leader_node_id, leader_public_ip FROM cluster_state WHERE id=1`).
+		Scan(&leaderNodeID, &leaderPublicIP)
 
-	// Prepare HTTP client
-	var client *http.Client
-	scheme := "https"
-	if viaTunnel {
-		scheme = "http"
-		client = &http.Client{Timeout: 15 * time.Second}
-	} else {
-		caPEM, _ := os.ReadFile("/etc/featherdeploy/ca.crt")
-		certPEM, _ := os.ReadFile("/etc/featherdeploy/node.crt")
-		keyPEM, _ := os.ReadFile("/etc/featherdeploy/node.key")
-		tlsCfg, err := pki.TLSConfig(string(certPEM), string(keyPEM), string(caPEM))
-		if err != nil {
-			tlsCfg = &tls.Config{InsecureSkipVerify: true}
-		}
-		client = &http.Client{
-			Transport: &http.Transport{TLSClientConfig: tlsCfg},
-			Timeout:   15 * time.Second,
-		}
+	if leaderNodeID == "" {
+		leaderNodeID = "main"
 	}
-
-	targetURL := fmt.Sprintf("%s://%s:%d/api/node/rotate-wireguard-keys", scheme, targetIP, targetPort)
-	resp, err := client.Post(targetURL, "application/json", bytes.NewReader(bodyBytes))
-	if err != nil {
-		slog.Error("rotate wireguard keys request to node failed", "url", targetURL, "err", err)
-		writeJSON(w, http.StatusBadGateway, errMap(fmt.Sprintf("failed to reach node API: %v", err)))
-		return
+	if leaderPublicIP == "" {
+		leaderPublicIP = os.Getenv("SERVER_IP")
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		writeJSON(w, http.StatusBadGateway, errMap(fmt.Sprintf("node rejected rotation (%d): %s", resp.StatusCode, b)))
-		return
-	}
-
-	var reply struct {
-		WgPublicKey string `json:"wg_public_key"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&reply); err != nil || reply.WgPublicKey == "" {
-		writeJSON(w, http.StatusBadGateway, errMap("node returned empty or invalid wireguard public key"))
-		return
-	}
-
-	// Update the database with the new key
-	_, err = h.db.ExecContext(r.Context(), `UPDATE nodes SET wg_public_key=? WHERE id=?`, reply.WgPublicKey, nodeID)
-	if err != nil {
-		slog.Error("failed to persist new wireguard public key to db", "err", err)
-		writeJSON(w, http.StatusInternalServerError, errMap("failed to save new wireguard key to database"))
-		return
-	}
-
-	// Reconcile cluster firewall immediately to update the master brain's active kernel wg0 interface peers
-	deploy.ReconcileClusterFirewall(h.db)
 
 	writeJSON(w, http.StatusOK, map[string]string{
-		"status":        "success",
-		"wg_public_key": reply.WgPublicKey,
-		"message":       "WireGuard keys rotated and kernel interface synced successfully",
+		"leader_node_id": leaderNodeID,
+		"leader_ip":      leaderPublicIP,
 	})
 }
+
+// POST /api/cluster/leader — called by the elected brain to announce its leadership.
+// Only brain nodes (node_type='brain') may call this. Authenticated via tunnel_token.
+func (h *NodeHandler) AnnounceLeader(w http.ResponseWriter, r *http.Request) {
+	host, _, _ := net.SplitHostPort(r.RemoteAddr)
+	if host != "127.0.0.1" && host != "::1" {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	nodeToken := r.Header.Get("X-Node-Token")
+	var nodeID, nodeType, nodeIP string
+	h.db.QueryRowContext(r.Context(),
+		`SELECT node_id, node_type, ip FROM nodes WHERE tunnel_token=? OR tunnel_token_prev=?`, nodeToken, nodeToken).
+		Scan(&nodeID, &nodeType, &nodeIP)
+	if nodeID == "" {
+		http.Error(w, "invalid token", http.StatusUnauthorized)
+		return
+	}
+	if nodeType != string(model.NodeTypeBrain) {
+		http.Error(w, "only brain nodes can announce leadership", http.StatusForbidden)
+		return
+	}
+
+	var payload struct {
+		PublicIP string `json:"public_ip"`
+	}
+	json.NewDecoder(r.Body).Decode(&payload)
+	if payload.PublicIP == "" {
+		payload.PublicIP = nodeIP
+	}
+
+	h.db.ExecContext(r.Context(),
+		`UPDATE cluster_state SET leader_node_id=?, leader_public_ip=?, leader_updated_at=datetime('now') WHERE id=1`,
+		nodeID, payload.PublicIP)
+
+	slog.Info("cluster: leader announced", "node_id", nodeID, "ip", payload.PublicIP)
+	writeJSON(w, http.StatusOK, map[string]string{"ok": "1", "leader": nodeID})
+}
+
 
 // GET /api/nodes/server-binary?token=TOKEN — serve the main featherdeploy server binary
 // Nodes download this during join so they can promote to brain.
@@ -1281,16 +1209,16 @@ reset_host
 if command -v apt-get >/dev/null 2>&1; then
 	export DEBIAN_FRONTEND=noninteractive
 	apt-get update -y -q
-	apt-get install -y -q curl uidmap slirp4netns netavark aardvark-dns passt containernetworking-plugins wireguard wireguard-tools 2>/dev/null || true
+	apt-get install -y -q curl uidmap slirp4netns netavark aardvark-dns passt containernetworking-plugins 2>/dev/null || true
 	apt-get install -y -q podman crun caddy openssh-server 2>/dev/null || apt-get install -y -q curl podman caddy openssh-server uidmap
 elif command -v dnf >/dev/null 2>&1; then
-	dnf install -y -q curl shadow-utils slirp4netns netavark aardvark-dns passt containernetworking-plugins wireguard wireguard-tools 2>/dev/null || true
+	dnf install -y -q curl shadow-utils slirp4netns netavark aardvark-dns passt containernetworking-plugins 2>/dev/null || true
 	dnf install -y -q podman crun caddy openssh-server 2>/dev/null || dnf install -y -q curl podman caddy openssh-server
 elif command -v yum >/dev/null 2>&1; then
-	yum install -y -q curl shadow-utils slirp4netns netavark aardvark-dns passt containernetworking-plugins wireguard wireguard-tools 2>/dev/null || true
+	yum install -y -q curl shadow-utils slirp4netns netavark aardvark-dns passt containernetworking-plugins 2>/dev/null || true
 	yum install -y -q podman crun openssh-server 2>/dev/null || yum install -y -q curl podman openssh-server
 elif command -v apk >/dev/null 2>&1; then
-	apk add --no-cache curl podman caddy crun openssh wireguard-tools 2>/dev/null || apk add --no-cache curl podman caddy openssh wireguard-tools
+	apk add --no-cache curl podman caddy crun openssh 2>/dev/null || apk add --no-cache curl podman caddy openssh
 	apk add --no-cache slirp4netns netavark aardvark-dns passt 2>/dev/null || true
 fi
 

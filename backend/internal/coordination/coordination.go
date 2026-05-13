@@ -32,14 +32,15 @@ func (c *Client) Close() error {
 // RegisterNode heartbeats a node's presence using an etcd lease.
 // The lease will expire if the node stops heartbeating, allowing the cluster
 // to detect node failure in real-time.
-func (c *Client) RegisterNode(ctx context.Context, nodeID string, ttl int64) (<-chan *clientv3.LeaseKeepAliveResponse, error) {
+func (c *Client) RegisterNode(ctx context.Context, nodeID, ip string, port int, ttl int64) (<-chan *clientv3.LeaseKeepAliveResponse, error) {
 	lease, err := c.etcd.Grant(ctx, ttl)
 	if err != nil {
 		return nil, err
 	}
 
 	key := fmt.Sprintf("/nodes/heartbeat/%s", nodeID)
-	_, err = c.etcd.Put(ctx, key, "alive", clientv3.WithLease(lease.ID))
+	val := fmt.Sprintf(`{"ip":"%s","port":%d}`, ip, port)
+	_, err = c.etcd.Put(ctx, key, val, clientv3.WithLease(lease.ID))
 	if err != nil {
 		return nil, err
 	}
@@ -150,4 +151,26 @@ func (c *Client) DiscoverService(ctx context.Context, projectID int64, svcName s
 		return "", 0, err
 	}
 	return data.IP, data.Port, nil
+}
+
+// Put writes a key-value pair to Etcd.
+func (c *Client) Put(ctx context.Context, key, val string) error {
+	_, err := c.etcd.Put(ctx, key, val)
+	return err
+}
+
+// Delete removes a key from Etcd.
+func (c *Client) Delete(ctx context.Context, key string) error {
+	_, err := c.etcd.Delete(ctx, key)
+	return err
+}
+
+// GetPrefix gets all keys with the given prefix.
+func (c *Client) GetPrefix(ctx context.Context, prefix string) (*clientv3.GetResponse, error) {
+	return c.etcd.Get(ctx, prefix, clientv3.WithPrefix())
+}
+
+// EtcdClient gives direct access to the underlying clientv3.Client.
+func (c *Client) EtcdClient() *clientv3.Client {
+	return c.etcd
 }

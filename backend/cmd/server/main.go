@@ -36,6 +36,7 @@ import (
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/model"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/netdaemon"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/pki"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/proxyengine"
 	"github.com/ojhapranjal26/featherdeploy/backend/web"
 )
 
@@ -293,6 +294,11 @@ func serve() {
 		deploy.SetEtcdClient(etcdClient)
 		caddy.SetEtcdClient(etcdClient)
 		slog.Info("etcd: coordination client ready", "endpoints", etcdEndpoints)
+
+		// Start the Proxy Engine for the brain node (handles all edge ingress mapping to local/remote nodes)
+		engine := proxyengine.NewEngine(etcdClient.EtcdClient(), "main", true, nil)
+		engine.Start(context.Background())
+		slog.Info("proxyengine: started on brain node")
 	}
 
 	// ─── FDNet: lightweight internal network proxy ─────────────────────────────
@@ -431,7 +437,7 @@ func serve() {
 	// previous process the new block would already be on disk; but if the Caddy
 	// config was manually cleared or the file was recreated by build.sh the
 	// reload here repairs it before any user traffic arrives.
-	go caddy.Reload(db)
+	go caddy.PublishRoutes(db)
 
 	// Write a Caddy snippet for the panel domain with flush_interval -1 so SSE
 	// log streams are not buffered by Caddy's 30-second proxy timeout.
@@ -471,7 +477,7 @@ func serve() {
 		ticker := time.NewTicker(60 * time.Second)
 		defer ticker.Stop()
 		for range ticker.C {
-			caddy.Reload(db)
+			caddy.PublishRoutes(db)
 		}
 	}()
 
@@ -769,6 +775,12 @@ func serve() {
 
 		// ── Cluster brain info (any authenticated user) ───────────────────
 		r.Get("/api/cluster/brain", nodeH.ClusterBrain)
+		// ── Cluster leader info (unauthenticated — safe, public info) ─────
+		r.Get("/api/cluster/leader", nodeH.ClusterLeader)
+		// ── Leader announcement (loopback-only, node token auth) ──────────
+		r.Post("/api/cluster/leader", nodeH.AnnounceLeader)
+		// ── GitHub token relay for worker nodes (loopback-only) ───────────
+		r.Get("/api/cluster/github-token", nodeH.ClusterGitHubToken)
 
 		// ── Nodes (superadmin / admin only) ──────────────────────────────
 		r.Group(func(r chi.Router) {
@@ -784,6 +796,7 @@ func serve() {
 			// Logs are SSE — registered here so they share auth middleware but no 30s timeout
 			r.Get("/api/nodes/{nodeID}/logs", nodeH.NodeLogs)
 		})
+
 
 		// ── SSH Keys ──────────────────────────────────────────────────────
 		r.Get("/api/ssh-keys", sshH.List)
