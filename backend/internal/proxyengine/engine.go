@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -242,7 +243,7 @@ func (e *Engine) applyToCaddy() {
 	caddyRoutes := buildCaddyRoutes(routes, nodes, e.nodeID)
 	payload, _ := json.Marshal(caddyRoutes)
 
-	req, err := http.NewRequest("POST", "http://localhost:2019/config/apps/http/servers/srv0/routes", bytes.NewReader(payload))
+	req, err := http.NewRequest("PUT", "http://localhost:2019/config/apps/http/servers/srv0/routes", bytes.NewReader(payload))
 	if err != nil {
 		return
 	}
@@ -254,7 +255,8 @@ func (e *Engine) applyToCaddy() {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		slog.Warn("proxyengine: caddy rejected config", "status", resp.StatusCode)
+		b, _ := io.ReadAll(resp.Body)
+		slog.Warn("proxyengine: caddy rejected config", "status", resp.StatusCode, "body", string(b))
 	} else {
 		slog.Info("proxyengine: successfully pushed batched routes to Caddy", "count", len(caddyRoutes))
 	}
@@ -293,13 +295,6 @@ func buildCaddyRoutes(routes []Route, nodes map[string]NodeState, myNodeID strin
 					"upstreams": []map[string]any{
 						{
 							"dial": dialAddr,
-						},
-					},
-					"headers": map[string]any{
-						"request": map[string]any{
-							"set": map[string][]string{
-								"Host": {"{http.request.host}"},
-							},
 						},
 					},
 				},

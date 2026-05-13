@@ -40,7 +40,7 @@ export interface ClusterBrain {
 export interface AddNodePayload {
   name: string
   ip: string
-  port?: number
+  node_type: 'worker' | 'brain'
 }
 
 export interface AddNodeResponse extends Node {

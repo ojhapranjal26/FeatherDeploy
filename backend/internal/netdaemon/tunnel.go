@@ -413,7 +413,7 @@ func pipe(a, b net.Conn) {
 
 func yamuxConfig() *yamux.Config {
 	cfg := yamux.DefaultConfig()
-	cfg.KeepAliveInterval = 30 * time.Second
+	cfg.KeepAliveInterval = 10 * time.Second
 	cfg.ConnectionWriteTimeout = 10 * time.Second
 	return cfg
 }

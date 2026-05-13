@@ -191,7 +191,7 @@ export function NodesPage() {
   const [addOpen, setAddOpen] = useState(false)
   const [name, setName] = useState('')
   const [ip, setIp] = useState('')
-  const [port, setPort] = useState('')
+  const [type, setType] = useState<'worker' | 'brain'>('worker')
   const [joinResult, setJoinResult] = useState<AddNodeResponse | null>(null)
 
   const addMutation = useMutation({
@@ -210,12 +210,12 @@ export function NodesPage() {
   const handleAdd = () => {
     if (!name.trim()) { toast.error('Node name is required.'); return }
     if (!ip.trim()) { toast.error('IP address is required.'); return }
-    addMutation.mutate({ name: name.trim(), ip: ip.trim(), port: port ? parseInt(port) : undefined })
+    addMutation.mutate({ name: name.trim(), ip: ip.trim(), node_type: type })
   }
 
   const closeAdd = (open: boolean) => {
     if (!open) {
-      setName(''); setIp(''); setPort(''); setJoinResult(null)
+      setName(''); setIp(''); setType('worker'); setJoinResult(null)
     }
     setAddOpen(open)
   }
@@ -315,13 +315,18 @@ export function NodesPage() {
                       />
                     </div>
                     <div className="space-y-1.5">
-                      <Label>Port <span className="text-muted-foreground font-normal">(optional, default 7443)</span></Label>
-                      <Input
-                        type="number"
-                        placeholder="7443"
-                        value={port}
-                        onChange={(e) => setPort(e.target.value)}
-                      />
+                      <Label>Node Type</Label>
+                      <select
+                        className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                        value={type}
+                        onChange={(e) => setType(e.target.value as 'worker' | 'brain')}
+                      >
+                        <option value="worker" className="bg-background">Worker Node</option>
+                        <option value="brain" className="bg-background">Brain Node (High Availability)</option>
+                      </select>
+                      <p className="text-[11px] text-muted-foreground mt-1">
+                        {type === 'worker' ? 'Worker nodes handle workloads and don\'t participate in Leader Elections.' : 'Brain nodes store replicas of databases and panel state, and can become leaders.'}
+                      </p>
                     </div>
                   </div>
                   <DialogFooter>
