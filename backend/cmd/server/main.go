@@ -780,6 +780,7 @@ func serve() {
 			r.Post("/api/nodes/{nodeID}/token", nodeH.RegenerateToken)
 			r.Post("/api/nodes/{nodeID}/ping", nodeH.Ping)
 			r.Get("/api/nodes/{nodeID}/ssh-command", nodeH.SSHCommand)
+			r.Post("/api/nodes/{nodeID}/rotate-wireguard", nodeH.RotateWireguard)
 			// Logs are SSE — registered here so they share auth middleware but no 30s timeout
 			r.Get("/api/nodes/{nodeID}/logs", nodeH.NodeLogs)
 		})

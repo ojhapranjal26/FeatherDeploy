@@ -85,6 +85,33 @@ func ReconcileClusterFirewall(db *sql.DB) {
 		}
 	}
 
+	// 4. Reconcile WireGuard Mesh peers on wg0 interface
+	wgPath, wgErr := exec.LookPath("wg")
+	if wgErr == nil {
+		wgRows, err := db.Query(`SELECT wg_public_key, wg_mesh_ip FROM nodes WHERE wg_public_key != '' AND wg_mesh_ip != ''`)
+		if err == nil {
+			defer wgRows.Close()
+			for wgRows.Next() {
+				var pubKey, meshIP string
+				if wgRows.Scan(&pubKey, &meshIP) == nil {
+					wgCmd := func(args ...string) *exec.Cmd {
+						if sudo != "" {
+							return exec.Command(sudo, append([]string{wgPath}, args...)...)
+						}
+						return exec.Command(wgPath, args...)
+					}
+					// Add peer to wg0 interface. AllowedIPs is meshIP/32.
+					err := wgCmd("set", "wg0", "peer", pubKey, "allowed-ips", meshIP+"/32").Run()
+					if err != nil {
+						slog.Warn("ReconcileClusterFirewall: failed to add wg peer", "pubkey", pubKey, "ip", meshIP, "err", err)
+					} else {
+						slog.Info("ReconcileClusterFirewall: configured wg peer", "ip", meshIP)
+					}
+				}
+			}
+		}
+	}
+
 	slog.Info("ReconcileClusterFirewall: reconciliation complete", "nodes_whitelisted", len(activeIPs))
 }
 

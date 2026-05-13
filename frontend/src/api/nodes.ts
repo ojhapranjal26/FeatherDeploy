@@ -21,6 +21,8 @@ export interface Node {
   disk_total: number | null
   last_stats_at: string | null
   node_id: string | null
+  wg_public_key?: string
+  wg_mesh_ip?: string
 }
 
 export interface ClusterBrain {
@@ -60,6 +62,9 @@ export const nodesApi = {
 
   sshCommand: (id: number) =>
     client.get<{ command: string; key_path: string; note: string }>(`/nodes/${id}/ssh-command`).then((r) => r.data),
+
+  rotateWireguard: (id: number) =>
+    client.post<{ status: string; wg_public_key: string; message: string }>(`/nodes/${id}/rotate-wireguard`).then((r) => r.data),
 }
 
 export const clusterApi = {

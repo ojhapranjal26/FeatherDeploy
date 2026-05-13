@@ -424,3 +424,10 @@ ALTER TABLE nodes ADD COLUMN tunnel_token_prev TEXT DEFAULT NULL;       -- old t
 ALTER TABLE nodes ADD COLUMN tunnel_rotated_at DATETIME DEFAULT NULL;  -- when last rotated
 CREATE INDEX IF NOT EXISTS idx_nodes_tunnel_token      ON nodes(tunnel_token);
 CREATE INDEX IF NOT EXISTS idx_nodes_tunnel_token_prev ON nodes(tunnel_token_prev);
+
+-- 026: wireguard private mesh networking integration columns
+ALTER TABLE nodes ADD COLUMN wg_public_key TEXT NOT NULL DEFAULT '';
+ALTER TABLE nodes ADD COLUMN wg_mesh_ip    TEXT NOT NULL DEFAULT '';
+
+ALTER TABLE cluster_state ADD COLUMN wg_public_key TEXT NOT NULL DEFAULT '';
+ALTER TABLE cluster_state ADD COLUMN wg_mesh_ip    TEXT NOT NULL DEFAULT '';

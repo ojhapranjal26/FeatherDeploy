@@ -51,6 +51,9 @@ type NodeSummary struct {
 	RAMTotal  int64   `json:"ram_total"`
 	DiskUsed  int64   `json:"disk_used"`
 	DiskTotal int64   `json:"disk_total"`
+	// WireGuard Mesh network info
+	WgPublicKey string `json:"wg_public_key"`
+	WgMeshIP    string `json:"wg_mesh_ip"`
 }
 
 // AddNodeRequest is the payload for POST /api/nodes.

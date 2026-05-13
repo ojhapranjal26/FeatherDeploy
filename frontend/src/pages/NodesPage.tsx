@@ -3,7 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   Server, Plus, Trash2, Copy, Check, Loader2, RefreshCw,
   CheckCircle2, Clock, WifiOff, AlertCircle, Crown, Terminal,
-  Cpu, MemoryStick, HardDrive,
+  Cpu, MemoryStick, HardDrive, Key,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -241,6 +241,18 @@ export function NodesPage() {
     onError: () => toast.error('Failed to regenerate token.'),
   })
 
+  const rotateWgMutation = useMutation({
+    mutationFn: (id: number) => nodesApi.rotateWireguard(id),
+    onSuccess: (data) => {
+      qc.invalidateQueries({ queryKey: ['nodes'] })
+      toast.success(data.message || 'WireGuard keys rotated successfully.')
+    },
+    onError: (err: unknown) => {
+      const msg = (err as { response?: { data?: { error?: string } } })?.response?.data?.error
+      toast.error(msg ?? 'Failed to rotate WireGuard keys.')
+    },
+  })
+
   // ── Render ─────────────────────────────────────────────────────────────────
   if (!canManage) {
     return (
@@ -385,6 +397,12 @@ export function NodesPage() {
                               Brain
                             </span>
                           )}
+                          {node.wg_mesh_ip && (
+                            <span className="inline-flex items-center gap-1 rounded-full bg-blue-500/15 border border-blue-300/30 px-2 py-0.5 text-xs font-medium text-blue-600 dark:text-blue-400 shrink-0" title={`WireGuard Mesh IP: ${node.wg_mesh_ip}`}>
+                              <span className="h-1.5 w-1.5 rounded-full bg-blue-500 animate-pulse" />
+                              wg0: {node.wg_mesh_ip}
+                            </span>
+                          )}
                         </div>
                         {node.hostname && (
                           <div className="text-[10px] text-muted-foreground flex items-center gap-1">
@@ -421,6 +439,21 @@ export function NodesPage() {
                           onClick={() => regenerateMutation.mutate(node.id)}
                         >
                           <RefreshCw className={`h-4 w-4 ${regenerateMutation.isPending ? 'animate-spin' : ''}`} />
+                        </Button>
+                      )}
+                      {node.wg_mesh_ip && (
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-8 w-8 text-blue-500 hover:text-blue-600 hover:bg-blue-500/10"
+                          title="Reroll/Rotate WireGuard Mesh Keys"
+                          onClick={() => {
+                            if (confirm(`Rotate WireGuard keys for node "${node.name}"? This updates the private mesh overlay with zero downtime.`)) {
+                              rotateWgMutation.mutate(node.id)
+                            }
+                          }}
+                        >
+                          <Key className={`h-4 w-4 ${rotateWgMutation.isPending && rotateWgMutation.variables === node.id ? 'animate-spin' : ''}`} />
                         </Button>
                       )}
                       <SSHCommandDialog node={node} />

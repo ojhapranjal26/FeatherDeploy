@@ -199,13 +199,17 @@ func Run() {
 	// Detect the server's public IP so DNS verification works correctly.
 	serverIP := installerDetectPublicIP()
 
+	wgPubKey, wgMeshIP := setupWireGuardBrain()
+
 	envContent := fmt.Sprintf(`# FeatherDeploy — generated %s
 RQLITE_URL=%s
 JWT_SECRET=%s
 ADDR=127.0.0.1:%s
 ORIGIN=%s
 SERVER_IP=%s
-`, time.Now().Format(time.RFC3339), rqliteURL, jwtSecret, backendPort, frontendOrigin, serverIP)
+WG_PUBLIC_KEY=%s
+WG_MESH_IP=%s
+`, time.Now().Format(time.RFC3339), rqliteURL, jwtSecret, backendPort, frontendOrigin, serverIP, wgPubKey, wgMeshIP)
 
 	writeFile(envFile, envContent, 0600)
 	mustRun("chown", "root:"+svcUser, envFile)
@@ -221,6 +225,8 @@ SERVER_IP=%s
 	if err := createSuperAdmin(db, adminEmail, adminName, adminPassword); err != nil {
 		die("failed to create superadmin: %v", err)
 	}
+	// Persist master brain WireGuard parameters into global cluster state
+	_, _ = db.Exec(`UPDATE cluster_state SET wg_public_key=?, wg_mesh_ip=? WHERE id=1`, wgPubKey, wgMeshIP)
 	db.Close()
 	fmt.Printf("  ✓ superadmin created (%s)\n", adminEmail)
 
@@ -1024,12 +1030,16 @@ func setupIPTablesProtection() {
 	persistIPTables()
 
 	// ── Ensure cluster ports are open ────────────────────────────────────────
-	fmt.Println("\n── Opening cluster ports (4001, 4002, 2379, 2380, 7443) ────────")
+	fmt.Println("\n── Opening cluster ports (4001, 4002, 2379, 2380, 7443, 51820/udp) ─")
 	clusterPorts := []string{"4001", "4002", "2379", "2380", "7443"}
 	for _, p := range clusterPorts {
 		if runSilent(iptablesPath, "-C", "INPUT", "-p", "tcp", "--dport", p, "-j", "ACCEPT") != nil {
 			mustRun(iptablesPath, "-I", "INPUT", "1", "-p", "tcp", "--dport", p, "-j", "ACCEPT")
 		}
+	}
+	// Allow WireGuard UDP port
+	if runSilent(iptablesPath, "-C", "INPUT", "-p", "udp", "--dport", "51820", "-j", "ACCEPT") != nil {
+		mustRun(iptablesPath, "-I", "INPUT", "1", "-p", "udp", "--dport", "51820", "-j", "ACCEPT")
 	}
 }
 
@@ -1093,6 +1103,60 @@ func persistIPTables() {
 	fmt.Println("  NOTE: could not persist iptables rules — they will be lost on reboot")
 	fmt.Println("  Run: apt-get install -y iptables-persistent   # Debian/Ubuntu")
 	fmt.Println("       dnf install -y iptables-services          # RHEL/Fedora")
+// setupWireGuardBrain initializes the wg0 interface on the Main Brain Server
+// with IP 10.99.0.1/24, starts it via wg-quick, and returns its public key.
+func setupWireGuardBrain() (string, string) {
+	fmt.Println("\n── Setting up WireGuard Private Mesh (wg0) ─────────────────────")
+	if _, err := exec.LookPath("wg"); err != nil {
+		fmt.Println("  WARNING: wg command not found — skipping WireGuard setup")
+		return "", ""
+	}
+	wgDir := "/etc/wireguard"
+	mustMkdir(wgDir)
+	os.Chmod(wgDir, 0700)
+
+	privKeyPath := filepath.Join(wgDir, "privatekey")
+	pubKeyPath := filepath.Join(wgDir, "publickey")
+
+	// Generate keys if not present
+	if _, err := os.Stat(privKeyPath); os.IsNotExist(err) {
+		privOut, err := exec.Command("wg", "genkey").Output()
+		if err != nil {
+			fmt.Printf("  WARNING: wg genkey failed: %v\n", err)
+			return "", ""
+		}
+		privKey := strings.TrimSpace(string(privOut))
+		os.WriteFile(privKeyPath, []byte(privKey+"\n"), 0600)
+
+		cmd := exec.Command("wg", "pubkey")
+		cmd.Stdin = strings.NewReader(privKey + "\n")
+		pubOut, err := cmd.Output()
+		if err == nil {
+			os.WriteFile(pubKeyPath, []byte(strings.TrimSpace(string(pubOut))+"\n"), 0644)
+		}
+	}
+
+	privBytes, _ := os.ReadFile(privKeyPath)
+	pubBytes, _ := os.ReadFile(pubKeyPath)
+	privKey := strings.TrimSpace(string(privBytes))
+	pubKey := strings.TrimSpace(string(pubBytes))
+
+	confPath := filepath.Join(wgDir, "wg0.conf")
+	confContent := fmt.Sprintf(`[Interface]
+PrivateKey = %s
+Address = 10.99.0.1/24
+ListenPort = 51820
+SaveConfig = false
+`, privKey)
+
+	os.WriteFile(confPath, []byte(confContent), 0600)
+
+	// Ensure systemd wg-quick@wg0 is enabled and started
+	mustRun("systemctl", "enable", "wg-quick@wg0")
+	mustRun("systemctl", "restart", "wg-quick@wg0")
+
+	fmt.Printf("  ✓ WireGuard mesh interface wg0 configured (IP: 10.99.0.1)\n")
+	return pubKey, "10.99.0.1"
 }
 
 func randomHex(n int) string {
@@ -1172,7 +1236,7 @@ var pkgManagers = map[string]pkgCmd{
 		// passt is still useful to have available, but FeatherDeploy pins
 		// slirp4netns for rootless user-defined networks because inter-container
 		// connectivity is a first-class requirement.
-		install: []string{"apt-get", "install", "-y", "podman", "crun", "caddy", "netavark", "aardvark-dns", "slirp4netns", "passt", "containernetworking-plugins"},
+		install: []string{"apt-get", "install", "-y", "podman", "crun", "caddy", "netavark", "aardvark-dns", "slirp4netns", "passt", "containernetworking-plugins", "wireguard", "wireguard-tools"},
 	},
 	"dnf": {
 		update: []string{"dnf", "check-update"},
@@ -1182,7 +1246,7 @@ var pkgManagers = map[string]pkgCmd{
 		// exits with code 127 because the netavark binary is missing.
 		// passt is installed as an available helper, but FeatherDeploy keeps
 		// slirp4netns as the explicit rootless network command for named networks.
-		install: []string{"dnf", "install", "-y", "podman", "crun", "caddy", "netavark", "aardvark-dns", "slirp4netns", "passt", "containernetworking-plugins"},
+		install: []string{"dnf", "install", "-y", "podman", "crun", "caddy", "netavark", "aardvark-dns", "slirp4netns", "passt", "containernetworking-plugins", "wireguard-tools"},
 	},
 	"yum": {
 		update: nil,
@@ -1190,15 +1254,15 @@ var pkgManagers = map[string]pkgCmd{
 		// is the CNI fallback. All are listed — yum ignores unavailable packages
 		// when using --skip-broken.
 		install: []string{"yum", "install", "-y", "--skip-broken", "podman", "crun",
-			"netavark", "aardvark-dns", "slirp4netns", "containernetworking-plugins", "passt"},
+			"netavark", "aardvark-dns", "slirp4netns", "containernetworking-plugins", "passt", "wireguard-tools"},
 	},
 	"pacman": {
 		update:  []string{"pacman", "-Sy"},
-		install: []string{"pacman", "-S", "--noconfirm", "podman", "crun", "caddy", "netavark", "aardvark-dns", "slirp4netns", "passt"},
+		install: []string{"pacman", "-S", "--noconfirm", "podman", "crun", "caddy", "netavark", "aardvark-dns", "slirp4netns", "passt", "wireguard-tools"},
 	},
 	"apk": {
 		update:  []string{"apk", "update"},
-		install: []string{"apk", "add", "--no-cache", "podman", "crun", "caddy"},
+		install: []string{"apk", "add", "--no-cache", "podman", "crun", "caddy", "wireguard-tools"},
 	},
 }
 
@@ -1499,7 +1563,10 @@ WantedBy=multi-user.target
 `
 
 func writeRqliteService(svcUser string) {
-	publicIP := installerDetectPublicIP()
+	publicIP := readEnvVar(envFile, "WG_MESH_IP")
+	if publicIP == "" {
+		publicIP = installerDetectPublicIP()
+	}
 	if publicIP == "" {
 		publicIP = "127.0.0.1"
 	}
@@ -1537,7 +1604,10 @@ WantedBy=multi-user.target
 `
 
 func writeEtcdService(svcUser string) {
-	publicIP := installerDetectPublicIP()
+	publicIP := readEnvVar(envFile, "WG_MESH_IP")
+	if publicIP == "" {
+		publicIP = installerDetectPublicIP()
+	}
 	if publicIP == "" {
 		publicIP = "127.0.0.1"
 	}
@@ -1898,6 +1968,21 @@ func RunUpdate() {
 				fmt.Fprintf(f, "SERVER_IP=%s\n", publicIP)
 				f.Close()
 				fmt.Printf("  ✓ SERVER_IP=%s written to env file\n", publicIP)
+			}
+		}
+	}
+
+	// ── Ensure WireGuard Mesh is initialized for existing clusters ────────────
+	if readEnvVar(envFile, "WG_PUBLIC_KEY") == "" {
+		if wgPubKey, wgMeshIP := setupWireGuardBrain(); wgPubKey != "" {
+			if f, err := os.OpenFile(envFile, os.O_APPEND|os.O_WRONLY, 0640); err == nil {
+				fmt.Fprintf(f, "WG_PUBLIC_KEY=%s\nWG_MESH_IP=%s\n", wgPubKey, wgMeshIP)
+				f.Close()
+				fmt.Printf("  ✓ WG_PUBLIC_KEY written to env file\n")
+			}
+			if udb, err := appDb.OpenRqlite(rqliteURL); err == nil {
+				_, _ = udb.Exec(`UPDATE cluster_state SET wg_public_key=?, wg_mesh_ip=? WHERE id=1`, wgPubKey, wgMeshIP)
+				udb.Close()
 			}
 		}
 	}

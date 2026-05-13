@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"net/url"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -93,11 +94,29 @@ func runJoin(args []string) {
 	must(os.MkdirAll(dataDir, 0755))
 	must(os.MkdirAll(rqliteData, 0700))
 
+	// Generate WireGuard keypair if wg is available
+	wgPubKey := ""
+	wgPrivKey := ""
+	if _, err := exec.LookPath("wg"); err == nil {
+		os.MkdirAll("/etc/wireguard", 0700)
+		if privOut, err := exec.Command("wg", "genkey").Output(); err == nil {
+			wgPrivKey = strings.TrimSpace(string(privOut))
+			os.WriteFile("/etc/wireguard/privatekey", []byte(wgPrivKey+"\n"), 0600)
+			cmd := exec.Command("wg", "pubkey")
+			cmd.Stdin = strings.NewReader(wgPrivKey + "\n")
+			if pubOut, err := cmd.Output(); err == nil {
+				wgPubKey = strings.TrimSpace(string(pubOut))
+				os.WriteFile("/etc/wireguard/publickey", []byte(wgPubKey+"\n"), 0644)
+			}
+		}
+	}
+
 	// POST /api/nodes/{token}/complete-join
 	payload := map[string]string{
-		"rqlite_addr": nodeAddr,
-		"hostname":    hostname(),
-		"os_info":     getOSInfo(),
+		"rqlite_addr":   nodeAddr,
+		"hostname":      hostname(),
+		"os_info":       getOSInfo(),
+		"wg_public_key": wgPubKey,
 	}
 	body, _ := json.Marshal(payload)
 	resp, err := http.Post(mainURL+"/api/nodes/"+token+"/complete-join",
@@ -112,16 +131,19 @@ func runJoin(args []string) {
 	}
 
 	var reply struct {
-		NodeID       string `json:"node_id"`
-		CACertPEM    string `json:"ca_cert_pem"`
-		NodeCertPEM  string `json:"node_cert_pem"`
-		NodeKeyPEM   string `json:"node_key_pem"`
-		EncryptedEnv string `json:"encrypted_env"`
-		RqliteMain   string `json:"rqlite_main"`
-		EtcdMain     string `json:"etcd_main"`
-		SSHPublicKey string `json:"ssh_public_key"`
-		NodeIP       string `json:"node_ip"`
-		TunnelToken  string `json:"tunnel_token"` // permanent token for WebSocket tunnel auth
+		NodeID           string `json:"node_id"`
+		CACertPEM        string `json:"ca_cert_pem"`
+		NodeCertPEM      string `json:"node_cert_pem"`
+		NodeKeyPEM       string `json:"node_key_pem"`
+		EncryptedEnv     string `json:"encrypted_env"`
+		RqliteMain       string `json:"rqlite_main"`
+		EtcdMain         string `json:"etcd_main"`
+		SSHPublicKey     string `json:"ssh_public_key"`
+		NodeIP           string `json:"node_ip"`
+		TunnelToken      string `json:"tunnel_token"`
+		WgMeshIP         string `json:"wg_mesh_ip"`
+		BrainWgPublicKey string `json:"brain_wg_public_key"`
+		BrainWgMeshIP    string `json:"brain_wg_mesh_ip"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&reply); err != nil {
 		fatalf("decode response: %v", err)
@@ -140,8 +162,8 @@ func runJoin(args []string) {
 	writeFile(envFile, decryptedEnv, 0600)
 
 	// Persist tokens and connection info
-	writeFile(configDir+"/join_token", token, 0600)               // kept for binary downloads
-	writeFile(configDir+"/tunnel_token", reply.TunnelToken, 0600) // permanent tunnel auth
+	writeFile(configDir+"/join_token", token, 0600)
+	writeFile(configDir+"/tunnel_token", reply.TunnelToken, 0600)
 	writeFile(configDir+"/main_url", mainURL, 0644)
 
 	// Node ID = assigned node_id or fallback to hostname
@@ -158,6 +180,35 @@ func runJoin(args []string) {
 	// Install SSH public key for passwordless access from main server
 	if reply.SSHPublicKey != "" {
 		installSSHKey(reply.SSHPublicKey)
+	}
+
+	// Setup private WireGuard mesh interface if parameters are present
+	if reply.WgMeshIP != "" && reply.BrainWgPublicKey != "" && wgPrivKey != "" {
+		fmt.Printf("==> Configuring private WireGuard mesh interface wg0 (%s)...\n", reply.WgMeshIP)
+		brainHost := "127.0.0.1"
+		if u, err := url.Parse(mainURL); err == nil {
+			brainHost = u.Hostname()
+		} else if strings.Contains(mainURL, "://") {
+			parts := strings.Split(mainURL, "://")
+			sub := strings.Split(parts[1], ":")[0]
+			sub = strings.Split(sub, "/")[0]
+			brainHost = sub
+		}
+		wgConf := fmt.Sprintf(`[Interface]
+PrivateKey = %s
+Address = %s/24
+SaveConfig = false
+
+[Peer]
+PublicKey = %s
+AllowedIPs = 10.99.0.0/24
+Endpoint = %s:51820
+PersistentKeepalive = 25
+`, wgPrivKey, reply.WgMeshIP, reply.BrainWgPublicKey, brainHost)
+		writeFile("/etc/wireguard/wg0.conf", wgConf, 0600)
+		runCmd("systemctl", "enable", "wg-quick@wg0")
+		runCmd("systemctl", "restart", "wg-quick@wg0")
+		fmt.Println("  ✓ WireGuard interface wg0 connected to brain mesh")
 	}
 
 	// Worker node relies entirely on the tunnel to reach brain services.
@@ -322,6 +373,81 @@ func runServe() {
 		writeFile(configDir+"/tunnel_token", payload.TunnelToken, 0600)
 		slog.Info("node: tunnel token rotated by brain")
 		w.WriteHeader(http.StatusNoContent)
+	})
+
+	// Brain triggers wireguard key reroll/rotation here
+	r.Post("/api/node/rotate-wireguard-keys", func(w http.ResponseWriter, req *http.Request) {
+		host, _, _ := net.SplitHostPort(req.RemoteAddr)
+		if host != "127.0.0.1" && host != "::1" {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		var payload struct {
+			BrainWgPublicKey string `json:"brain_wg_public_key"`
+			WgMeshIP         string `json:"wg_mesh_ip"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&payload); err != nil || payload.BrainWgPublicKey == "" || payload.WgMeshIP == "" {
+			http.Error(w, "invalid payload", http.StatusBadRequest)
+			return
+		}
+
+		// Ensure wg binary exists
+		if _, err := exec.LookPath("wg"); err != nil {
+			http.Error(w, "wireguard tools not available on node", http.StatusInternalServerError)
+			return
+		}
+
+		slog.Info("node: rerolling WireGuard keys as requested by brain")
+		wgPubKey := ""
+		wgPrivKey := ""
+		os.MkdirAll("/etc/wireguard", 0700)
+		if privOut, err := exec.Command("wg", "genkey").Output(); err == nil {
+			wgPrivKey = strings.TrimSpace(string(privOut))
+			os.WriteFile("/etc/wireguard/privatekey", []byte(wgPrivKey+"\n"), 0600)
+			cmd := exec.Command("wg", "pubkey")
+			cmd.Stdin = strings.NewReader(wgPrivKey + "\n")
+			if pubOut, err := cmd.Output(); err == nil {
+				wgPubKey = strings.TrimSpace(string(pubOut))
+				os.WriteFile("/etc/wireguard/publickey", []byte(wgPubKey+"\n"), 0644)
+			}
+		}
+
+		if wgPrivKey == "" || wgPubKey == "" {
+			http.Error(w, "failed to generate wireguard keys", http.StatusInternalServerError)
+			return
+		}
+
+		// Extract Brain Hostname/IP from mainURL
+		brainHost := "127.0.0.1"
+		if u, err := url.Parse(mainURL); err == nil && u.Hostname() != "" {
+			brainHost = u.Hostname()
+		} else if strings.Contains(mainURL, "://") {
+			parts := strings.Split(mainURL, "://")
+			sub := strings.Split(parts[1], ":")[0]
+			sub = strings.Split(sub, "/")[0]
+			brainHost = sub
+		}
+
+		wgConf := fmt.Sprintf(`[Interface]
+PrivateKey = %s
+Address = %s/24
+SaveConfig = false
+
+[Peer]
+PublicKey = %s
+AllowedIPs = 10.99.0.0/24
+Endpoint = %s:51820
+PersistentKeepalive = 25
+`, wgPrivKey, payload.WgMeshIP, payload.BrainWgPublicKey, brainHost)
+		writeFile("/etc/wireguard/wg0.conf", wgConf, 0600)
+		runCmd("systemctl", "enable", "wg-quick@wg0")
+		runCmd("systemctl", "restart", "wg-quick@wg0")
+		slog.Info("node: wireguard interface wg0 re-keyed and restarted successfully")
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{
+			"wg_public_key": wgPubKey,
+		})
 	})
 
 	// Brain proxies this endpoint to stream live node logs to the UI

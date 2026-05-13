@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
@@ -206,8 +207,8 @@ func (h *NodeHandler) List(w http.ResponseWriter, r *http.Request) {
 			t, _ := time.Parse(time.RFC3339, lastSeen.String)
 			n.LastSeen = &t
 		}
-		// Load hostname, OS info, and node_id
-		h.db.QueryRowContext(r.Context(), `SELECT hostname, os_info, node_id FROM nodes WHERE id=?`, n.ID).Scan(&n.Hostname, &n.OSInfo, &n.NodeID)
+		// Load hostname, OS info, node_id, wg_public_key, and wg_mesh_ip
+		h.db.QueryRowContext(r.Context(), `SELECT hostname, os_info, node_id, wg_public_key, wg_mesh_ip FROM nodes WHERE id=?`, n.ID).Scan(&n.Hostname, &n.OSInfo, &n.NodeID, &n.WgPublicKey, &n.WgMeshIP)
 		nodes = append(nodes, n)
 	}
 	writeJSON(w, http.StatusOK, nodes)
@@ -597,9 +598,10 @@ func (h *NodeHandler) CompleteJoin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var payload struct {
-		RqliteAddr string `json:"rqlite_addr"` // host:port for rqlite Raft
-		Hostname   string `json:"hostname"`
-		OSInfo     string `json:"os_info"`
+		RqliteAddr  string `json:"rqlite_addr"` // host:port for rqlite Raft
+		Hostname    string `json:"hostname"`
+		OSInfo      string `json:"os_info"`
+		WgPublicKey string `json:"wg_public_key"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		writeJSON(w, http.StatusBadRequest, errMap("invalid JSON"))
@@ -627,7 +629,6 @@ func (h *NodeHandler) CompleteJoin(w http.ResponseWriter, r *http.Request) {
 	// We'll trust the payload's hostname/ip if the remote addr is a proxy.
 	if nodeIP == "127.0.0.1" || nodeIP == "::1" || strings.HasPrefix(nodeIP, "10.") || strings.HasPrefix(nodeIP, "192.168.") {
 		// Attempt fallback detection if the node reported its own perceived IP
-		// (this would require updating the Join payload, which we might do later)
 	}
 
 	// Load node info
@@ -638,6 +639,12 @@ func (h *NodeHandler) CompleteJoin(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, errMap("node not found"))
 		return
+	}
+
+	// Allocate deterministic static private WireGuard mesh IP (10.99.0.X)
+	wgMeshIP := ""
+	if payload.WgPublicKey != "" {
+		wgMeshIP = fmt.Sprintf("10.99.0.%d", 10+node.ID)
 	}
 
 	// Sign certificate
@@ -668,12 +675,12 @@ func (h *NodeHandler) CompleteJoin(w http.ResponseWriter, r *http.Request) {
 
 	nodeID := fmt.Sprintf("node-%d", node.ID)
 
-	// Update node record: mark connected, save cert, clear join token, save real IP
+	// Update node record: mark connected, save cert, clear join token, save real IP, save wireguard params
 	_, err = h.db.ExecContext(r.Context(),
 		`UPDATE nodes SET status='connected', ip=?, hostname=?, os_info=?, node_id=?, node_cert_pem=?, rqlite_addr=?,
 		 join_token=NULL, token_expires_at=NULL, last_seen=datetime('now'),
-		 port=7443, tunnel_token=?, updated_at=datetime('now') WHERE id=?`,
-		nodeIP, payload.Hostname, payload.OSInfo, nodeID, nodeCert.CertPEM, payload.RqliteAddr, tunnelToken, node.ID,
+		 port=7443, tunnel_token=?, updated_at=datetime('now'), wg_public_key=?, wg_mesh_ip=? WHERE id=?`,
+		nodeIP, payload.Hostname, payload.OSInfo, nodeID, nodeCert.CertPEM, payload.RqliteAddr, tunnelToken, payload.WgPublicKey, wgMeshIP, node.ID,
 	)
 	if err != nil {
 		slog.Error("complete-join: update node", "err", err)
@@ -681,17 +688,17 @@ func (h *NodeHandler) CompleteJoin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Trigger firewall reconciliation to allow this node IP (synchronously to avoid race)
+	// Trigger firewall reconciliation to allow this node IP and add wg peer (synchronously to avoid race)
 	deploy.ReconcileNodeRqliteIPTables(h.db)
-
-	// Worker nodes act strictly as API clients and DO NOT join the central Etcd Raft consensus cluster.
-	// This prevents the brain server from losing quorum and halting when worker nodes disconnect.
 
 	// Fetch SSH public key so the node can add it to authorized_keys
 	sshPubKey := heartbeat.GetSSHPublicKey(h.db)
 
+	// Fetch master brain WireGuard parameters to return to joining peer
+	var brainWgPubKey, brainWgMeshIP string
+	_ = h.db.QueryRowContext(r.Context(), `SELECT wg_public_key, wg_mesh_ip FROM cluster_state WHERE id=1`).Scan(&brainWgPubKey, &brainWgMeshIP)
+
 	// Determine etcd initial cluster (self + registered nodes)
-	// For simplicity, we just return the main server's peer URL and let etcd figure it out
 	serverIP := os.Getenv("SERVER_IP")
 	if serverIP == "" {
 		serverIP = "127.0.0.1"
@@ -724,20 +731,21 @@ func (h *NodeHandler) CompleteJoin(w http.ResponseWriter, r *http.Request) {
 
 	etcdMain := fmt.Sprintf("main=http://%s:2380", publicIP)
 	rqliteMain := fmt.Sprintf("%s:4001", publicIP)
-	
-	// Redundant call removed
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"node_id":        nodeID,
-		"ca_cert_pem":    ca.CertPEM,
-		"node_cert_pem":  nodeCert.CertPEM,
-		"node_key_pem":   nodeCert.KeyPEM,
-		"encrypted_env":  encryptedEnv,
-		"rqlite_main":    rqliteMain,
-		"etcd_main":      etcdMain,
-		"ssh_public_key": sshPubKey,
-		"node_ip":        nodeIP,
-		"tunnel_token":   tunnelToken, // permanent token for WebSocket tunnel auth
+		"node_id":             nodeID,
+		"ca_cert_pem":         ca.CertPEM,
+		"node_cert_pem":       nodeCert.CertPEM,
+		"node_key_pem":        nodeCert.KeyPEM,
+		"encrypted_env":       encryptedEnv,
+		"rqlite_main":         rqliteMain,
+		"etcd_main":           etcdMain,
+		"ssh_public_key":      sshPubKey,
+		"node_ip":             nodeIP,
+		"tunnel_token":        tunnelToken,
+		"wg_mesh_ip":          wgMeshIP,
+		"brain_wg_public_key": brainWgPubKey,
+		"brain_wg_mesh_ip":    brainWgMeshIP,
 	})
 }
 
@@ -826,6 +834,132 @@ func (h *NodeHandler) SSHCommand(w http.ResponseWriter, r *http.Request) {
 		"note":     "Run this command from the main server terminal (or from any host that has the private key). Key is passwordless.",
 	})
 }
+
+// POST /api/nodes/{nodeID}/rotate-wireguard — trigger wireguard key rotation on a target worker node
+func (h *NodeHandler) RotateWireguard(w http.ResponseWriter, r *http.Request) {
+	nodeID, err := strconv.ParseInt(chi.URLParam(r, "nodeID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errMap("invalid node ID"))
+		return
+	}
+
+	var ip, nodeStrID string
+	var wgMeshIP sql.NullString
+	var port int
+	err = h.db.QueryRowContext(r.Context(), `SELECT ip, port, node_id, wg_mesh_ip FROM nodes WHERE id=?`, nodeID).
+		Scan(&ip, &port, &nodeStrID, &wgMeshIP)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, errMap("node not found"))
+		return
+	}
+
+	if !wgMeshIP.Valid || wgMeshIP.String == "" {
+		writeJSON(w, http.StatusBadRequest, errMap("node does not have an active wireguard mesh ip allocated"))
+		return
+	}
+
+	// Retrieve brain's wg public key
+	var brainWgPubKey string
+	err = h.db.QueryRowContext(r.Context(), `SELECT wg_public_key FROM cluster_state WHERE id=1`).Scan(&brainWgPubKey)
+	if err != nil || brainWgPubKey == "" {
+		if pubBytes, err := os.ReadFile("/etc/wireguard/publickey"); err == nil {
+			brainWgPubKey = strings.TrimSpace(string(pubBytes))
+		}
+	}
+	if brainWgPubKey == "" {
+		writeJSON(w, http.StatusInternalServerError, errMap("master brain wireguard public key not configured"))
+		return
+	}
+
+	// Determine route/client to node
+	targetIP := ip
+	targetPort := port
+	viaTunnel := false
+	if netdaemon.GlobalTunnel != nil {
+		proxyAddr := netdaemon.GlobalTunnel.GetNodeProxyAddr(nodeStrID, port)
+		if proxyAddr == "" && port != 7443 {
+			proxyAddr = netdaemon.GlobalTunnel.GetNodeProxyAddr(nodeStrID, 7443)
+		}
+		if proxyAddr != "" {
+			parts := strings.Split(proxyAddr, ":")
+			if len(parts) == 2 {
+				if p, err := strconv.Atoi(parts[1]); err == nil {
+					targetPort = p
+				}
+			}
+			targetIP = "127.0.0.1"
+			viaTunnel = true
+		}
+	}
+
+	// Construct payload for node
+	payload := map[string]string{
+		"brain_wg_public_key": brainWgPubKey,
+		"wg_mesh_ip":          wgMeshIP.String,
+	}
+	bodyBytes, _ := json.Marshal(payload)
+
+	// Prepare HTTP client
+	var client *http.Client
+	scheme := "https"
+	if viaTunnel {
+		scheme = "http"
+		client = &http.Client{Timeout: 15 * time.Second}
+	} else {
+		caPEM, _ := os.ReadFile("/etc/featherdeploy/ca.crt")
+		certPEM, _ := os.ReadFile("/etc/featherdeploy/node.crt")
+		keyPEM, _ := os.ReadFile("/etc/featherdeploy/node.key")
+		tlsCfg, err := pki.TLSConfig(string(certPEM), string(keyPEM), string(caPEM))
+		if err != nil {
+			tlsCfg = &tls.Config{InsecureSkipVerify: true}
+		}
+		client = &http.Client{
+			Transport: &http.Transport{TLSClientConfig: tlsCfg},
+			Timeout:   15 * time.Second,
+		}
+	}
+
+	targetURL := fmt.Sprintf("%s://%s:%d/api/node/rotate-wireguard-keys", scheme, targetIP, targetPort)
+	resp, err := client.Post(targetURL, "application/json", bytes.NewReader(bodyBytes))
+	if err != nil {
+		slog.Error("rotate wireguard keys request to node failed", "url", targetURL, "err", err)
+		writeJSON(w, http.StatusBadGateway, errMap(fmt.Sprintf("failed to reach node API: %v", err)))
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		writeJSON(w, http.StatusBadGateway, errMap(fmt.Sprintf("node rejected rotation (%d): %s", resp.StatusCode, b)))
+		return
+	}
+
+	var reply struct {
+		WgPublicKey string `json:"wg_public_key"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&reply); err != nil || reply.WgPublicKey == "" {
+		writeJSON(w, http.StatusBadGateway, errMap("node returned empty or invalid wireguard public key"))
+		return
+	}
+
+	// Update the database with the new key
+	_, err = h.db.ExecContext(r.Context(), `UPDATE nodes SET wg_public_key=? WHERE id=?`, reply.WgPublicKey, nodeID)
+	if err != nil {
+		slog.Error("failed to persist new wireguard public key to db", "err", err)
+		writeJSON(w, http.StatusInternalServerError, errMap("failed to save new wireguard key to database"))
+		return
+	}
+
+	// Reconcile cluster firewall immediately to update the master brain's active kernel wg0 interface peers
+	if err := deploy.ReconcileClusterFirewall(h.db); err != nil {
+		slog.Warn("reconcile firewall post-rotation encountered an issue", "err", err)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{
+		"status":        "success",
+		"wg_public_key": reply.WgPublicKey,
+		"message":       "WireGuard keys rotated and kernel interface synced successfully",
+	})
 
 // GET /api/nodes/server-binary?token=TOKEN — serve the main featherdeploy server binary
 // Nodes download this during join so they can promote to brain.

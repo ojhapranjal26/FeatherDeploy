@@ -454,7 +454,7 @@ install_deps_apt() {
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -y
   apt-get install -y curl git gcc make ca-certificates build-essential sudo uidmap
-  apt-get install -y slirp4netns netavark aardvark-dns passt containernetworking-plugins 2>/dev/null || true
+  apt-get install -y slirp4netns netavark aardvark-dns passt containernetworking-plugins wireguard wireguard-tools 2>/dev/null || true
   if ! command -v podman >/dev/null 2>&1; then
     echo "==> Installing Podman..."
     apt-get install -y podman 2>/dev/null || apt-get install -y podman-docker 2>/dev/null || echo "  WARNING: podman not in apt"
@@ -491,7 +491,7 @@ install_deps_apt() {
 install_deps_dnf() {
   # shadow-utils provides newuidmap/newgidmap (required for rootless podman)
   dnf install -y curl git gcc make ca-certificates shadow-utils
-  dnf install -y slirp4netns netavark aardvark-dns passt containernetworking-plugins 2>/dev/null || true
+  dnf install -y slirp4netns netavark aardvark-dns passt containernetworking-plugins wireguard-tools 2>/dev/null || true
   command -v podman >/dev/null 2>&1 || dnf install -y podman
   command -v crun   >/dev/null 2>&1 || dnf install -y crun 2>/dev/null || echo '  WARNING: crun not available via dnf'
   command -v caddy  >/dev/null 2>&1 || dnf install -y caddy 2>/dev/null || \
@@ -507,7 +507,7 @@ install_deps_dnf() {
 install_deps_yum() {
   # shadow-utils provides newuidmap/newgidmap (required for rootless podman)
   yum install -y curl git gcc make ca-certificates shadow-utils
-  yum install -y --skip-broken slirp4netns netavark aardvark-dns passt containernetworking-plugins 2>/dev/null || true
+  yum install -y --skip-broken slirp4netns netavark aardvark-dns passt containernetworking-plugins wireguard-tools 2>/dev/null || true
   command -v podman >/dev/null 2>&1 || yum install -y podman
   command -v crun   >/dev/null 2>&1 || yum install -y crun 2>/dev/null || echo '  WARNING: crun not available via yum'
   command -v caddy  >/dev/null 2>&1 || (yum install -y yum-plugin-copr && yum copr enable -y @caddy/caddy && yum install -y caddy) || echo '  WARNING: caddy not via yum'
@@ -523,13 +523,13 @@ install_deps_apk() {
   apk update
   apk add --no-cache curl git gcc musl-dev make nodejs npm podman caddy
   apk add --no-cache crun 2>/dev/null || echo '  WARNING: crun not available via apk'
-  apk add --no-cache slirp4netns netavark aardvark-dns passt 2>/dev/null || true
+  apk add --no-cache slirp4netns netavark aardvark-dns passt wireguard-tools 2>/dev/null || true
   install_go_tarball ; configure_crun
 }
 
 install_deps_pacman() {
   pacman -Sy --noconfirm curl git gcc make nodejs npm go podman caddy
-  pacman -S --noconfirm slirp4netns netavark aardvark-dns passt 2>/dev/null || true
+  pacman -S --noconfirm slirp4netns netavark aardvark-dns passt wireguard-tools 2>/dev/null || true
   command -v crun >/dev/null 2>&1 || pacman -S --noconfirm crun 2>/dev/null || echo '  WARNING: crun not available via pacman'
   configure_crun
 }
