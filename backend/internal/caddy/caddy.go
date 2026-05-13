@@ -195,6 +195,7 @@ func buildConfig(db *sql.DB) (string, error) {
 		SELECT d.domain, d.tls,
 		       COALESCE(s.cluster_port, s.host_port) AS proxy_port,
 		       n.ip AS node_ip,
+		       n.wg_mesh_ip,
 		       s.project_id, s.name AS svc_name,
 		       COALESCE(s.node_id, 'main') AS node_id
 		FROM   domains d
@@ -202,7 +203,6 @@ func buildConfig(db *sql.DB) (string, error) {
 		LEFT JOIN nodes n ON n.node_id = s.node_id
 		WHERE  s.host_port > 0
 		  AND  s.status    = 'running'
-		  AND  d.verified  = 1
 		ORDER  BY d.domain
 	`)
 	if err != nil {
@@ -218,10 +218,10 @@ func buildConfig(db *sql.DB) (string, error) {
 	for rows.Next() {
 		var domain string
 		var tlsInt, hostPort int
-		var nodeIP sql.NullString
+		var nodeIP, wgMeshIP sql.NullString
 		var projectID int64
 		var svcName, nodeIDStr string
-		if rows.Scan(&domain, &tlsInt, &hostPort, &nodeIP, &projectID, &svcName, &nodeIDStr) != nil {
+		if rows.Scan(&domain, &tlsInt, &hostPort, &nodeIP, &wgMeshIP, &projectID, &svcName, &nodeIDStr) != nil {
 			continue
 		}
 		domain = strings.TrimSpace(strings.ToLower(domain))
@@ -232,6 +232,9 @@ func buildConfig(db *sql.DB) (string, error) {
 		targetIP := "127.0.0.1"
 		if nodeIP.Valid && nodeIP.String != "" {
 			targetIP = nodeIP.String
+		}
+		if wgMeshIP.Valid && wgMeshIP.String != "" {
+			targetIP = wgMeshIP.String
 		}
 
 		isLocal := nodeIDStr == "main" || nodeIDStr == myHostname || (serverIP != "" && targetIP == serverIP)
@@ -262,12 +265,15 @@ func buildConfig(db *sql.DB) (string, error) {
 			}
 		}
 
-		// If the container runs on a remote worker node, ensure its traffic is tunneled securely over our loopback proxy
+		// If the container runs on a remote worker node, ensure its traffic is tunneled securely
 		if !isLocal && targetIP != "127.0.0.1" && netdaemon.GlobalTunnel != nil {
-			localProxyPort := netdaemon.GlobalTunnel.EnsureServiceProxy(nodeIDStr, hostPort)
-			if localProxyPort > 0 {
-				targetIP = "127.0.0.1"
-				hostPort = localProxyPort
+			// If targetIP is a private WireGuard Mesh IP (10.99.0.X), route directly to it over the kernel wg0 interface
+			if !strings.HasPrefix(targetIP, "10.99.0.") {
+				localProxyPort := netdaemon.GlobalTunnel.EnsureServiceProxy(nodeIDStr, hostPort)
+				if localProxyPort > 0 {
+					targetIP = "127.0.0.1"
+					hostPort = localProxyPort
+				}
 			}
 		}
 

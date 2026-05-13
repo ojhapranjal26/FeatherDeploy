@@ -675,12 +675,17 @@ func (h *NodeHandler) CompleteJoin(w http.ResponseWriter, r *http.Request) {
 
 	nodeID := fmt.Sprintf("node-%d", node.ID)
 
+	effectiveIP := nodeIP
+	if wgMeshIP != "" {
+		effectiveIP = wgMeshIP
+	}
+
 	// Update node record: mark connected, save cert, clear join token, save real IP, save wireguard params
 	_, err = h.db.ExecContext(r.Context(),
 		`UPDATE nodes SET status='connected', ip=?, hostname=?, os_info=?, node_id=?, node_cert_pem=?, rqlite_addr=?,
 		 join_token=NULL, token_expires_at=NULL, last_seen=datetime('now'),
 		 port=7443, tunnel_token=?, updated_at=datetime('now'), wg_public_key=?, wg_mesh_ip=? WHERE id=?`,
-		nodeIP, payload.Hostname, payload.OSInfo, nodeID, nodeCert.CertPEM, payload.RqliteAddr, tunnelToken, payload.WgPublicKey, wgMeshIP, node.ID,
+		effectiveIP, payload.Hostname, payload.OSInfo, nodeID, nodeCert.CertPEM, payload.RqliteAddr, tunnelToken, payload.WgPublicKey, wgMeshIP, node.ID,
 	)
 	if err != nil {
 		slog.Error("complete-join: update node", "err", err)
@@ -1232,16 +1237,16 @@ reset_host
 if command -v apt-get >/dev/null 2>&1; then
 	export DEBIAN_FRONTEND=noninteractive
 	apt-get update -y -q
-	apt-get install -y -q curl uidmap slirp4netns netavark aardvark-dns passt containernetworking-plugins 2>/dev/null || true
+	apt-get install -y -q curl uidmap slirp4netns netavark aardvark-dns passt containernetworking-plugins wireguard wireguard-tools 2>/dev/null || true
 	apt-get install -y -q podman crun caddy openssh-server 2>/dev/null || apt-get install -y -q curl podman caddy openssh-server uidmap
 elif command -v dnf >/dev/null 2>&1; then
-	dnf install -y -q curl shadow-utils slirp4netns netavark aardvark-dns passt containernetworking-plugins 2>/dev/null || true
+	dnf install -y -q curl shadow-utils slirp4netns netavark aardvark-dns passt containernetworking-plugins wireguard wireguard-tools 2>/dev/null || true
 	dnf install -y -q podman crun caddy openssh-server 2>/dev/null || dnf install -y -q curl podman caddy openssh-server
 elif command -v yum >/dev/null 2>&1; then
-	yum install -y -q curl shadow-utils slirp4netns netavark aardvark-dns passt containernetworking-plugins 2>/dev/null || true
+	yum install -y -q curl shadow-utils slirp4netns netavark aardvark-dns passt containernetworking-plugins wireguard wireguard-tools 2>/dev/null || true
 	yum install -y -q podman crun openssh-server 2>/dev/null || yum install -y -q curl podman openssh-server
 elif command -v apk >/dev/null 2>&1; then
-	apk add --no-cache curl podman caddy crun openssh 2>/dev/null || apk add --no-cache curl podman caddy openssh
+	apk add --no-cache curl podman caddy crun openssh wireguard-tools 2>/dev/null || apk add --no-cache curl podman caddy openssh wireguard-tools
 	apk add --no-cache slirp4netns netavark aardvark-dns passt 2>/dev/null || true
 fi
 
