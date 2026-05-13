@@ -159,6 +159,14 @@ func runJoin(args []string) {
 	if err != nil {
 		fatalf("decrypt env: %v", err)
 	}
+	
+	if reply.BrainWgMeshIP != "" {
+		decryptedEnv = strings.ReplaceAll(decryptedEnv, "127.0.0.1:4001", reply.BrainWgMeshIP+":4001")
+		decryptedEnv = strings.ReplaceAll(decryptedEnv, "127.0.0.1:4002", reply.BrainWgMeshIP+":4002")
+		decryptedEnv = strings.ReplaceAll(decryptedEnv, "127.0.0.1:2379", reply.BrainWgMeshIP+":2379")
+		decryptedEnv = strings.ReplaceAll(decryptedEnv, "127.0.0.1:2380", reply.BrainWgMeshIP+":2380")
+	}
+
 	writeFile(envFile, decryptedEnv, 0600)
 
 	// Persist tokens and connection info
@@ -229,19 +237,30 @@ PersistentKeepalive = 25
 	// Wait for connection to establish
 	time.Sleep(4 * time.Second)
 
-	// Setup local proxies so this node can reach the brain's services via the tunnel
-	tunnelMgr.ProxyNodeToBrain(4001, 4001)
-	tunnelMgr.ProxyNodeToBrain(4002, 4002)
-	tunnelMgr.ProxyNodeToBrain(2379, 2379)
-	tunnelMgr.ProxyNodeToBrain(2380, 2380)
+	if reply.BrainWgMeshIP == "" {
+		// Setup local proxies so this node can reach the brain's services via the tunnel
+		tunnelMgr.ProxyNodeToBrain(4001, 4001)
+		tunnelMgr.ProxyNodeToBrain(4002, 4002)
+		tunnelMgr.ProxyNodeToBrain(2379, 2379)
+		tunnelMgr.ProxyNodeToBrain(2380, 2380)
 
-	fmt.Println("==> Checking connectivity through tunnel...")
-	httpClient := &http.Client{Timeout: 5 * time.Second}
-	if resp, err := httpClient.Get("http://127.0.0.1:4001/readyz"); err != nil {
-		fmt.Printf("  WARNING: cannot reach main rqlite via tunnel: %v\n", err)
+		fmt.Println("==> Checking connectivity through tunnel...")
+		httpClient := &http.Client{Timeout: 5 * time.Second}
+		if resp, err := httpClient.Get("http://127.0.0.1:4001/readyz"); err != nil {
+			fmt.Printf("  WARNING: cannot reach main rqlite via tunnel: %v\n", err)
+		} else {
+			resp.Body.Close()
+			fmt.Println("  ✓ Rqlite connectivity confirmed via tunnel")
+		}
 	} else {
-		resp.Body.Close()
-		fmt.Println("  ✓ Rqlite connectivity confirmed via tunnel")
+		fmt.Println("==> Checking connectivity through WireGuard mesh...")
+		httpClient := &http.Client{Timeout: 5 * time.Second}
+		if resp, err := httpClient.Get(fmt.Sprintf("http://%s:4001/readyz", reply.BrainWgMeshIP)); err != nil {
+			fmt.Printf("  WARNING: cannot reach main rqlite via WireGuard mesh: %v\n", err)
+		} else {
+			resp.Body.Close()
+			fmt.Println("  ✓ Rqlite connectivity confirmed via WireGuard mesh")
+		}
 	}
 
 	// Write all service unit files before reloading systemd to prevent missing unit errors
@@ -292,30 +311,51 @@ func runServe() {
 		slog.Info("tunnel client: connecting to brain", "url", wsURL, "node", myID)
 		go tunnelMgr.StartClient(context.Background(), wsURL, myID, nodeToken, tunnelTLSCfg)
 
-		// Setup persistent proxies to the brain's services
-		tunnelMgr.ProxyNodeToBrain(4001, 4001)
-		tunnelMgr.ProxyNodeToBrain(4002, 4002)
-		tunnelMgr.ProxyNodeToBrain(2379, 2379)
-		tunnelMgr.ProxyNodeToBrain(2380, 2380)
+		// Setup persistent proxies to the brain's services only if WireGuard mesh is not used
+		usesMesh := false
+		if envData, err := os.ReadFile(envFile); err == nil && strings.Contains(string(envData), "10.99.0.") {
+			usesMesh = true
+		}
+		if !usesMesh {
+			tunnelMgr.ProxyNodeToBrain(4001, 4001)
+			tunnelMgr.ProxyNodeToBrain(4002, 4002)
+			tunnelMgr.ProxyNodeToBrain(2379, 2379)
+			tunnelMgr.ProxyNodeToBrain(2380, 2380)
+		}
 	}
 
 	// Wait a moment for tunnel to initialize
 	time.Sleep(2 * time.Second)
 
-	// Connect to the Brain's rqlite via the tunnel proxy (always 127.0.0.1:4001 on workers).
-	// We retry until the tunnel is established.
+	// Connect to the Brain's rqlite via the tunnel proxy or WireGuard mesh.
+	// We retry until the connection is established.
 	var db *sql.DB
 	var err error
+	rqliteHost := "127.0.0.1"
+	if envData, e := os.ReadFile(envFile); e == nil {
+		lines := strings.Split(string(envData), "\n")
+		for _, line := range lines {
+			if strings.HasPrefix(line, "RQLITE_URL=") {
+				if strings.Contains(line, "10.99.0.") {
+					// Extract IP
+					rqliteHost = strings.Split(strings.TrimPrefix(line, "RQLITE_URL=http://"), ":")[0]
+				}
+				break
+			}
+		}
+	}
+	rqliteConnectURL := fmt.Sprintf("http://%s:4001", rqliteHost)
+
 	for i := 0; i < 30; i++ {
-		db, err = appDb.OpenRqlite("http://127.0.0.1:4001")
+		db, err = appDb.OpenRqlite(rqliteConnectURL)
 		if err == nil {
 			break
 		}
-		slog.Info("waiting for tunnel and brain rqlite...", "attempt", i+1, "err", err)
+		slog.Info("waiting for brain rqlite...", "attempt", i+1, "url", rqliteConnectURL, "err", err)
 		time.Sleep(2 * time.Second)
 	}
 	if err != nil {
-		slog.Error("could not connect to brain rqlite via tunnel", "err", err)
+		slog.Error("could not connect to brain rqlite", "err", err)
 	}
 
 	// Start node heartbeat + brain-election goroutine
@@ -329,8 +369,12 @@ func runServe() {
 	}
 
 	// ─── etcd Coordination Layer ──────────────────────────────────────────────
-	// Initialize etcd client for real-time coordination (pointing to local proxy)
-	etcdClient, err := coordination.NewClient([]string{"http://127.0.0.1:2379"})
+	// Initialize etcd client for real-time coordination
+	etcdHost := "127.0.0.1"
+	if rqliteHost != "127.0.0.1" {
+		etcdHost = rqliteHost // Brain mesh IP
+	}
+	etcdClient, err := coordination.NewClient([]string{fmt.Sprintf("http://%s:2379", etcdHost)})
 	if err != nil {
 		slog.Warn("could not connect to etcd proxy, real-time coordination disabled", "err", err)
 	} else {

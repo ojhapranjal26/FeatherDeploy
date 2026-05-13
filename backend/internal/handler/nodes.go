@@ -366,14 +366,18 @@ func (h *NodeHandler) NodeLogs(w http.ResponseWriter, r *http.Request) {
 		}
 
 		var dbNodeID string
-		var ip string
+		var ip, wgMeshIP string
 		var port int
 		err = h.db.QueryRowContext(r.Context(),
-			`SELECT node_id, ip, port FROM nodes WHERE id=?`, nodeID).Scan(&dbNodeID, &ip, &port)
+			`SELECT node_id, ip, port, wg_mesh_ip FROM nodes WHERE id=?`, nodeID).Scan(&dbNodeID, &ip, &port, &wgMeshIP)
 		if err != nil {
 			fmt.Fprintf(w, "data: {\"error\":\"node not found\"}\n\n")
 			flusher.Flush()
 			return
+		}
+
+		if wgMeshIP != "" {
+			ip = wgMeshIP
 		}
 
 		// Prefer tunnel proxy — the node API always listens on port 7443
@@ -382,7 +386,7 @@ func (h *NodeHandler) NodeLogs(w http.ResponseWriter, r *http.Request) {
 		// already the encrypted transport layer.
 		scheme := "https"
 		tunnelPort := port
-		if netdaemon.GlobalTunnel != nil {
+		if wgMeshIP == "" && netdaemon.GlobalTunnel != nil {
 			// Try the stored port first, then fall back to 7443 (the node API port)
 			proxyAddr := netdaemon.GlobalTunnel.GetNodeProxyAddr(dbNodeID, port)
 			if proxyAddr == "" && port != 7443 {
@@ -734,8 +738,15 @@ func (h *NodeHandler) CompleteJoin(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	etcdMain := fmt.Sprintf("main=http://%s:2380", publicIP)
-	rqliteMain := fmt.Sprintf("%s:4001", publicIP)
+	etcdMainIP := publicIP
+	rqliteMainIP := publicIP
+	if brainWgMeshIP != "" && wgMeshIP != "" {
+		etcdMainIP = brainWgMeshIP
+		rqliteMainIP = brainWgMeshIP
+	}
+
+	etcdMain := fmt.Sprintf("main=http://%s:2380", etcdMainIP)
+	rqliteMain := fmt.Sprintf("%s:4001", rqliteMainIP)
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"node_id":             nodeID,

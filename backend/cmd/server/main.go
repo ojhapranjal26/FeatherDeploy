@@ -635,9 +635,9 @@ func serve() {
 	TunnelMgr.OnNodeConnect = func(nodeID, newIP string) {
 		if strings.HasPrefix(nodeID, "node-") {
 			idStr := strings.TrimPrefix(nodeID, "node-")
-			var oldIP string
-			err := db.QueryRow(`SELECT ip FROM nodes WHERE id = ?`, idStr).Scan(&oldIP)
-			if err == nil && oldIP != newIP {
+			var oldIP, wgMeshIP string
+			err := db.QueryRow(`SELECT ip, wg_mesh_ip FROM nodes WHERE id = ?`, idStr).Scan(&oldIP, &wgMeshIP)
+			if err == nil && wgMeshIP == "" && oldIP != newIP {
 				// Record history and update
 				if oldIP != "" {
 					db.Exec(`INSERT INTO node_ip_history (node_id, old_ip, new_ip) VALUES (?, ?, ?)`, idStr, oldIP, newIP)

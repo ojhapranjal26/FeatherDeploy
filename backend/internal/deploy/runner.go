@@ -3767,21 +3767,32 @@ func nodeHTTPClient(viaTunnel bool, timeout time.Duration) (*http.Client, string
 }
 
 func dispatchToNode(db *sql.DB, nodeID string, depID, svcID, userID int64, secret string) error {
-	var ip string
+	var ip, wgMeshIP string
 	var port int
-	err := db.QueryRow(`SELECT ip, port FROM nodes WHERE node_id=?`, nodeID).Scan(&ip, &port)
+	err := db.QueryRow(`SELECT ip, port, wg_mesh_ip FROM nodes WHERE node_id=?`, nodeID).Scan(&ip, &port, &wgMeshIP)
 	if err != nil {
 		return fmt.Errorf("node %q not found in DB: %w", nodeID, err)
 	}
 
-	// Route traffic over the secure tunnel if a proxy is available
-	if tunnelIP, tunnelPort, viaTunnel := resolveNodeTunnel(nodeID, port); tunnelIP != "" {
-		ip = tunnelIP
-		port = tunnelPort
-		_ = viaTunnel
+	if wgMeshIP != "" {
+		ip = wgMeshIP
 	}
-	viaTunnel := netdaemon.GlobalTunnel != nil && ip == "127.0.0.1"
 
+	// Route traffic over the secure tunnel if a proxy is available and we're not using WireGuard mesh
+	viaTunnel := false
+	if wgMeshIP == "" {
+		if tunnelIP, tunnelPort, isTunnel := resolveNodeTunnel(nodeID, port); tunnelIP != "" {
+			ip = tunnelIP
+			port = tunnelPort
+			viaTunnel = isTunnel
+		}
+	} else {
+		// Even if viaTunnel is false, we are using the secure WireGuard mesh.
+		// However, nodeHTTPClient uses viaTunnel to skip hostname verification because
+		// it connects to an IP instead of a hostname. We need to skip verification for WireGuard IPs too.
+		viaTunnel = true
+	}
+	
 	// Prepare payload
 	payload := map[string]any{
 		"dep_id":     depID,
@@ -3923,19 +3934,35 @@ func migrateDatabaseData(db *sql.DB, secret, oldNodeID string, dbID int64) error
 	return RestoreDatabaseBackup(db, secret, dbID, tmp.Name())
 }
 func detectNodeIP(db *sql.DB) string {
-	// 1. Check SERVER_IP environment variable (most reliable)
-	if ip := os.Getenv("SERVER_IP"); ip != "" && !isPrivateIP(ip) {
-		return ip
-	}
-
-	// 2. Try to look up our IP from the nodes table using our hostname
+	// 1. Try to look up our IP from the nodes table using our hostname (for worker nodes)
 	if db != nil {
 		h, _ := os.Hostname()
-		var ip string
-		err := db.QueryRow(`SELECT ip FROM nodes WHERE hostname=? OR node_id=?`, h, h).Scan(&ip)
-		if err == nil && ip != "" && !isPrivateIP(ip) {
-			return ip
+		var ip, wgMeshIP string
+		err := db.QueryRow(`SELECT ip, wg_mesh_ip FROM nodes WHERE hostname=? OR node_id=?`, h, h).Scan(&ip, &wgMeshIP)
+		if err == nil {
+			if wgMeshIP != "" {
+				return wgMeshIP
+			}
+			if ip != "" && !isPrivateIP(ip) {
+				return ip
+			}
 		}
+
+		// Check if we are the brain node (brain nodes are in cluster_state, not nodes)
+		var brainWgMeshIP string
+		if err := db.QueryRow(`SELECT wg_mesh_ip FROM cluster_state WHERE id=1`).Scan(&brainWgMeshIP); err == nil && brainWgMeshIP != "" {
+			var brainID string
+			if err := db.QueryRow(`SELECT brain_id FROM cluster_state WHERE id=1`).Scan(&brainID); err == nil {
+				if brainID == "main" || brainID == h {
+					return brainWgMeshIP
+				}
+			}
+		}
+	}
+
+	// 2. Check SERVER_IP environment variable (fallback if DB has no mesh IP)
+	if ip := os.Getenv("SERVER_IP"); ip != "" && !isPrivateIP(ip) {
+		return ip
 	}
 
 	// 3. Try external discovery (same as installer)
