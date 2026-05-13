@@ -144,6 +144,7 @@ func runJoin(args []string) {
 		WgMeshIP         string `json:"wg_mesh_ip"`
 		BrainWgPublicKey string `json:"brain_wg_public_key"`
 		BrainWgMeshIP    string `json:"brain_wg_mesh_ip"`
+		BrainPublicIP    string `json:"brain_public_ip"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&reply); err != nil {
 		fatalf("decode response: %v", err)
@@ -193,14 +194,17 @@ func runJoin(args []string) {
 	// Setup private WireGuard mesh interface if parameters are present
 	if reply.WgMeshIP != "" && reply.BrainWgPublicKey != "" && wgPrivKey != "" {
 		fmt.Printf("==> Configuring private WireGuard mesh interface wg0 (%s)...\n", reply.WgMeshIP)
-		brainHost := "127.0.0.1"
-		if u, err := url.Parse(mainURL); err == nil {
-			brainHost = u.Hostname()
-		} else if strings.Contains(mainURL, "://") {
-			parts := strings.Split(mainURL, "://")
-			sub := strings.Split(parts[1], ":")[0]
-			sub = strings.Split(sub, "/")[0]
-			brainHost = sub
+		brainHost := reply.BrainPublicIP
+		if brainHost == "" {
+			brainHost = "127.0.0.1"
+			if u, err := url.Parse(mainURL); err == nil {
+				brainHost = u.Hostname()
+			} else if strings.Contains(mainURL, "://") {
+				parts := strings.Split(mainURL, "://")
+				sub := strings.Split(parts[1], ":")[0]
+				sub = strings.Split(sub, "/")[0]
+				brainHost = sub
+			}
 		}
 		wgConf := fmt.Sprintf(`[Interface]
 PrivateKey = %s
@@ -429,6 +433,7 @@ func runServe() {
 		var payload struct {
 			BrainWgPublicKey string `json:"brain_wg_public_key"`
 			WgMeshIP         string `json:"wg_mesh_ip"`
+			BrainPublicIP    string `json:"brain_public_ip"`
 		}
 		if err := json.NewDecoder(req.Body).Decode(&payload); err != nil || payload.BrainWgPublicKey == "" || payload.WgMeshIP == "" {
 			http.Error(w, "invalid payload", http.StatusBadRequest)
@@ -461,15 +466,18 @@ func runServe() {
 			return
 		}
 
-		// Extract Brain Hostname/IP from mainURL
-		brainHost := "127.0.0.1"
-		if u, err := url.Parse(mainURL); err == nil && u.Hostname() != "" {
-			brainHost = u.Hostname()
-		} else if strings.Contains(mainURL, "://") {
-			parts := strings.Split(mainURL, "://")
-			sub := strings.Split(parts[1], ":")[0]
-			sub = strings.Split(sub, "/")[0]
-			brainHost = sub
+		// Extract Brain Hostname/IP from payload or fallback to mainURL
+		brainHost := payload.BrainPublicIP
+		if brainHost == "" {
+			brainHost = "127.0.0.1"
+			if u, err := url.Parse(mainURL); err == nil && u.Hostname() != "" {
+				brainHost = u.Hostname()
+			} else if strings.Contains(mainURL, "://") {
+				parts := strings.Split(mainURL, "://")
+				sub := strings.Split(parts[1], ":")[0]
+				sub = strings.Split(sub, "/")[0]
+				brainHost = sub
+			}
 		}
 
 		wgConf := fmt.Sprintf(`[Interface]

@@ -762,6 +762,7 @@ func (h *NodeHandler) CompleteJoin(w http.ResponseWriter, r *http.Request) {
 		"wg_mesh_ip":          wgMeshIP,
 		"brain_wg_public_key": brainWgPubKey,
 		"brain_wg_mesh_ip":    brainWgMeshIP,
+		"brain_public_ip":     publicIP,
 	})
 }
 
@@ -908,10 +909,42 @@ func (h *NodeHandler) RotateWireguard(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Determine public IP for the brain
+	serverIP := os.Getenv("SERVER_IP")
+	if serverIP == "" {
+		serverIP = "127.0.0.1"
+	}
+	publicIP := serverIP
+	if publicIP == "127.0.0.1" || publicIP == "" || isPrivateIP(publicIP) {
+		if conn, err := net.DialTimeout("udp", "1.1.1.1:80", 2*time.Second); err == nil {
+			publicIP = conn.LocalAddr().(*net.UDPAddr).IP.String()
+			conn.Close()
+		}
+		// Fallback to external lookup if still private
+		if isPrivateIP(publicIP) {
+			urls := []string{"https://ident.me", "https://ifconfig.me/ip"}
+			for _, u := range urls {
+				client := http.Client{Timeout: 2 * time.Second}
+				if resp, err := client.Get(u); err == nil {
+					if body, err := io.ReadAll(resp.Body); err == nil {
+						extIP := strings.TrimSpace(string(body))
+						if net.ParseIP(extIP) != nil {
+							publicIP = extIP
+							resp.Body.Close()
+							break
+						}
+					}
+					resp.Body.Close()
+				}
+			}
+		}
+	}
+
 	// Construct payload for node
 	payload := map[string]string{
 		"brain_wg_public_key": brainWgPubKey,
 		"wg_mesh_ip":          wgMeshIP.String,
+		"brain_public_ip":     publicIP,
 	}
 	bodyBytes, _ := json.Marshal(payload)
 
