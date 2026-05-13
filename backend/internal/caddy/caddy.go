@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/coordination"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/netdaemon"
 )
 
 var (
@@ -259,6 +260,15 @@ func buildConfig(db *sql.DB) (string, error) {
 				}
 			} else {
 				cancel()
+			}
+		}
+
+		// If the container runs on a remote worker node, ensure its traffic is tunneled securely over our loopback proxy
+		if nodeIDStr != "main" && targetIP != "127.0.0.1" && netdaemon.GlobalTunnel != nil {
+			localProxyPort := netdaemon.GlobalTunnel.EnsureServiceProxy(nodeIDStr, hostPort)
+			if localProxyPort > 0 {
+				targetIP = "127.0.0.1"
+				hostPort = localProxyPort
 			}
 		}
 

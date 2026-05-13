@@ -172,6 +172,39 @@ func (tm *TunnelManager) setupNodeProxies(nodeID string) {
 	}
 }
 
+// EnsureServiceProxy ensures that a dynamic local proxy port is mapped to the remote container port over the secure reverse tunnel.
+// Returns the local port assigned on the brain server.
+func (tm *TunnelManager) EnsureServiceProxy(nodeID string, remotePort int) int {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+
+	if tm.portMap == nil {
+		tm.portMap = make(map[string]map[int]int)
+	}
+	if tm.portMap[nodeID] == nil {
+		tm.portMap[nodeID] = make(map[int]int)
+	}
+
+	// If already mapped, return the existing local port
+	if lp, ok := tm.portMap[nodeID][remotePort]; ok {
+		return lp
+	}
+
+	idVal := 0
+	if strings.HasPrefix(nodeID, "node-") {
+		fmt.Sscanf(nodeID, "node-%d", &idVal)
+	} else if nodeID != "main" {
+		idVal = len(tm.sessions)
+	}
+	// Give each node a deterministic 500-port block starting at 30000 to safely map service container ports
+	localPort := 30000 + (idVal * 500) + (remotePort % 500)
+
+	tm.portMap[nodeID][remotePort] = localPort
+	go tm.startInternalProxy(nodeID, localPort, remotePort)
+	slog.Info("tunnel server: service container proxy dynamically mapped", "node", nodeID, "localPort", localPort, "remotePort", remotePort)
+	return localPort
+}
+
 func (tm *TunnelManager) Cleanup(nodeID string) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
