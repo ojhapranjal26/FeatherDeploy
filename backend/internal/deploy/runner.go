@@ -780,10 +780,12 @@ func Run(ctx context.Context, db *sql.DB, jwtSecret string, depID, svcID, userID
 	// Register with fdnet so sibling services can reach this container via
 	// their <SVC>_HOST / <SVC>_PORT env vars.
 	// With host networking, fdnet dials 127.0.0.1:hostPort directly.
+	clusterPortVal := 0
 	if NetDaemon != nil {
 		if cp, regErr := NetDaemon.Register(projectID, svcName, "127.0.0.1", newContainerID, hostPort, appPort); regErr != nil {
 			log.add("[fdnet] warning: could not register service %q: %v", svcName, regErr)
 		} else {
+			clusterPortVal = cp
 			log.add("[fdnet] service %q registered (hostPort=%d clusterPort=%d)", svcName, hostPort, cp)
 			// Persist the clusterPort so Caddy's buildConfig can route through the
 			// fdnet Go TCP proxy (a real kernel socket on 0.0.0.0:cp) instead of
@@ -811,11 +813,15 @@ func Run(ctx context.Context, db *sql.DB, jwtSecret string, depID, svcID, userID
 	// Cluster discovery registration (Etcd)
 	if EtcdClient != nil {
 		nodeIP := detectNodeIP(db)
+		regPort := hostPort
+		if clusterPortVal > 0 {
+			regPort = clusterPortVal
+		}
 		discoveryCtx, discoveryCancel := context.WithTimeout(ctx, 10*time.Second)
-		if err := EtcdClient.RegisterService(discoveryCtx, projectID, svcName, nodeIP, hostPort); err != nil {
+		if err := EtcdClient.RegisterService(discoveryCtx, projectID, svcName, nodeIP, regPort); err != nil {
 			log.add("[etcd] warning: could not register service for discovery: %v", err)
 		} else {
-			log.add("[etcd] service registered successfully for discovery (ip=%s, port=%d)", nodeIP, hostPort)
+			log.add("[etcd] service registered successfully for discovery (ip=%s, port=%d)", nodeIP, regPort)
 		}
 		discoveryCancel()
 	}
