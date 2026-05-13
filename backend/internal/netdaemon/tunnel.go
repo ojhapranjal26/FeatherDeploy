@@ -163,7 +163,7 @@ func (tm *TunnelManager) setupNodeProxies(nodeID string) {
 	}
 	base := 20000 + (idVal * 10)
 
-	ports := []int{4003, 4004, 2381, 2382, 7443}
+	ports := []int{443, 4003, 4004, 2381, 2382, 7443}
 	for i, remotePort := range ports {
 		localPort := base + i
 		tm.portMap[nodeID][remotePort] = localPort

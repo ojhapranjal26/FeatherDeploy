@@ -457,7 +457,7 @@ func Run(ctx context.Context, db *sql.DB, jwtSecret string, depID, svcID, userID
 	oldNodeID := oldNodeIDNull.String
 
 	if oldCID != "" {
-		if oldNodeID != "" && oldNodeID != actualNodeID {
+		if oldNodeID != "" && oldNodeID != actualNodeID && oldNodeID != "main" {
 			log.add("[orchestrator] migration detected: stopping container %s on old node %s...", oldCID[:12], oldNodeID)
 			if err := stopContainerOnNode(db, oldNodeID, oldCID); err != nil {
 				log.add("[orchestrator] warning: could not stop old container: %v", err)

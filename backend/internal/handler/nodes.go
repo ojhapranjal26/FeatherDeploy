@@ -237,8 +237,8 @@ func (h *NodeHandler) Add(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Hardcode port 443 for all nodes based on the new distributed Caddy architecture
-	port := 443
+	// The port used for the internal featherdeploy-node API.
+	port := 7443
 
 	// Validate node_type; default to worker if not specified
 	nodeType := req.NodeType

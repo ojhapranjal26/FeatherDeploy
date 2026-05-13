@@ -243,7 +243,7 @@ func (e *Engine) applyToCaddy() {
 	caddyRoutes := buildCaddyRoutes(routes, nodes, e.nodeID)
 	payload, _ := json.Marshal(caddyRoutes)
 
-	req, err := http.NewRequest("PUT", "http://localhost:2019/config/apps/http/servers/srv0/routes", bytes.NewReader(payload))
+	req, err := http.NewRequest("PATCH", "http://localhost:2019/config/apps/http/servers/srv0/routes", bytes.NewReader(payload))
 	if err != nil {
 		return
 	}

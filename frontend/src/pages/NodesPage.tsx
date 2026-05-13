@@ -418,7 +418,7 @@ export function NodesPage() {
                       </div>
                     </td>
                     <td className="px-4 py-3 font-mono text-muted-foreground">
-                      {node.ip}:{node.port}
+                      {node.ip}
                     </td>
                     <td className="px-4 py-3">
                       <StatusBadge status={node.status} />
