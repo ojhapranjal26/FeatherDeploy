@@ -28,8 +28,9 @@ type Route struct {
 }
 
 type NodeState struct {
-	IP   string `json:"ip"`
-	Port int    `json:"port"`
+	IP       string `json:"ip"`
+	Port     int    `json:"port"`
+	WgMeshIP string `json:"wg_mesh_ip"`
 }
 
 type Engine struct {
@@ -241,7 +242,30 @@ func (e *Engine) applyToCaddy() {
 	e.mu.RUnlock()
 
 	caddyRoutes := buildCaddyRoutes(routes, nodes, e.nodeID)
-	payload, _ := json.Marshal(caddyRoutes)
+	// 1. Fetch existing routes from Caddy to preserve the Panel route and other Caddyfile routes.
+	var existingRoutes []map[string]any
+	respGet, err := http.Get("http://localhost:2019/config/apps/http/servers/srv0/routes")
+	if err == nil && respGet.StatusCode == 200 {
+		b, _ := io.ReadAll(respGet.Body)
+		json.Unmarshal(b, &existingRoutes)
+		respGet.Body.Close()
+	} else if respGet != nil {
+		respGet.Body.Close()
+	}
+
+	// 2. Filter out our old dynamic routes (identified by @id starting with fd_dynamic_)
+	var mergedRoutes []map[string]any
+	for _, r := range existingRoutes {
+		idStr, _ := r["@id"].(string)
+		if !strings.HasPrefix(idStr, "fd_dynamic_") {
+			mergedRoutes = append(mergedRoutes, r)
+		}
+	}
+
+	// 3. Append our new dynamic routes
+	mergedRoutes = append(mergedRoutes, caddyRoutes...)
+
+	payload, _ := json.Marshal(mergedRoutes)
 
 	req, err := http.NewRequest("PATCH", "http://localhost:2019/config/apps/http/servers/srv0/routes", bytes.NewReader(payload))
 	if err != nil {
@@ -258,7 +282,7 @@ func (e *Engine) applyToCaddy() {
 		b, _ := io.ReadAll(resp.Body)
 		slog.Warn("proxyengine: caddy rejected config", "status", resp.StatusCode, "body", string(b))
 	} else {
-		slog.Info("proxyengine: successfully pushed batched routes to Caddy", "count", len(caddyRoutes))
+		slog.Info("proxyengine: successfully pushed batched routes to Caddy", "dynamic_count", len(caddyRoutes), "total_count", len(mergedRoutes))
 	}
 }
 
@@ -268,22 +292,29 @@ func buildCaddyRoutes(routes []Route, nodes map[string]NodeState, myNodeID strin
 	for _, r := range routes {
 		var dialAddr string
 
-		// If the service is running locally on this node, route to 127.0.0.1:port
 		if r.TargetNode == myNodeID {
+			// Local routing
 			dialAddr = fmt.Sprintf("127.0.0.1:%d", r.TargetPort)
 		} else {
-			// Cross-node proxy: route to TargetNode's Caddy over 443
-			// Check if node is healthy (present in nodes map)
+			// Cross-node routing: dial the other node via mTLS public ip/tunnel proxy
+			var targetIP string
 			ns, healthy := nodes[r.TargetNode]
 			if !healthy {
-				// Node is down, do not route. Wait for TTL or recovery.
 				slog.Debug("proxyengine: dropping route, target node offline", "domain", r.Domain, "target", r.TargetNode)
 				continue
 			}
-			dialAddr = fmt.Sprintf("%s:%d", ns.IP, ns.Port) // 443
+
+			if ns.WgMeshIP != "" {
+				targetIP = ns.WgMeshIP
+			} else {
+				targetIP = ns.IP
+			}
+
+			dialAddr = fmt.Sprintf("%s:443", targetIP)
 		}
 
 		route := map[string]any{
+			"@id": "fd_dynamic_" + r.Domain,
 			"match": []map[string]any{
 				{
 					"host": []string{r.Domain},
