@@ -1103,6 +1103,7 @@ func persistIPTables() {
 	fmt.Println("  NOTE: could not persist iptables rules — they will be lost on reboot")
 	fmt.Println("  Run: apt-get install -y iptables-persistent   # Debian/Ubuntu")
 	fmt.Println("       dnf install -y iptables-services          # RHEL/Fedora")
+}
 // setupWireGuardBrain initializes the wg0 interface on the Main Brain Server
 // with IP 10.99.0.1/24, starts it via wg-quick, and returns its public key.
 func setupWireGuardBrain() (string, string) {

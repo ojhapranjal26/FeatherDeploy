@@ -951,15 +951,14 @@ func (h *NodeHandler) RotateWireguard(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Reconcile cluster firewall immediately to update the master brain's active kernel wg0 interface peers
-	if err := deploy.ReconcileClusterFirewall(h.db); err != nil {
-		slog.Warn("reconcile firewall post-rotation encountered an issue", "err", err)
-	}
+	deploy.ReconcileClusterFirewall(h.db)
 
 	writeJSON(w, http.StatusOK, map[string]string{
 		"status":        "success",
 		"wg_public_key": reply.WgPublicKey,
 		"message":       "WireGuard keys rotated and kernel interface synced successfully",
 	})
+}
 
 // GET /api/nodes/server-binary?token=TOKEN — serve the main featherdeploy server binary
 // Nodes download this during join so they can promote to brain.
