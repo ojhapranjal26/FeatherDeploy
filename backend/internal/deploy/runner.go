@@ -3808,12 +3808,27 @@ func resolveNodeTunnel(nodeID string, dbPort int) (ip string, port int, viaTunne
 // When viaTunnel is false we are talking directly to the node over the public network
 // and need a full mTLS client.
 func nodeHTTPClient(viaTunnel bool, timeout time.Duration) (*http.Client, string) {
-	caPEM, _ := os.ReadFile("/etc/featherdeploy/ca.crt")
-	certPEM, _ := os.ReadFile("/etc/featherdeploy/node.crt")
-	keyPEM, _ := os.ReadFile("/etc/featherdeploy/node.key")
+	// Search paths for mTLS certificates
+	paths := []string{
+		"/etc/featherdeploy",
+		"/var/lib/featherdeploy/config",
+		"config", // local dev
+	}
+	
+	var caPEM, certPEM, keyPEM []byte
+	var err error
+	for _, p := range paths {
+		caPEM, _ = os.ReadFile(p + "/ca.crt")
+		certPEM, _ = os.ReadFile(p + "/node.crt")
+		keyPEM, _ = os.ReadFile(p + "/node.key")
+		if len(caPEM) > 0 && len(certPEM) > 0 && len(keyPEM) > 0 {
+			break
+		}
+	}
+
 	tlsCfg, err := pki.TLSConfig(string(certPEM), string(keyPEM), string(caPEM))
 	if err != nil {
-		slog.Warn("nodeHTTPClient: mTLS config failed, falling back to insecure", "err", err)
+		slog.Warn("nodeHTTPClient: mTLS config failed (client certificates missing or invalid), falling back to insecure", "err", err)
 		return &http.Client{
 			Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
 			Timeout:   timeout,
