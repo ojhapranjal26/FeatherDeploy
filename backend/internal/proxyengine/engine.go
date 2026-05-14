@@ -25,6 +25,7 @@ type Route struct {
 	TargetNode string `json:"target_node"`
 	TargetIP   string `json:"target_ip"` // fallback or initial IP
 	TargetPort int    `json:"target_port"`
+	HostPort   int    `json:"host_port"`   // Direct Podman host port
 	Mode       string `json:"mode"`
 	Version    int64  `json:"version"`
 }
@@ -292,13 +293,17 @@ func buildCaddyRoutes(routes []Route, nodes map[string]NodeState, myNodeID strin
 	var out []map[string]any
 
 	for _, r := range routes {
-		var dialAddr string
-
-		if r.TargetNode == myNodeID {
-			// Local routing
-			dialAddr = fmt.Sprintf("127.0.0.1:%d", r.TargetPort)
+		var useTLS bool
+		if r.TargetNode == myNodeID || (myNodeID == "main" && (r.TargetNode == "" || r.TargetNode == "main")) {
+			// Local routing: talk directly to Podman host port if available, otherwise cluster port
+			port := r.TargetPort
+			if r.HostPort > 0 {
+				port = r.HostPort
+			}
+			dialAddr = fmt.Sprintf("127.0.0.1:%d", port)
+			useTLS = false
 		} else {
-			// Cross-node routing: dial the other node via mTLS public ip/tunnel proxy
+			// Cross-node routing
 			var targetIP string
 			ns, healthy := nodes[r.TargetNode]
 			if !healthy {
@@ -312,19 +317,23 @@ func buildCaddyRoutes(routes []Route, nodes map[string]NodeState, myNodeID strin
 				targetIP = ns.IP
 			}
 
-			// If we are on the brain and the target node is connected via tunnel,
-			// use the tunnel proxy for port 443. This is MUCH more reliable than
-			// hitting the public IP.
+			// If we are on the brain, prioritize routing through the tunnel directly to the worker's application port.
+			// This is much more reliable as it bypasses the worker's Caddy and its potential certificate issues.
 			if myNodeID == "main" && netdaemon.GlobalTunnel != nil {
-				if proxyAddr := netdaemon.GlobalTunnel.GetNodeProxyAddr(r.TargetNode, 443); proxyAddr != "" {
+				if localPort := netdaemon.GlobalTunnel.EnsureServiceProxy(r.TargetNode, r.TargetPort); localPort > 0 {
+					dialAddr = fmt.Sprintf("127.0.0.1:%d", localPort)
+					useTLS = false // Tunnel is already secure, backend (fdnet/container) speaks HTTP
+				} else if proxyAddr := netdaemon.GlobalTunnel.GetNodeProxyAddr(r.TargetNode, 443); proxyAddr != "" {
 					dialAddr = proxyAddr
-				} else if proxyAddr := netdaemon.GlobalTunnel.GetNodeProxyAddr(r.TargetNode, 7443); proxyAddr != "" {
-					dialAddr = proxyAddr
+					useTLS = true
 				} else {
 					dialAddr = fmt.Sprintf("%s:443", targetIP)
+					useTLS = true
 				}
 			} else {
+				// Fallback to mesh/public IP + TLS
 				dialAddr = fmt.Sprintf("%s:443", targetIP)
+				useTLS = true
 			}
 		}
 
@@ -353,8 +362,8 @@ func buildCaddyRoutes(routes []Route, nodes map[string]NodeState, myNodeID strin
 			"terminal": true,
 		}
 
-		// If cross-node, configure TLS for the transport
-		if r.TargetNode != myNodeID {
+		// If TLS is required for this hop, configure the transport
+		if useTLS {
 			route["handle"].([]map[string]any)[0]["transport"] = map[string]any{
 				"protocol": "http",
 				"tls": map[string]any{

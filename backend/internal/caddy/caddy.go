@@ -148,12 +148,14 @@ func publishRoutes(db *sql.DB) {
 
 	for rows.Next() {
 		var domain string
-		var tlsInt, hostPort int
+		var tlsInt, hostPort, hostPortVal int
 		var projectID int64
 		var svcName, targetNode string
 		if rows.Scan(&domain, &tlsInt, &hostPort, &projectID, &svcName, &targetNode) != nil {
 			continue
 		}
+		// Query host_port explicitly to ensure we have it for local routing bypass
+		db.QueryRow("SELECT host_port FROM services WHERE project_id=? AND name=?", projectID, svcName).Scan(&hostPortVal)
 		domain = strings.TrimSpace(strings.ToLower(domain))
 		if domain == "" || hostPort <= 0 {
 			continue
@@ -168,7 +170,8 @@ func publishRoutes(db *sql.DB) {
 			"service":     svcName,
 			"target_node": targetNode,
 			"target_ip":   "", // resolved dynamically by proxyengine via node heartbeat
-			"target_port": hostPort,
+			"target_port": hostPort, // This is COALESCE(cluster_port, host_port)
+			"host_port":   hostPortVal, // Explicitly the Podman host port
 			"mode":        "proxy",
 			"version":     version,
 		}
