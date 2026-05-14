@@ -293,6 +293,7 @@ func buildCaddyRoutes(routes []Route, nodes map[string]NodeState, myNodeID strin
 	var out []map[string]any
 
 	for _, r := range routes {
+		var dialAddr string
 		var useTLS bool
 		if r.TargetNode == myNodeID || (myNodeID == "main" && (r.TargetNode == "" || r.TargetNode == "main")) {
 			// Local routing: talk directly to Podman host port if available, otherwise cluster port

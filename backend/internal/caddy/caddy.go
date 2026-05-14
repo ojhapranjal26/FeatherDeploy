@@ -123,7 +123,8 @@ func publishRoutes(db *sql.DB) {
 		SELECT d.domain, d.tls,
 		       COALESCE(s.cluster_port, s.host_port) AS proxy_port,
 		       s.project_id, s.name AS svc_name,
-		       COALESCE(s.node_id, 'main') AS node_id
+		       COALESCE(s.node_id, 'main') AS node_id,
+		       s.host_port
 		FROM   domains d
 		JOIN   services s ON s.id = d.service_id
 		WHERE  s.host_port > 0
@@ -151,11 +152,9 @@ func publishRoutes(db *sql.DB) {
 		var tlsInt, hostPort, hostPortVal int
 		var projectID int64
 		var svcName, targetNode string
-		if rows.Scan(&domain, &tlsInt, &hostPort, &projectID, &svcName, &targetNode) != nil {
+		if rows.Scan(&domain, &tlsInt, &hostPort, &projectID, &svcName, &targetNode, &hostPortVal) != nil {
 			continue
 		}
-		// Query host_port explicitly to ensure we have it for local routing bypass
-		db.QueryRow("SELECT host_port FROM services WHERE project_id=? AND name=?", projectID, svcName).Scan(&hostPortVal)
 		domain = strings.TrimSpace(strings.ToLower(domain))
 		if domain == "" || hostPort <= 0 {
 			continue
