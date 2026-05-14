@@ -3764,6 +3764,8 @@ func resolveNodeTunnel(nodeID string, dbPort int) (ip string, port int, viaTunne
 	// after a brain restart. This prevents "node unreachable" errors during 
 	// the window where nodes are still reconnecting.
 	deadline := time.Now().Add(15 * time.Second)
+	slog.Info("[deploy] resolveNodeTunnel: searching for node tunnel", "node", nodeID, "deadline", "15s")
+	
 	for {
 		viaTunnel = false
 		if netdaemon.GlobalTunnel != nil {
@@ -3772,15 +3774,18 @@ func resolveNodeTunnel(nodeID string, dbPort int) (ip string, port int, viaTunne
 			
 			// 1. Try to find an existing tunnel proxy for port 8080 (internal API)
 			proxyAddr := netdaemon.GlobalTunnel.GetNodeProxyAddr(nodeID, 8080)
+			if proxyAddr != "" { slog.Info("[deploy] resolveNodeTunnel: found tunnel proxy via 8080", "node", nodeID, "proxy", proxyAddr) }
 			
 			// 2. Fallback: try port 7443 (default mTLS port)
 			if proxyAddr == "" {
 				proxyAddr = netdaemon.GlobalTunnel.GetNodeProxyAddr(nodeID, 7443)
+				if proxyAddr != "" { slog.Info("[deploy] resolveNodeTunnel: found tunnel proxy via 7443", "node", nodeID, "proxy", proxyAddr) }
 			}
 
 			// 3. Last resort: try port 443 (ingress port)
 			if proxyAddr == "" {
 				proxyAddr = netdaemon.GlobalTunnel.GetNodeProxyAddr(nodeID, 443)
+				if proxyAddr != "" { slog.Info("[deploy] resolveNodeTunnel: found tunnel proxy via 443", "node", nodeID, "proxy", proxyAddr) }
 			}
 
 			if proxyAddr != "" {
@@ -3794,6 +3799,7 @@ func resolveNodeTunnel(nodeID string, dbPort int) (ip string, port int, viaTunne
 		}
 
 		if time.Now().After(deadline) {
+			slog.Warn("[deploy] resolveNodeTunnel: failed to find active tunnel session", "node", nodeID)
 			break
 		}
 		time.Sleep(2 * time.Second)
