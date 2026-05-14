@@ -96,8 +96,14 @@ func (h *NodeHandler) EnsureLocalPKI() error {
 	}
 
 	confDir := "/etc/featherdeploy"
+	if os.Getuid() != 0 {
+		confDir = "/var/lib/featherdeploy/config"
+	}
+
 	if err := os.MkdirAll(confDir, 0700); err != nil {
-		return fmt.Errorf("create config dir: %w", err)
+		// Fallback if /etc is blocked
+		confDir = "/var/lib/featherdeploy/config"
+		_ = os.MkdirAll(confDir, 0700)
 	}
 
 	caFile := confDir + "/ca.crt"
