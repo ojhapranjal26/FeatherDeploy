@@ -3752,6 +3752,9 @@ func resolveNodeTunnel(nodeID string, dbPort int) (ip string, port int, viaTunne
 		return
 	}
 	proxyAddr := netdaemon.GlobalTunnel.GetNodeProxyAddr(nodeID, dbPort)
+	if proxyAddr == "" && dbPort != 443 {
+		proxyAddr = netdaemon.GlobalTunnel.GetNodeProxyAddr(nodeID, 443)
+	}
 	if proxyAddr == "" && dbPort != 7443 {
 		proxyAddr = netdaemon.GlobalTunnel.GetNodeProxyAddr(nodeID, 7443)
 	}

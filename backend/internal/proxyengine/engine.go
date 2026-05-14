@@ -14,6 +14,8 @@ import (
 
 	"go.etcd.io/etcd/api/v3/mvccpb"
 	clientv3 "go.etcd.io/etcd/client/v3"
+
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/netdaemon"
 )
 
 // Route defines the desired state of a routing rule in Etcd.
@@ -310,7 +312,20 @@ func buildCaddyRoutes(routes []Route, nodes map[string]NodeState, myNodeID strin
 				targetIP = ns.IP
 			}
 
-			dialAddr = fmt.Sprintf("%s:443", targetIP)
+			// If we are on the brain and the target node is connected via tunnel,
+			// use the tunnel proxy for port 443. This is MUCH more reliable than
+			// hitting the public IP.
+			if myNodeID == "main" && netdaemon.GlobalTunnel != nil {
+				if proxyAddr := netdaemon.GlobalTunnel.GetNodeProxyAddr(r.TargetNode, 443); proxyAddr != "" {
+					dialAddr = proxyAddr
+				} else if proxyAddr := netdaemon.GlobalTunnel.GetNodeProxyAddr(r.TargetNode, 7443); proxyAddr != "" {
+					dialAddr = proxyAddr
+				} else {
+					dialAddr = fmt.Sprintf("%s:443", targetIP)
+				}
+			} else {
+				dialAddr = fmt.Sprintf("%s:443", targetIP)
+			}
 		}
 
 		route := map[string]any{
@@ -318,6 +333,11 @@ func buildCaddyRoutes(routes []Route, nodes map[string]NodeState, myNodeID strin
 			"match": []map[string]any{
 				{
 					"host": []string{r.Domain},
+					"not": []map[string]any{
+						{
+							"path": []string{"/.well-known/acme-challenge/*"},
+						},
+					},
 				},
 			},
 			"handle": []map[string]any{

@@ -211,7 +211,8 @@ func (h *NodeHandler) List(w http.ResponseWriter, r *http.Request) {
 		h.db.QueryRowContext(r.Context(), `SELECT hostname, os_info, node_id, node_type, assigned_domains FROM nodes WHERE id=?`, n.ID).Scan(&n.Hostname, &n.OSInfo, &n.NodeID, &n.NodeType, &assignedDomainsJSON)
 		n.IsBrain = n.NodeType == model.NodeTypeBrain
 		if n.NodeID != "" && netdaemon.GlobalTunnel != nil {
-			n.TunnelConnected = netdaemon.GlobalTunnel.GetNodeProxyAddr(n.NodeID, 7443) != ""
+			n.TunnelConnected = netdaemon.GlobalTunnel.GetNodeProxyAddr(n.NodeID, 443) != "" || 
+				netdaemon.GlobalTunnel.GetNodeProxyAddr(n.NodeID, 7443) != ""
 		}
 		if assignedDomainsJSON != "" && assignedDomainsJSON != "[]" {
 			json.Unmarshal([]byte(assignedDomainsJSON), &n.AssignedDomains)
@@ -237,8 +238,8 @@ func (h *NodeHandler) Add(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The port used for the internal featherdeploy-node API.
-	port := 7443
+	// The port used for the internal featherdeploy-node API (via Caddy or direct).
+	port := 443
 
 	// Validate node_type; default to worker if not specified
 	nodeType := req.NodeType
@@ -409,8 +410,11 @@ func (h *NodeHandler) NodeLogs(w http.ResponseWriter, r *http.Request) {
 		ip := ""
 		tunnelPort := port
 		if netdaemon.GlobalTunnel != nil {
-			proxyAddr := netdaemon.GlobalTunnel.GetNodeProxyAddr(dbNodeID, 7443)
-			if proxyAddr == "" && port != 7443 {
+			proxyAddr := netdaemon.GlobalTunnel.GetNodeProxyAddr(dbNodeID, 443)
+			if proxyAddr == "" {
+				proxyAddr = netdaemon.GlobalTunnel.GetNodeProxyAddr(dbNodeID, 7443)
+			}
+			if proxyAddr == "" && port != 7443 && port != 443 {
 				proxyAddr = netdaemon.GlobalTunnel.GetNodeProxyAddr(dbNodeID, port)
 			}
 			if proxyAddr != "" {
@@ -697,7 +701,7 @@ func (h *NodeHandler) CompleteJoin(w http.ResponseWriter, r *http.Request) {
 	_, err = h.db.ExecContext(r.Context(),
 		`UPDATE nodes SET status='connected', ip=?, hostname=?, os_info=?, node_id=?, node_cert_pem=?,
 		 rqlite_addr=?, join_token=NULL, token_expires_at=NULL, last_seen=datetime('now'),
-		 port=7443, tunnel_token=?, updated_at=datetime('now') WHERE id=?`,
+		 port=443, tunnel_token=?, updated_at=datetime('now') WHERE id=?`,
 		nodeIP, payload.Hostname, payload.OSInfo, nodeID, nodeCert.CertPEM, payload.RqliteAddr, tunnelToken, node.ID,
 	)
 	if err != nil {

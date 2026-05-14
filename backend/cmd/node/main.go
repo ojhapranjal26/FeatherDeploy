@@ -337,7 +337,21 @@ func runServe() {
 		// Start real-time heartbeat in etcd
 		go func() {
 			slog.Info("etcd: registering node heartbeat", "id", myID)
-			_, err := etcdClient.RegisterNode(context.Background(), myID, localIP(), 443, 15)
+			
+			// Prioritize WireGuard mesh IP if available
+			regIP := localIP()
+			if iface, err := net.InterfaceByName("wg0"); err == nil {
+				addrs, _ := iface.Addrs()
+				for _, addr := range addrs {
+					if ipNet, ok := addr.(*net.IPNet); ok && ipNet.IP.To4() != nil {
+						regIP = ipNet.IP.String()
+						slog.Info("etcd: using WireGuard IP for registration", "ip", regIP)
+						break
+					}
+				}
+			}
+
+			_, err := etcdClient.RegisterNode(context.Background(), myID, regIP, 443, 15)
 			if err != nil {
 				slog.Error("etcd: node registration failed", "err", err)
 			}
