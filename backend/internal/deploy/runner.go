@@ -3760,42 +3760,46 @@ func resolveNodeTunnel(nodeID string, dbPort int) (ip string, port int, viaTunne
 		return "127.0.0.1", dbPort, false
 	}
 
-	viaTunnel = false
-	if netdaemon.GlobalTunnel == nil {
-		return "", dbPort, false
-	}
+	// We allow up to 15 seconds for a node to re-establish its tunnel session
+	// after a brain restart. This prevents "node unreachable" errors during 
+	// the window where nodes are still reconnecting.
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		viaTunnel = false
+		if netdaemon.GlobalTunnel != nil {
+			// For worker nodes, we exclusively use the tunnel. 
+			// We prioritize port 8080 (the actual Node API port) and 7443/443.
+			
+			// 1. Try to find an existing tunnel proxy for port 8080 (internal API)
+			proxyAddr := netdaemon.GlobalTunnel.GetNodeProxyAddr(nodeID, 8080)
+			
+			// 2. Fallback: try port 7443 (default mTLS port)
+			if proxyAddr == "" {
+				proxyAddr = netdaemon.GlobalTunnel.GetNodeProxyAddr(nodeID, 7443)
+			}
 
-	// For worker nodes, we exclusively use the tunnel. 
-	// We prioritize port 443 (standard HTTPS/mTLS) as requested by the user.
-	
-	// 1. Try to find an existing tunnel proxy for port 443
-	proxyAddr := netdaemon.GlobalTunnel.GetNodeProxyAddr(nodeID, 443)
-	
-	// 2. Fallback: try the requested dbPort (it might be 443 already)
-	if proxyAddr == "" && dbPort != 443 {
-		proxyAddr = netdaemon.GlobalTunnel.GetNodeProxyAddr(nodeID, dbPort)
-	}
+			// 3. Last resort: try port 443 (ingress port)
+			if proxyAddr == "" {
+				proxyAddr = netdaemon.GlobalTunnel.GetNodeProxyAddr(nodeID, 443)
+			}
 
-	// 3. Last resort: try port 7443
-	if proxyAddr == "" && dbPort != 7443 {
-		proxyAddr = netdaemon.GlobalTunnel.GetNodeProxyAddr(nodeID, 7443)
-	}
-
-	if proxyAddr == "" {
-		// If no proxy exists for any management port, the node is effectively unreachable
-		// because public ports are blocked on the VPS.
-		return "", dbPort, false
-	}
-
-	parts := strings.Split(proxyAddr, ":")
-	if len(parts) == 2 {
-		if p, err := strconv.Atoi(parts[1]); err == nil {
-			port = p
+			if proxyAddr != "" {
+				parts := strings.Split(proxyAddr, ":")
+				if len(parts) == 2 {
+					if p, err := strconv.Atoi(parts[1]); err == nil {
+						return "127.0.0.1", p, true
+					}
+				}
+			}
 		}
+
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(2 * time.Second)
 	}
-	ip = "127.0.0.1"
-	viaTunnel = true
-	return
+
+	return "", dbPort, false
 }
 
 // nodeHTTPClient builds the appropriate HTTP client for talking to a node.
