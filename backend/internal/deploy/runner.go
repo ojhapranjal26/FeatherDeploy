@@ -645,8 +645,13 @@ func Run(ctx context.Context, db *sql.DB, jwtSecret string, depID, svcID, userID
 		log.add("[env] injected env vars into build context")
 	}
 
-	// ── 6a. Dispatch to worker node if needed ─────────────────────────────────
+	// ── 6a. Dispatch to worker node ───────────────────────────────────────────
 	if actualNodeID != "main" && actualNodeID != myID {
+		// Optimization: If the worker node is connected and healthy, we can choose to
+		// either transfer a pre-built artifact or let the node clone directly.
+		// For now, we use artifact transfer by default for maximum reliability across
+		// different node environments, but we prioritize the tunnel for the transfer.
+		
 		log.add("[orchestrator] packaging fully resolved source tree for transfer to %s", actualNodeID)
 		
 		tarPath := filepath.Join(buildTmpDir(), fmt.Sprintf("artifact-transfer-%d.tar.gz", depID))
@@ -659,8 +664,13 @@ func Run(ctx context.Context, db *sql.DB, jwtSecret string, depID, svcID, userID
 
 		destPath := fmt.Sprintf("/var/lib/featherdeploy/artifacts/svc-%d/dep-%d.tar.gz", svcID, depID)
 		if err := SendArtifactToNode(db, actualNodeID, depID, tarPath, destPath); err != nil {
-			log.add("ERROR: artifact transfer failed: %v", err)
-			markFailed(db, depID, svcID, log.text())
+			// Fallback: If artifact transfer fails (e.g. timeout), tell the node to try cloning directly.
+			log.add("[orchestrator] artifact transfer failed, instructing node to clone directly from git...")
+			if err := dispatchToNode(db, actualNodeID, depID, svcID, userID, jwtSecret); err != nil {
+				log.add("ERROR: dispatch failed: %v", err)
+				markFailed(db, depID, svcID, log.text())
+				return
+			}
 			return
 		}
 
@@ -3888,6 +3898,12 @@ func SendArtifactToNode(db *sql.DB, nodeID string, depID int64, tarballPath stri
 
 	// Artifact transfers can be large; use a 5-minute timeout.
 	client, scheme := nodeHTTPClient(viaTunnel, 5*time.Minute)
+
+	chunker := &transfer.Chunker{FilePath: tarballPath, ChunkSize: transfer.DefaultChunkSize}
+	totalChunks, _, err := chunker.ChunkCount()
+	if err != nil {
+		return err
+	}
 
 	for i := 0; i < totalChunks; i++ {
 		data, err := chunker.ReadChunk(i)
