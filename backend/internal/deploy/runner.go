@@ -3745,22 +3745,38 @@ func extractTarGz(archivePath, destDir string, log *logBuf) error {
 // DB (the DB port can be 443 from old registrations). We try the DB port first,
 // then fall back to 7443.
 func resolveNodeTunnel(nodeID string, dbPort int) (ip string, port int, viaTunnel bool) {
-	ip = ""
-	port = dbPort
+	// If it's the brain node, talk to localhost directly (bypassing tunnel)
+	if nodeID == "main" || nodeID == "" {
+		return "127.0.0.1", dbPort, false
+	}
+
 	viaTunnel = false
 	if netdaemon.GlobalTunnel == nil {
-		return
+		return "", dbPort, false
 	}
-	proxyAddr := netdaemon.GlobalTunnel.GetNodeProxyAddr(nodeID, dbPort)
+
+	// For worker nodes, we exclusively use the tunnel. 
+	// We prioritize port 443 (standard HTTPS/mTLS) as requested by the user.
+	
+	// 1. Try to find an existing tunnel proxy for port 443
+	proxyAddr := netdaemon.GlobalTunnel.GetNodeProxyAddr(nodeID, 443)
+	
+	// 2. Fallback: try the requested dbPort (it might be 443 already)
 	if proxyAddr == "" && dbPort != 443 {
-		proxyAddr = netdaemon.GlobalTunnel.GetNodeProxyAddr(nodeID, 443)
+		proxyAddr = netdaemon.GlobalTunnel.GetNodeProxyAddr(nodeID, dbPort)
 	}
+
+	// 3. Last resort: try port 7443
 	if proxyAddr == "" && dbPort != 7443 {
 		proxyAddr = netdaemon.GlobalTunnel.GetNodeProxyAddr(nodeID, 7443)
 	}
+
 	if proxyAddr == "" {
-		return
+		// If no proxy exists for any management port, the node is effectively unreachable
+		// because public ports are blocked on the VPS.
+		return "", dbPort, false
 	}
+
 	parts := strings.Split(proxyAddr, ":")
 	if len(parts) == 2 {
 		if p, err := strconv.Atoi(parts[1]); err == nil {
@@ -3814,6 +3830,9 @@ func dispatchToNode(db *sql.DB, nodeID string, depID, svcID, userID int64, secre
 		ip = tunnelIP
 		port = tunnelPort
 		viaTunnel = isTunnel
+	} else {
+		// If tunnel is down, worker is unreachable due to restricted VPS ports.
+		return fmt.Errorf("node %q is unreachable (tunnel disconnected and public ports blocked)", nodeID)
 	}
 	
 	// Prepare payload
@@ -3863,15 +3882,12 @@ func SendArtifactToNode(db *sql.DB, nodeID string, depID int64, tarballPath stri
 		ip = tunnelIP
 		port = tunnelPort
 		viaTunnel = isTunnel
+	} else {
+		return fmt.Errorf("node %q unreachable (tunnel disconnected)", nodeID)
 	}
 
-	chunker := &transfer.Chunker{FilePath: tarballPath, ChunkSize: transfer.DefaultChunkSize}
-	totalChunks, _, err := chunker.ChunkCount()
-	if err != nil {
-		return err
-	}
-
-	client, scheme := nodeHTTPClient(viaTunnel, 30*time.Second)
+	// Artifact transfers can be large; use a 5-minute timeout.
+	client, scheme := nodeHTTPClient(viaTunnel, 5*time.Minute)
 
 	for i := 0; i < totalChunks; i++ {
 		data, err := chunker.ReadChunk(i)
@@ -3907,11 +3923,14 @@ func stopContainerOnNode(db *sql.DB, nodeID, containerID string) error {
 		return fmt.Errorf("node %q not found: %w", nodeID, err)
 	}
 
-	if tunnelIP, tunnelPort, _ := resolveNodeTunnel(nodeID, port); tunnelIP != "" {
+	viaTunnel := false
+	if tunnelIP, tunnelPort, isTunnel := resolveNodeTunnel(nodeID, port); tunnelIP != "" {
 		ip = tunnelIP
 		port = tunnelPort
+		viaTunnel = isTunnel
+	} else {
+		return fmt.Errorf("node %q unreachable", nodeID)
 	}
-	viaTunnel := netdaemon.GlobalTunnel != nil && ip == "127.0.0.1"
 
 	payload := map[string]any{"container_id": containerID}
 	body, _ := json.Marshal(payload)
