@@ -8,7 +8,6 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/heartbeat"
 )
