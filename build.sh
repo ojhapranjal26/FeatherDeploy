@@ -66,9 +66,6 @@ if is_installed && [ "$MODE" != "join" ]; then
     MODE="update"
   fi
 fi
-echo "  Mode: $MODE" ; echo ""
-ARCH=$(detect_arch)
-
 # -- Helper: detect system architecture
 detect_arch() {
   local machine
@@ -83,6 +80,9 @@ detect_arch() {
       ;;
   esac
 }
+
+echo "  Mode: $MODE" ; echo ""
+ARCH=$(detect_arch)
 
 run_as_user_session() {
   local user="$1"
