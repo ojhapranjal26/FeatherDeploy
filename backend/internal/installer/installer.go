@@ -260,6 +260,7 @@ SERVER_IP=%s
 	fmt.Println("  ✓ featherdeploy service enabled and started")
 
 	// ── Step 10: Reload or start Nginx ───────────────────────────────────────
+	optimizeNginxConfig()
 	if _, err := exec.LookPath("systemctl"); err == nil {
 		if runSilent("systemctl", "is-active", "--quiet", "nginx") == nil {
 			runSilent("systemctl", "reload", "nginx")
@@ -1750,6 +1751,26 @@ func writeNginxConfig(domain string) {
 	_ = os.Symlink(nginxConf, nginxEnabled)
 
 	fmt.Printf("  ✓ wrote %s and enabled via %s\n", nginxConf, nginxEnabled)
+}
+
+func optimizeNginxConfig() {
+	path := "/etc/nginx/nginx.conf"
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	content := string(data)
+	// If it's already there, make sure it's at least 64 and uncommented
+	if strings.Contains(content, "server_names_hash_bucket_size") {
+		// Simple replacement to ensure it's active
+		content = strings.ReplaceAll(content, "# server_names_hash_bucket_size 64;", "server_names_hash_bucket_size 64;")
+	} else {
+		// Insert it into the http block
+		content = strings.Replace(content, "http {", "http {\n    server_names_hash_bucket_size 64;", 1)
+	}
+
+	_ = os.WriteFile(path, []byte(content), 0644)
+	fmt.Println("  ✓ optimized nginx.conf")
 }
 
 func setupNginxSudoers(svcUser string) {
