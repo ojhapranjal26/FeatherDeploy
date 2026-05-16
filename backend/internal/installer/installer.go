@@ -2012,7 +2012,8 @@ func RunUpdate() {
 	// (No WireGuard setup required: cluster transport uses persistent tunnel)
 
 	// ── Reload Nginx ──────────────────────────────────────────────────────────
-	if runSilent("systemctl", "is-active", "--quiet", "nginx") == nil {
+	optimizeNginxConfig()
+	if _, err := exec.LookPath("systemctl"); err == nil {
 		domain := readEnvVar(envFile, "ORIGIN")
 		domain = strings.TrimPrefix(domain, "https://")
 		domain = strings.TrimPrefix(domain, "http://")
@@ -2021,8 +2022,14 @@ func RunUpdate() {
 		}
 		setupNginxSudoers(svcUser)
 		writeSudoersFile(svcUser)
-		runSilent("systemctl", "reload", "nginx")
-		fmt.Println("  ✓ Nginx reloaded")
+
+		if runSilent("systemctl", "is-active", "--quiet", "nginx") == nil {
+			runSilent("systemctl", "reload", "nginx")
+		} else {
+			mustRun("systemctl", "enable", "nginx")
+			mustRun("systemctl", "start", "nginx")
+		}
+		fmt.Println("  ✓ Nginx reloaded/started")
 	}
 
 	// ── Protect internal port ranges ──────────────────────────────────────────
