@@ -14,7 +14,7 @@ import (
 
 // AppVersion is the version of the currently running binary.
 // Bump this whenever VERSION.json on the main branch is updated.
-const AppVersion = "1.1.0"
+const AppVersion = "1.2.0"
 
 const versionManifestURL = "https://raw.githubusercontent.com/ojhapranjal26/FeatherDeploy/main/VERSION.json"
 

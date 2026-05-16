@@ -3,7 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   Server, Plus, Trash2, Copy, Check, Loader2, RefreshCw,
   CheckCircle2, Clock, WifiOff, AlertCircle, Crown, Terminal,
-  Cpu, MemoryStick, HardDrive, Globe, X
+  Cpu, MemoryStick, HardDrive, Globe, X, Activity
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -17,10 +17,11 @@ import {
   DialogTitle,
   DialogTrigger,
 } from '@/components/ui/dialog'
+import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import { toast } from 'sonner'
 import { useAuth } from '@/context/AuthContext'
-import { nodesApi, type Node, type AddNodeResponse } from '@/api/nodes'
+import { nodesApi, clusterApi, type Node, type AddNodeResponse, type ClusterBrain } from '@/api/nodes'
 import { useTimezone } from '@/context/TimezoneContext'
 import { formatDateFull } from '@/lib/dateFormat'
 
@@ -264,6 +265,13 @@ export function NodesPage() {
     refetchInterval: 10_000, // match heartbeat interval
   })
 
+  const { data: brainStats } = useQuery({
+    queryKey: ['cluster-brain'],
+    queryFn: clusterApi.getBrain,
+    enabled: canManage,
+    refetchInterval: 10_000,
+  })
+
   // ── Add node dialog ────────────────────────────────────────────────────────
   const [addOpen, setAddOpen] = useState(false)
   const [name, setName] = useState('')
@@ -439,7 +447,44 @@ export function NodesPage() {
           <p className="text-sm">Add a node to start building a distributed cluster.</p>
         </div>
       ) : (
-        <div className="rounded-xl border overflow-hidden">
+        <div className="space-y-4">
+          {brainStats && !nodes?.some(n => n.node_id === brainStats.BrainID || n.is_brain) && (
+            <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 overflow-hidden">
+               <div className="bg-amber-500/10 px-4 py-2 border-b border-amber-500/20 flex items-center justify-between">
+                  <div className="flex items-center gap-2 text-amber-700 dark:text-amber-400 font-medium">
+                    <Crown className="h-4 w-4" />
+                    Main Brain Node (Local)
+                  </div>
+                  <Badge variant="outline" className="bg-emerald-500/10 text-emerald-600 border-emerald-500/20">Active</Badge>
+               </div>
+               <div className="p-4 grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div className="space-y-1">
+                    <p className="text-[10px] text-muted-foreground uppercase">Address</p>
+                    <p className="font-mono text-sm">{brainStats.BrainAddr}</p>
+                  </div>
+                  <div className="space-y-1">
+                    <p className="text-[10px] text-muted-foreground uppercase">Resources</p>
+                    <div className="flex flex-col gap-1">
+                      <div className="flex items-center gap-1.5">
+                        <Cpu className="h-3 w-3 text-muted-foreground" />
+                        <MiniBar value={brainStats.CPU} color="bg-amber-500" />
+                        <span className="text-xs">{brainStats.CPU}%</span>
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <MemoryStick className="h-3 w-3 text-muted-foreground" />
+                        <MiniBar value={pct(brainStats.RAMUsed, brainStats.RAMTotal)} color="bg-amber-500" />
+                        <span className="text-xs">{fmtBytes(brainStats.RAMUsed)}</span>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex items-center justify-end">
+                     <Badge variant="outline" className="text-[10px]">SYSTEM CORE</Badge>
+                  </div>
+               </div>
+            </div>
+          )}
+
+          <div className="rounded-xl border overflow-hidden">
           <table className="w-full text-sm">
             <thead className="bg-muted/50">
               <tr className="border-b">
@@ -538,6 +583,7 @@ export function NodesPage() {
             </tbody>
           </table>
         </div>
+      </div>
       )}
 
       {/* Info callout */}
