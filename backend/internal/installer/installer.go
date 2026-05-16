@@ -281,12 +281,37 @@ func checkPortsOpen(ports []int) error {
 	for _, p := range ports {
 		ln, err := net.Listen("tcp", fmt.Sprintf(":%d", p))
 		if err != nil {
-			return fmt.Errorf("port %d is not available: %v. Please ensure it is open and not in use.", p, err)
+			fmt.Printf("  ! port %d is in use, attempting to clear it...\n", p)
+			clearPort(p)
+			// Try again
+			ln, err = net.Listen("tcp", fmt.Sprintf(":%d", p))
+			if err != nil {
+				return fmt.Errorf("port %d is not available: %v. Please ensure it is open and not in use.", p, err)
+			}
 		}
 		ln.Close()
 		fmt.Printf("  ✓ port %d is available\n", p)
 	}
 	return nil
+}
+
+func clearPort(port int) {
+	// 1. Try to identify the process using lsof
+	out, _ := exec.Command("lsof", "-t", "-i", fmt.Sprintf(":%d", port)).Output()
+	pid := strings.TrimSpace(string(out))
+	if pid != "" {
+		fmt.Printf("    - found PID %s using port %d, killing it...\n", pid, port)
+		// Try graceful kill first, then -9
+		exec.Command("kill", pid).Run()
+		time.Sleep(500 * time.Millisecond)
+		exec.Command("kill", "-9", pid).Run()
+	}
+
+	// 2. Also try fuser as a backup
+	exec.Command("fuser", "-k", "-n", "tcp", fmt.Sprintf("%d", port)).Run()
+	
+	// Give it a moment to release
+	time.Sleep(1 * time.Second)
 }
 
 func handshakeLeader(leaderIP string) error {
@@ -1263,11 +1288,11 @@ type pkgCmd struct {
 var pkgManagers = map[string]pkgCmd{
 	"apt-get": {
 		update: []string{"apt-get", "update", "-y"},
-		install: []string{"apt-get", "install", "-y", "podman", "crun", "nginx", "certbot", "python3-certbot-nginx", "netavark", "aardvark-dns", "slirp4netns", "passt", "containernetworking-plugins", "wireguard", "wireguard-tools"},
+		install: []string{"apt-get", "install", "-y", "podman", "crun", "nginx", "certbot", "python3-certbot-nginx", "netavark", "aardvark-dns", "slirp4netns", "passt", "containernetworking-plugins", "wireguard", "wireguard-tools", "psmisc", "lsof"},
 	},
 	"dnf": {
 		update: []string{"dnf", "check-update"},
-		install: []string{"dnf", "install", "-y", "podman", "crun", "nginx", "certbot", "python3-certbot-nginx", "netavark", "aardvark-dns", "slirp4netns", "passt", "containernetworking-plugins", "wireguard-tools"},
+		install: []string{"dnf", "install", "-y", "podman", "crun", "nginx", "certbot", "python3-certbot-nginx", "netavark", "aardvark-dns", "slirp4netns", "passt", "containernetworking-plugins", "wireguard-tools", "psmisc", "lsof"},
 	},
 	"yum": {
 		update: nil,
