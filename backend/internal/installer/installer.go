@@ -269,6 +269,18 @@ SERVER_IP=%s
 			mustRun("systemctl", "start", "nginx")
 		}
 		fmt.Println("  ✓ Nginx reloaded")
+
+		// ── Step 10b: Provision SSL for main domain ──────────────────────────
+		if _, err := exec.LookPath("certbot"); err == nil {
+			fmt.Printf("\n── Provisioning SSL for %s ────────────────────────────\n", domain)
+			email := "admin@" + domain
+			cmd := exec.Command("sudo", "-n", "certbot", "--nginx", "-d", domain, "--non-interactive", "--agree-tos", "-m", email)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				fmt.Printf("  ! Certbot failed: %s\n", string(out))
+			} else {
+				fmt.Println("  ✓ SSL provisioned successfully")
+			}
+		}
 	}
 
 	// ── Step 11: Protect internal port ranges ────────────────────────────────
@@ -2030,6 +2042,20 @@ func RunUpdate() {
 			mustRun("systemctl", "start", "nginx")
 		}
 		fmt.Println("  ✓ Nginx reloaded/started")
+
+		// Provision SSL if missing
+		if _, err := exec.LookPath("certbot"); err == nil {
+			if domain != "" {
+				fmt.Printf("\n── Provisioning SSL for %s ────────────────────────────\n", domain)
+				email := "admin@" + domain
+				cmd := exec.Command("sudo", "-n", "certbot", "--nginx", "-d", domain, "--non-interactive", "--agree-tos", "-m", email)
+				if out, err := cmd.CombinedOutput(); err != nil {
+					fmt.Printf("  ! Certbot failed: %s\n", string(out))
+				} else {
+					fmt.Println("  ✓ SSL provisioned successfully")
+				}
+			}
+		}
 	}
 
 	// ── Protect internal port ranges ──────────────────────────────────────────
