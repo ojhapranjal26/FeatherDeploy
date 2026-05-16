@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"log/slog"
 	"net"
 	"net/http"
@@ -11,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ojhapranjal26/featherdeploy/backend/internal/nginx"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/model"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/nginx"
 	v "github.com/ojhapranjal26/featherdeploy/backend/internal/validator"
 )
 

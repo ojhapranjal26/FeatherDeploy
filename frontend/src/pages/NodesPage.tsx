@@ -3,7 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   Server, Plus, Trash2, Copy, Check, Loader2, RefreshCw,
   CheckCircle2, Clock, WifiOff, AlertCircle, Crown, Terminal,
-  Cpu, MemoryStick, HardDrive, Key, Globe, X
+  Cpu, MemoryStick, HardDrive, Globe, X
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -20,7 +20,7 @@ import {
 import { Skeleton } from '@/components/ui/skeleton'
 import { toast } from 'sonner'
 import { useAuth } from '@/context/AuthContext'
-import { nodesApi, clusterApi, type Node, type AddNodeResponse } from '@/api/nodes'
+import { nodesApi, type Node, type AddNodeResponse } from '@/api/nodes'
 import { useTimezone } from '@/context/TimezoneContext'
 import { formatDateFull } from '@/lib/dateFormat'
 
@@ -131,11 +131,11 @@ function SSHCommandDialog({ node }: { node: Node }) {
 
   return (
     <Dialog open={open} onOpenChange={(v) => { setOpen(v); if (v) fetchCmd() }}>
-      <DialogTrigger asChild>
+      <DialogTrigger render={
         <Button variant="ghost" size="icon" className="h-8 w-8" title="SSH into node">
           <Terminal className="h-4 w-4" />
         </Button>
-      </DialogTrigger>
+      } />
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <DialogTitle>SSH into {node.name}</DialogTitle>
@@ -199,11 +199,11 @@ function NodeDomainsDialog({ node }: { node: Node }) {
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger asChild>
+      <DialogTrigger render={
         <Button variant="ghost" size="icon" className="h-8 w-8" title="Manage Edge Domains">
           <Globe className="h-4 w-4" />
         </Button>
-      </DialogTrigger>
+      } />
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>Edge Domains: {node.name}</DialogTitle>
@@ -264,13 +264,6 @@ export function NodesPage() {
     refetchInterval: 10_000, // match heartbeat interval
   })
 
-  const { data: brain } = useQuery({
-    queryKey: ['cluster-brain'],
-    queryFn: clusterApi.getBrain,
-    enabled: canManage,
-    refetchInterval: 10_000,
-  })
-
   // ── Add node dialog ────────────────────────────────────────────────────────
   const [addOpen, setAddOpen] = useState(false)
   const [name, setName] = useState('')
@@ -325,18 +318,6 @@ export function NodesPage() {
     onError: () => toast.error('Failed to regenerate token.'),
   })
 
-  const rotateWgMutation = useMutation({
-    mutationFn: (id: number) => nodesApi.rotateWireguard(id),
-    onSuccess: (data) => {
-      qc.invalidateQueries({ queryKey: ['nodes'] })
-      toast.success(data.message || 'WireGuard keys rotated successfully.')
-    },
-    onError: (err: unknown) => {
-      const msg = (err as { response?: { data?: { error?: string } } })?.response?.data?.error
-      toast.error(msg ?? 'Failed to rotate WireGuard keys.')
-    },
-  })
-
   // ── Render ─────────────────────────────────────────────────────────────────
   if (!canManage) {
     return (
@@ -364,12 +345,12 @@ export function NodesPage() {
           </Button>
 
           <Dialog open={addOpen} onOpenChange={closeAdd}>
-            <DialogTrigger asChild>
+            <DialogTrigger render={
               <Button className="gap-1.5">
                 <Plus className="h-4 w-4" />
                 Add Node
               </Button>
-            </DialogTrigger>
+            } />
             <DialogContent className="sm:max-w-lg">
               <DialogHeader>
                 <DialogTitle>Add Worker Node</DialogTitle>

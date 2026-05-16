@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
@@ -29,7 +30,6 @@ import (
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/model"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/pki"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/nginx"
-	"github.com/ojhapranjal26/featherdeploy/backend/internal/coordination"
 	v "github.com/ojhapranjal26/featherdeploy/backend/internal/validator"
 )
 
