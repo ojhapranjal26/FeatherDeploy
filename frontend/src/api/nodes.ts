@@ -21,6 +21,9 @@ export interface Node {
   disk_total: number | null
   last_stats_at: string | null
   node_id: string | null
+  node_type: string
+  assigned_domains: string[]
+  is_brain: boolean
   wg_public_key?: string
   wg_mesh_ip?: string
 }
@@ -54,6 +57,9 @@ export const nodesApi = {
 
   add: (data: AddNodePayload) =>
     client.post<AddNodeResponse>('/nodes', data).then((r) => r.data),
+
+  updateDomains: (id: number, domains: string[]) =>
+    client.patch(`/nodes/${id}/domains`, { domains }).then((r) => r.data),
 
   delete: (id: number) => client.delete(`/nodes/${id}`),
 

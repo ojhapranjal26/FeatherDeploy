@@ -28,7 +28,7 @@ func (h *DomainHandler) List(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows, err := h.db.QueryContext(r.Context(),
-		`SELECT id, service_id, domain, tls, verified, created_at, updated_at
+		`SELECT id, service_id, domain, tls, verified, nginx_config, nginx_preset, created_at, updated_at
 		 FROM domains WHERE service_id=? ORDER BY created_at`, svcID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, errMap("internal error"))
@@ -40,7 +40,7 @@ func (h *DomainHandler) List(w http.ResponseWriter, r *http.Request) {
 		var d model.Domain
 		var tls, verified int
 		if err := rows.Scan(&d.ID, &d.ServiceID, &d.Domain, &tls, &verified,
-			&d.CreatedAt, &d.UpdatedAt); err != nil {
+			&d.NginxConfig, &d.NginxPreset, &d.CreatedAt, &d.UpdatedAt); err != nil {
 			continue
 		}
 		d.TLS = tls == 1
@@ -81,11 +81,11 @@ func (h *DomainHandler) Add(w http.ResponseWriter, r *http.Request) {
 	}
 	id, _ := res.LastInsertId()
 	row := h.db.QueryRowContext(r.Context(),
-		`SELECT id, service_id, domain, tls, verified, created_at, updated_at
+		`SELECT id, service_id, domain, tls, verified, nginx_config, nginx_preset, created_at, updated_at
 		 FROM domains WHERE id=?`, id)
 	var d model.Domain
 	var tls, verified int
-	row.Scan(&d.ID, &d.ServiceID, &d.Domain, &tls, &verified, &d.CreatedAt, &d.UpdatedAt)
+	row.Scan(&d.ID, &d.ServiceID, &d.Domain, &tls, &verified, &d.NginxConfig, &d.NginxPreset, &d.CreatedAt, &d.UpdatedAt)
 	d.TLS = tls == 1
 	d.Verified = verified == 1
 	writeJSON(w, http.StatusCreated, d)
@@ -193,5 +193,54 @@ func detectOwnPublicIP() string {
 	}
 	defer conn.Close()
 	return conn.LocalAddr().(*net.UDPAddr).IP.String()
+}
+
+// PATCH /api/projects/{projectID}/services/{serviceID}/domains/{domainID}/config
+func (h *DomainHandler) UpdateConfig(w http.ResponseWriter, r *http.Request) {
+	domainID, err := strconv.ParseInt(r.PathValue("domainID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errMap("invalid domainID"))
+		return
+	}
+
+	var req model.UpdateDomainConfigRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errMap("invalid JSON"))
+		return
+	}
+
+	// Dynamic UPDATE query building
+	query := "UPDATE domains SET updated_at=datetime('now')"
+	params := []interface{}{}
+
+	if req.NginxConfig != "" || req.NginxPreset == "custom" {
+		query += ", nginx_config=?"
+		params = append(params, req.NginxConfig)
+	}
+	if req.NginxPreset != "" {
+		query += ", nginx_preset=?"
+		params = append(params, req.NginxPreset)
+	}
+	if req.TLS != nil {
+		tlsInt := 0
+		if *req.TLS {
+			tlsInt = 1
+		}
+		query += ", tls=?"
+		params = append(params, tlsInt)
+	}
+
+	query += " WHERE id=?"
+	params = append(params, domainID)
+
+	_, err = h.db.ExecContext(r.Context(), query, params...)
+	if err != nil {
+		slog.Error("update domain config", "err", err)
+		writeJSON(w, http.StatusInternalServerError, errMap("database error"))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
+	go nginx.PublishRoutes(h.db)
 }
 

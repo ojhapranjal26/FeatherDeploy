@@ -97,13 +97,15 @@ type EnvVar struct {
 
 // Domain represents the domains table
 type Domain struct {
-	ID        int64     `json:"id"`
-	ServiceID int64     `json:"service_id"`
-	Domain    string    `json:"domain"`
-	TLS       bool      `json:"tls"`
-	Verified  bool      `json:"verified"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID          int64     `json:"id"`
+	ServiceID   int64     `json:"service_id"`
+	Domain      string    `json:"domain"`
+	TLS         bool      `json:"tls"`
+	Verified    bool      `json:"verified"`
+	NginxConfig string    `json:"nginx_config"`
+	NginxPreset string    `json:"nginx_preset"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 // ───── Request / Response DTOs ─────────────────────────────────────────────
@@ -187,6 +189,12 @@ type UpsertEnvVarRequest struct {
 type AddDomainRequest struct {
 	Domain string `json:"domain" validate:"required,fqdn,max=255"`
 	TLS    bool   `json:"tls"`
+}
+
+type UpdateDomainConfigRequest struct {
+	NginxConfig string `json:"nginx_config"`
+	NginxPreset string `json:"nginx_preset"`
+	TLS         *bool  `json:"tls"`
 }
 
 type AssignProjectMemberRequest struct {

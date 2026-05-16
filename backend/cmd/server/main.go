@@ -626,6 +626,7 @@ func serve() {
 			r.Post("/api/nodes/{nodeID}/ping", nodeH.Ping)
 			r.Get("/api/nodes/{nodeID}/ssh-command", nodeH.SSHCommand)
 			r.Post("/api/nodes/{nodeID}/rotate-wireguard", nodeH.RotateWireguard)
+			r.PATCH("/api/nodes/{nodeID}/domains", nodeH.UpdateDomains)
 			// Logs are SSE — registered here so they share auth middleware but no 30s timeout
 			r.Get("/api/nodes/{nodeID}/logs", nodeH.NodeLogs)
 		})
@@ -731,6 +732,7 @@ func serve() {
 				r.Post("/api/projects/{projectID}/services/{serviceID}/domains", domainH.Add)
 				r.Delete("/api/projects/{projectID}/services/{serviceID}/domains/{domainID}", domainH.Delete)
 				r.Post("/api/projects/{projectID}/services/{serviceID}/domains/{domainID}/verify", domainH.Verify)
+				r.Patch("/api/projects/{projectID}/services/{serviceID}/domains/{domainID}/config", domainH.UpdateConfig)
 			})
 		})
 	})

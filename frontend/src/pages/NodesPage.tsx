@@ -3,7 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   Server, Plus, Trash2, Copy, Check, Loader2, RefreshCw,
   CheckCircle2, Clock, WifiOff, AlertCircle, Crown, Terminal,
-  Cpu, MemoryStick, HardDrive, Key,
+  Cpu, MemoryStick, HardDrive, Key, Globe, X
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -131,11 +131,11 @@ function SSHCommandDialog({ node }: { node: Node }) {
 
   return (
     <Dialog open={open} onOpenChange={(v) => { setOpen(v); if (v) fetchCmd() }}>
-      <DialogTrigger render={
+      <DialogTrigger asChild>
         <Button variant="ghost" size="icon" className="h-8 w-8" title="SSH into node">
           <Terminal className="h-4 w-4" />
         </Button>
-      } />
+      </DialogTrigger>
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <DialogTitle>SSH into {node.name}</DialogTitle>
@@ -159,6 +159,90 @@ function SSHCommandDialog({ node }: { node: Node }) {
         <DialogFooter>
           <Button variant="outline" onClick={() => setOpen(false)}>Close</Button>
         </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// ── Node Domains dialog ──────────────────────────────────────────────────────
+
+function NodeDomainsDialog({ node }: { node: Node }) {
+  const [open, setOpen] = useState(false)
+  const [domains, setDomains] = useState<string[]>(node.assigned_domains || [])
+  const [newDomain, setNewDomain] = useState('')
+  const qc = useQueryClient()
+
+  const mutation = useMutation({
+    mutationFn: (list: string[]) => nodesApi.updateDomains(node.id, list),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['nodes'] })
+      toast.success('Assigned domains updated.')
+    },
+    onError: () => toast.error('Failed to update domains.'),
+  })
+
+  const addDomain = () => {
+    const d = newDomain.trim().toLowerCase()
+    if (!d) return
+    if (domains.includes(d)) { toast.error('Domain already added.'); return }
+    const newList = [...domains, d]
+    setDomains(newList)
+    setNewDomain('')
+    mutation.mutate(newList)
+  }
+
+  const removeDomain = (d: string) => {
+    const newList = domains.filter(x => x !== d)
+    setDomains(newList)
+    mutation.mutate(newList)
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>
+        <Button variant="ghost" size="icon" className="h-8 w-8" title="Manage Edge Domains">
+          <Globe className="h-4 w-4" />
+        </Button>
+      </DialogTrigger>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Edge Domains: {node.name}</DialogTitle>
+          <DialogDescription>
+            Domains assigned to this node will have their traffic routed here directly.
+            Nginx on this node will handle SSL provisioning.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-4 py-4">
+          <div className="flex gap-2">
+            <Input
+              placeholder="example.com"
+              value={newDomain}
+              onChange={(e) => setNewDomain(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && addDomain()}
+            />
+            <Button onClick={addDomain} disabled={mutation.isPending}>Add</Button>
+          </div>
+          <div className="space-y-2">
+            {domains.length === 0 ? (
+              <p className="text-sm text-muted-foreground italic text-center py-4">No domains assigned.</p>
+            ) : (
+              domains.map(d => (
+                <div key={d} className="flex items-center justify-between rounded-md border bg-muted/30 px-3 py-1.5 text-sm">
+                  <span className="font-medium">{d}</span>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-7 w-7 text-destructive hover:bg-destructive/10"
+                    onClick={() => removeDomain(d)}
+                    disabled={mutation.isPending}
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </Button>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
       </DialogContent>
     </Dialog>
   )
@@ -280,7 +364,7 @@ export function NodesPage() {
           </Button>
 
           <Dialog open={addOpen} onOpenChange={closeAdd}>
-            <DialogTrigger>
+            <DialogTrigger asChild>
               <Button className="gap-1.5">
                 <Plus className="h-4 w-4" />
                 Add Node
@@ -382,14 +466,14 @@ export function NodesPage() {
                 <th className="px-4 py-3 text-left font-medium text-muted-foreground">Address</th>
                 <th className="px-4 py-3 text-left font-medium text-muted-foreground">Status</th>
                 <th className="px-4 py-3 text-left font-medium text-muted-foreground">Resources</th>
+                <th className="px-4 py-3 text-left font-medium text-muted-foreground">Domains</th>
                 <th className="px-4 py-3 text-left font-medium text-muted-foreground">Last Seen</th>
-                <th className="px-4 py-3 text-left font-medium text-muted-foreground">rqlite</th>
                 <th className="w-20" />
               </tr>
             </thead>
             <tbody>
               {nodes.map((node, idx) => {
-                const isBrain = brain?.BrainID && (node.node_id === brain.BrainID || node.name === brain.BrainID)
+                const isBrain = node.is_brain
                 return (
                   <tr key={node.id} className={idx !== nodes.length - 1 ? 'border-b' : ''}>
                     <td className="px-4 py-3">
@@ -397,9 +481,9 @@ export function NodesPage() {
                         <div className="flex items-center gap-2">
                           <span className="font-medium">{node.name}</span>
                           {isBrain && (
-                            <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 border border-amber-300/30 px-2 py-0.5 text-xs font-medium text-amber-600 dark:text-amber-400">
+                            <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 border border-amber-300/30 px-2 py-0.5 text-xs font-medium text-amber-600 dark:text-amber-400" title="This node hosts the FeatherDeploy control panel">
                               <Crown className="h-3 w-3" />
-                              Brain
+                              Panel Host
                             </span>
                           )}
                           {node.wg_mesh_ip && (
@@ -426,13 +510,21 @@ export function NodesPage() {
                     <td className="px-4 py-3">
                       <NodeStats node={node} />
                     </td>
-                    <td className="px-4 py-3 text-muted-foreground">
+                    <td className="px-4 py-3">
+                      {node.assigned_domains?.length > 0 ? (
+                        <div className="flex flex-wrap gap-1 max-w-[150px]">
+                          {node.assigned_domains.map(d => (
+                            <span key={d} className="px-1.5 py-0.5 rounded bg-muted text-[10px] border truncate" title={d}>{d}</span>
+                          ))}
+                        </div>
+                      ) : (
+                        <span className="text-xs text-muted-foreground italic">—</span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3 text-muted-foreground text-xs">
                       {node.last_seen
                         ? formatDateFull(node.last_seen, timezone)
                         : <span className="italic opacity-50">never</span>}
-                    </td>
-                    <td className="px-4 py-3 font-mono text-xs text-muted-foreground">
-                      {node.rqlite_addr || <span className="italic opacity-50">—</span>}
                     </td>
                     <td className="px-4 py-3 flex items-center gap-1">
                       {node.status === 'pending' && (
@@ -446,21 +538,7 @@ export function NodesPage() {
                           <RefreshCw className={`h-4 w-4 ${regenerateMutation.isPending ? 'animate-spin' : ''}`} />
                         </Button>
                       )}
-                      {node.wg_mesh_ip && (
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-8 w-8 text-blue-500 hover:text-blue-600 hover:bg-blue-500/10"
-                          title="Reroll/Rotate WireGuard Mesh Keys"
-                          onClick={() => {
-                            if (confirm(`Rotate WireGuard keys for node "${node.name}"? This updates the private mesh overlay with zero downtime.`)) {
-                              rotateWgMutation.mutate(node.id)
-                            }
-                          }}
-                        >
-                          <Key className={`h-4 w-4 ${rotateWgMutation.isPending && rotateWgMutation.variables === node.id ? 'animate-spin' : ''}`} />
-                        </Button>
-                      )}
+                      <NodeDomainsDialog node={node} />
                       <SSHCommandDialog node={node} />
                       <Button
                         variant="ghost"

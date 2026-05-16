@@ -117,8 +117,13 @@ func PublishRoutes(db *sql.DB) {
 		return
 	}
 
+	// Fetch admin email for SSL provisioning (falls back to any admin email)
+	var adminEmail string
+	db.QueryRow(`SELECT email FROM users WHERE role='superadmin' OR role='admin' LIMIT 1`).Scan(&adminEmail)
+
 	rows, err := db.Query(`
-		SELECT d.domain, s.id, s.name, s.node_id, s.host_port, s.app_port
+		SELECT d.domain, s.id, s.name, s.node_id, s.host_port, s.app_port, 
+		       COALESCE(s.cluster_port, 0), d.tls, d.nginx_config, d.nginx_preset
 		FROM domains d
 		JOIN services s ON d.service_id = s.id
 		WHERE d.verified = 1
@@ -130,21 +135,26 @@ func PublishRoutes(db *sql.DB) {
 	defer rows.Close()
 
 	for rows.Next() {
-		var domain, svcName, nodeID string
+		var domain, svcName, nodeID, nginxConfig, nginxPreset string
 		var svcID int64
-		var hostPort, appPort int
-		if err := rows.Scan(&domain, &svcID, &svcName, &nodeID, &hostPort, &appPort); err != nil {
+		var hostPort, appPort, clusterPort, tlsInt int
+		if err := rows.Scan(&domain, &svcID, &svcName, &nodeID, &hostPort, &appPort, 
+		                    &clusterPort, &tlsInt, &nginxConfig, &nginxPreset); err != nil {
 			continue
 		}
 
 		route := map[string]interface{}{
-			"domain":      domain,
-			"service":     svcName,
-			"target_node": nodeID,
-			"target_port": appPort,
-			"host_port":   hostPort,
-			"mode":        "proxy",
-			"version":     time.Now().Unix(),
+			"domain":       domain,
+			"service":      svcName,
+			"target_node":  nodeID,
+			"target_port":  appPort,
+			"host_port":    hostPort,
+			"cluster_port": clusterPort,
+			"tls":          tlsInt == 1,
+			"admin_email":  adminEmail,
+			"nginx_config": nginxConfig,
+			"mode":         "proxy",
+			"version":      time.Now().Unix(),
 		}
 		data, _ := json.Marshal(route)
 		

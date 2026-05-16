@@ -28,6 +28,8 @@ import (
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/middleware"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/model"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/pki"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/nginx"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/coordination"
 	v "github.com/ojhapranjal26/featherdeploy/backend/internal/validator"
 )
 
@@ -211,18 +213,29 @@ func (h *NodeHandler) List(w http.ResponseWriter, r *http.Request) {
 			t, _ := time.Parse(time.RFC3339, lastSeen.String)
 			n.LastSeen = &t
 		}
-		// Load hostname, OS info, node_id, assigned_domains; check if tunnel is active
+		
+		// Load hostname, OS info, node_id, node_type, assigned_domains
 		var assignedDomainsJSON string
-		h.db.QueryRowContext(r.Context(), `SELECT hostname, os_info, node_id, node_type, assigned_domains FROM nodes WHERE id=?`, n.ID).Scan(&n.Hostname, &n.OSInfo, &n.NodeID, &n.NodeType, &assignedDomainsJSON)
+		h.db.QueryRowContext(r.Context(), `SELECT hostname, os_info, node_id, node_type, assigned_domains FROM nodes WHERE id=?`, n.ID).
+			Scan(&n.Hostname, &n.OSInfo, &n.NodeID, &n.NodeType, &assignedDomainsJSON)
+		
 		n.IsBrain = n.NodeType == model.NodeTypeBrain
+		
+		// If node_id matches our local hostname or is "main", it's the brain
+		myHostname, _ := os.Hostname()
+		if n.NodeID == "main" || n.NodeID == myHostname {
+			n.IsBrain = true
+		}
+
 		if n.NodeID != "" {
 			// Check if we can reach the node's API port (443) directly
-			conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:443", n.IP), 2*time.Second)
-			n.TunnelConnected = err == nil
+			conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", n.IP, n.Port), 2*time.Second)
+			n.TunnelConnected = (err == nil)
 			if conn != nil {
 				conn.Close()
 			}
 		}
+
 		if assignedDomainsJSON != "" && assignedDomainsJSON != "[]" {
 			json.Unmarshal([]byte(assignedDomainsJSON), &n.AssignedDomains)
 		} else {
@@ -232,6 +245,47 @@ func (h *NodeHandler) List(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, nodes)
 }
+
+// PATCH /api/nodes/{nodeID}/domains — update the list of domains pointed to this node
+func (h *NodeHandler) UpdateDomains(w http.ResponseWriter, r *http.Request) {
+	nodeID, err := strconv.ParseInt(chi.URLParam(r, "nodeID"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errMap("invalid node ID"))
+		return
+	}
+
+	var req struct {
+		Domains []string `json:"domains"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errMap("invalid JSON"))
+		return
+	}
+
+	domainsJSON, _ := json.Marshal(req.Domains)
+	_, err = h.db.ExecContext(r.Context(),
+		`UPDATE nodes SET assigned_domains=?, updated_at=datetime('now') WHERE id=?`,
+		string(domainsJSON), nodeID)
+	if err != nil {
+		slog.Error("update node domains", "err", err)
+		writeJSON(w, http.StatusInternalServerError, errMap("database error"))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"ok": "1"})
+
+	// Publish to Etcd so the node's ProxyEngine sees the update immediately
+	if nginx.EtcdClient != nil {
+		var nodeUID string
+		h.db.QueryRowContext(r.Context(), `SELECT node_id FROM nodes WHERE id=?`, nodeID).Scan(&nodeUID)
+		if nodeUID != "" {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			nginx.EtcdClient.EtcdClient().Put(ctx, "/nodes/assigned_domains/"+nodeUID, string(domainsJSON))
+			cancel()
+		}
+	}
+}
+
 
 // AddNodeRequest is the payload for POST /api/nodes.
 type AddNodeRequest struct {

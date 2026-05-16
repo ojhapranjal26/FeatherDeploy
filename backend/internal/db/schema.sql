@@ -81,11 +81,13 @@ CREATE TABLE IF NOT EXISTS env_variables (
 CREATE TABLE IF NOT EXISTS domains (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     service_id INTEGER NOT NULL REFERENCES services(id) ON DELETE CASCADE,
-    domain     TEXT    NOT NULL UNIQUE COLLATE NOCASE,
-    tls        INTEGER NOT NULL DEFAULT 0 CHECK(tls IN (0,1)),
-    verified   INTEGER NOT NULL DEFAULT 0 CHECK(verified IN (0,1)),
-    created_at DATETIME NOT NULL DEFAULT (datetime('now')),
-    updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
+    domain       TEXT    NOT NULL UNIQUE COLLATE NOCASE,
+    tls          INTEGER NOT NULL DEFAULT 0 CHECK(tls IN (0,1)),
+    verified     INTEGER NOT NULL DEFAULT 0 CHECK(verified IN (0,1)),
+    nginx_config TEXT    NOT NULL DEFAULT '',
+    nginx_preset TEXT    NOT NULL DEFAULT 'proxy', -- 'proxy', 'static', 'php', 'spa', 'custom'
+    created_at   DATETIME NOT NULL DEFAULT (datetime('now')),
+    updated_at   DATETIME NOT NULL DEFAULT (datetime('now'))
 );
 
 -- 008: invitations (admin-only invite-based registration)

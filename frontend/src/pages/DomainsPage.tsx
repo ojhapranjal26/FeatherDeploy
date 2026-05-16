@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { ChevronLeft, Plus, Trash2, ShieldCheck, Shield } from 'lucide-react'
+import { ChevronLeft, Plus, Trash2, ShieldCheck, Shield, Settings, Loader2 } from 'lucide-react'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
@@ -101,6 +101,73 @@ export function DomainsPage() {
     onError: () => toast.error('DNS verification failed.'),
   })
 
+  // ── Edit Config ──
+  const [editDomain, setEditDomain] = useState<any>(null)
+  const [editPreset, setEditPreset] = useState('proxy')
+  const [editConfig, setEditConfig] = useState('')
+  const [editTLS, setEditTLS] = useState(true)
+
+  const updateConfigMutation = useMutation({
+    mutationFn: (data: any) => domainsApi.updateConfig(projectId!, serviceId!, editDomain.id, data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['domains', serviceId] })
+      setEditDomain(null)
+      toast.success('Nginx configuration updated.')
+    },
+    onError: () => toast.error('Failed to update configuration.'),
+  })
+
+  const PRESETS = {
+    proxy: (domain: string, port: number) => `server {
+    listen 80;
+    server_name ${domain};
+
+    location / {
+        proxy_pass http://127.0.0.1:${port};
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_cache_bypass $http_upgrade;
+    }
+}`,
+    static: (domain: string) => `server {
+    listen 80;
+    server_name ${domain};
+    root /var/lib/featherdeploy/www/${domain};
+    index index.html;
+
+    location / {
+        try_files $uri $uri/ =404;
+    }
+}`,
+    spa: (domain: string) => `server {
+    listen 80;
+    server_name ${domain};
+    root /var/lib/featherdeploy/www/${domain};
+    index index.html;
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}`,
+    php: (domain: string) => `server {
+    listen 80;
+    server_name ${domain};
+    root /var/lib/featherdeploy/www/${domain};
+    index index.php index.html;
+
+    location / {
+        try_files $uri $uri/ /index.php?$query_string;
+    }
+
+    location ~ \\.php$ {
+        include snippets/fastcgi-php.conf;
+        fastcgi_pass unix:/var/run/php/php-fpm.sock;
+    }
+}`,
+  } as const
+
   const { register, handleSubmit, reset, formState: { errors, isSubmitting } } =
     useForm<FormData>({ resolver: zodResolver(schema), defaultValues: { tls: true } })
 
@@ -185,6 +252,19 @@ export function DomainsPage() {
                       <Button
                         variant="ghost"
                         size="icon"
+                        className="h-7 w-7"
+                        onClick={() => {
+                          setEditDomain(d)
+                          setEditPreset(d.nginx_preset || 'proxy')
+                          setEditConfig(d.nginx_config || '')
+                          setEditTLS(d.tls)
+                        }}
+                      >
+                        <Settings className="h-3.5 w-3.5" />
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
                         className="h-7 w-7 text-destructive hover:text-destructive"
                         onClick={() => {
                           if (confirm(`Remove domain "${d.domain}"?`)) {
@@ -202,6 +282,84 @@ export function DomainsPage() {
           </Table>
         </div>
       )}
+
+      {/* Edit Config dialog */}
+      <Dialog open={!!editDomain} onOpenChange={(v) => !v && setEditDomain(null)}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Nginx Configuration: {editDomain?.domain}</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-1.5">
+                <Label>Configuration Preset</Label>
+                <select
+                  className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  value={editPreset}
+                  onChange={(e) => {
+                    const p = e.target.value
+                    setEditPreset(p)
+                    if (p !== 'custom') {
+                      // @ts-ignore
+                      setEditConfig(PRESETS[p]?.(editDomain.domain, 8080) || '')
+                    }
+                  }}
+                >
+                  <option value="proxy">Reverse Proxy (Default)</option>
+                  <option value="static">Static HTML</option>
+                  <option value="spa">Single Page App (React/Vue)</option>
+                  <option value="php">PHP-FPM</option>
+                  <option value="custom">Custom Configuration</option>
+                </select>
+              </div>
+              <div className="flex items-center space-x-2 pt-6">
+                <input
+                  type="checkbox"
+                  id="tls-toggle"
+                  checked={editTLS}
+                  onChange={(e) => setEditTLS(e.target.checked)}
+                  className="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-600"
+                />
+                <Label htmlFor="tls-toggle">Enable SSL (Certbot)</Label>
+              </div>
+            </div>
+
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between">
+                <Label>Nginx Config</Label>
+                <Badge variant="outline" className="text-[10px] uppercase">{editPreset}</Badge>
+              </div>
+              <textarea
+                className="min-h-[300px] w-full rounded-md border border-input bg-muted/30 px-3 py-2 font-mono text-xs focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                value={editConfig}
+                onChange={(e) => {
+                  setEditConfig(e.target.value)
+                  if (editPreset !== 'custom') setEditPreset('custom')
+                }}
+                spellCheck={false}
+              />
+              <p className="text-[10px] text-muted-foreground italic">
+                Tip: If using "Reverse Proxy", ensure the port matches your application's internal port.
+              </p>
+            </div>
+
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" onClick={() => setEditDomain(null)}>Cancel</Button>
+              <Button 
+                onClick={() => updateConfigMutation.mutate({
+                  nginx_config: editPreset === 'custom' ? editConfig : '', 
+                  nginx_preset: editPreset,
+                  tls: editTLS
+                })}
+                disabled={updateConfigMutation.isPending}
+              >
+                {updateConfigMutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                Save Changes
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       {/* Add domain dialog */}
       <Dialog open={addOpen} onOpenChange={setAddOpen}>
@@ -222,7 +380,7 @@ export function DomainsPage() {
             </div>
             <p className="text-xs text-muted-foreground">
               After adding, point your domain's A record to this server's IP.
-              Caddy will automatically obtain a TLS certificate.
+              Nginx will automatically obtain a TLS certificate via Certbot.
             </p>
             <div className="flex justify-end gap-2">
               <Button type="button" variant="outline" onClick={() => setAddOpen(false)}>

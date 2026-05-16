@@ -17,14 +17,18 @@ import (
 
 // Route defines the desired state of a routing rule in Etcd.
 type Route struct {
-	Domain     string `json:"domain"`
-	Service    string `json:"service"`
-	TargetNode string `json:"target_node"`
-	TargetIP   string `json:"target_ip"` // fallback or initial IP
-	TargetPort int    `json:"target_port"`
-	HostPort   int    `json:"host_port"`   // Direct Podman host port
-	Mode       string `json:"mode"`
-	Version    int64  `json:"version"`
+	Domain      string `json:"domain"`
+	Service     string `json:"service"`
+	TargetNode  string `json:"target_node"`
+	TargetIP    string `json:"target_ip"` // fallback or initial IP
+	TargetPort  int    `json:"target_port"`
+	HostPort    int    `json:"host_port"`    // Direct Podman host port
+	ClusterPort int    `json:"cluster_port"` // Stable fdnet proxy port (30000+)
+	TLS         bool   `json:"tls"`
+	AdminEmail  string `json:"admin_email"` // for certbot
+	NginxConfig string `json:"nginx_config"`
+	Mode        string `json:"mode"`
+	Version     int64  `json:"version"`
 }
 
 type NodeState struct {
@@ -69,6 +73,7 @@ func (e *Engine) Start(ctx context.Context) {
 	// 2. Start watchers
 	go e.watchRoutes(ctx)
 	go e.watchNodes(ctx)
+	go e.watchAssignedDomains(ctx)
 
 	// 3. Debounced Caddy update loop
 	go e.updateLoop(ctx)
@@ -100,7 +105,8 @@ func (e *Engine) updateLoop(ctx context.Context) {
 }
 
 func (e *Engine) reconcileLoop(ctx context.Context) {
-	ticker := time.NewTicker(60 * time.Second)
+	// Increased from 60s to 300s to reduce RAM/CPU overhead (watchers handle real-time)
+	ticker := time.NewTicker(300 * time.Second)
 	defer ticker.Stop()
 	for {
 		select {
@@ -226,6 +232,35 @@ func (e *Engine) watchNodes(ctx context.Context) {
 	}
 }
 
+func (e *Engine) watchAssignedDomains(ctx context.Context) {
+	key := "/nodes/assigned_domains/" + e.nodeID
+	watchChan := e.etcd.Watch(ctx, key)
+	for watchResp := range watchChan {
+		e.mu.Lock()
+		changed := false
+		for _, ev := range watchResp.Events {
+			if ev.Type == mvccpb.DELETE {
+				e.assignedDomains = make(map[string]bool)
+				changed = true
+			} else {
+				var domains []string
+				if err := json.Unmarshal(ev.Kv.Value, &domains); err == nil {
+					newMap := make(map[string]bool)
+					for _, d := range domains {
+						newMap[d] = true
+					}
+					e.assignedDomains = newMap
+					changed = true
+				}
+			}
+		}
+		e.mu.Unlock()
+		if changed {
+			e.triggerUpdate()
+		}
+	}
+}
+
 func (e *Engine) applyToNginx() {
 	e.mu.RLock()
 	routes := make([]Route, 0, len(e.routes))
@@ -250,6 +285,16 @@ func (e *Engine) applyToNginx() {
 		}
 		if changed {
 			anyChanged = true
+			// If TLS is requested, trigger Certbot
+			if r.TLS {
+				go func(domain, email string) {
+					// Wait a bit for Nginx to reload and respond to HTTP challenge
+					time.Sleep(2 * time.Second)
+					if err := nginx.ProvisionSSL(domain, email); err != nil {
+						slog.Error("proxyengine: SSL provisioning failed", "domain", domain, "err", err)
+					}
+				}(r.Domain, r.AdminEmail)
+			}
 		}
 	}
 
@@ -261,13 +306,24 @@ func (e *Engine) applyToNginx() {
 }
 
 func buildNginxConfig(r Route, nodes map[string]NodeState, myNodeID string) string {
+	// If a custom config is provided, use it directly (after variable substitution)
+	if r.NginxConfig != "" {
+		return r.NginxConfig
+	}
+
 	var dialAddr string
 	if r.TargetNode == myNodeID || (myNodeID == "main" && (r.TargetNode == "" || r.TargetNode == "main")) {
-		port := r.TargetPort
-		if r.HostPort > 0 {
-			port = r.HostPort
+		// Priority 1: Use cluster_port if available (avoids 127.0.0.1:8080 conflict)
+		if r.ClusterPort > 0 {
+			dialAddr = fmt.Sprintf("127.0.0.1:%d", r.ClusterPort)
+		} else {
+			// Priority 2: Use hostPort if mapped
+			port := r.TargetPort
+			if r.HostPort > 0 {
+				port = r.HostPort
+			}
+			dialAddr = fmt.Sprintf("127.0.0.1:%d", port)
 		}
-		dialAddr = fmt.Sprintf("127.0.0.1:%d", port)
 	} else {
 		ns, healthy := nodes[r.TargetNode]
 		if !healthy {
@@ -277,7 +333,16 @@ func buildNginxConfig(r Route, nodes map[string]NodeState, myNodeID string) stri
 		if ns.WgMeshIP != "" {
 			targetIP = ns.WgMeshIP
 		}
-		dialAddr = fmt.Sprintf("%s:%d", targetIP, r.TargetPort)
+		
+		// For remote nodes, if cluster_port is used, the remote node's fdnet proxy 
+		// should be listening on that port.
+		port := r.TargetPort
+		if r.ClusterPort > 0 {
+			port = r.ClusterPort
+		} else if r.HostPort > 0 {
+			port = r.HostPort
+		}
+		dialAddr = fmt.Sprintf("%s:%d", targetIP, port)
 	}
 
 	var sb strings.Builder
