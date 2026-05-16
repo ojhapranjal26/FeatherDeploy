@@ -121,7 +121,7 @@ func PublishRoutes(db *sql.DB) {
 		SELECT d.domain, s.id, s.name, s.node_id, s.host_port, s.app_port
 		FROM domains d
 		JOIN services s ON d.service_id = s.id
-		WHERE d.status = 'active'
+		WHERE d.verified = 1
 	`)
 	if err != nil {
 		slog.Error("nginx: query domains failed", "err", err)
