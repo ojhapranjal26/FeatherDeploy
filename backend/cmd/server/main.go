@@ -3,10 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"crypto/tls"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -24,17 +21,17 @@ import (
 	"github.com/go-chi/cors"
 
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/auth"
-	"github.com/ojhapranjal26/featherdeploy/backend/internal/caddy"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/nginx"
 	appDb "github.com/ojhapranjal26/featherdeploy/backend/internal/db"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/deploy"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/coordination"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/netdaemon"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/handler"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/heartbeat"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/installer"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/mailer"
 	mw "github.com/ojhapranjal26/featherdeploy/backend/internal/middleware"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/model"
-	"github.com/ojhapranjal26/featherdeploy/backend/internal/netdaemon"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/pki"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/proxyengine"
 	"github.com/ojhapranjal26/featherdeploy/backend/web"
@@ -110,14 +107,7 @@ func runAsSvcUser(name string, args ...string) {
 	}
 }
 
-var TunnelMgr *netdaemon.TunnelManager
-var NetDaemon *netdaemon.Daemon
-
-// Init global tunnel manager
-func init() {
-	TunnelMgr = netdaemon.NewTunnelManager()
-	netdaemon.GlobalTunnel = TunnelMgr
-}
+var NetDaemon interface{} // Removed tunnel manager
 
 func main() {
 	// ── Subcommand dispatch ────────────────────────────────────────────────────
@@ -292,7 +282,7 @@ func serve() {
 		slog.Warn("etcd: could not connect, discovery features will be disabled", "err", err)
 	} else {
 		deploy.SetEtcdClient(etcdClient)
-		caddy.SetEtcdClient(etcdClient)
+		nginx.SetEtcdClient(etcdClient)
 		slog.Info("etcd: coordination client ready", "endpoints", etcdEndpoints)
 
 		// Start the Proxy Engine for the brain node (handles all edge ingress mapping to local/remote nodes)
@@ -301,128 +291,13 @@ func serve() {
 		slog.Info("proxyengine: started on brain node")
 	}
 
-	// ─── FDNet: lightweight internal network proxy ─────────────────────────────
-	// Replaces Podman named-bridge networks (netavark/aardvark-dns) with a
-	// pure-Go TCP proxy that works on every Linux distribution.
-	netDaemon := netdaemon.New("/var/lib/featherdeploy/fdnet-state.json")
-	netDaemon.ReconcileRegistered()
-	defer netDaemon.Stop()
-	deploy.SetNetDaemon(netDaemon)
-	slog.Info("fdnet: network daemon ready")
-
-	// Establish a single secure port (8080/443) for all inter-node communication.
-	// We use WebSockets for the underlying tunnel.
-	TunnelMgr = netdaemon.NewTunnelManager()
-
-	// Periodic tunnel token rotation (every 7 days)
-	// Pushes new token to connected nodes via tunnel. Old token accepted for 24h (grace period).
-	go func() {
-		ticker := time.NewTicker(24 * time.Hour)
-		defer ticker.Stop()
-		for range ticker.C {
-			rows, err := db.Query(`
-				SELECT id, name, tunnel_token FROM nodes
-				WHERE status = 'connected'
-				  AND tunnel_token IS NOT NULL
-				  AND (tunnel_rotated_at IS NULL OR tunnel_rotated_at < datetime('now', '-7 days'))
-			`)
-			if err != nil {
-				continue
-			}
-			type nodeRow struct{ id int64; name, token string }
-			var toRotate []nodeRow
-			for rows.Next() {
-				var nr nodeRow
-				if rows.Scan(&nr.id, &nr.name, &nr.token) == nil {
-					toRotate = append(toRotate, nr)
-				}
-			}
-			rows.Close()
-			for _, nr := range toRotate {
-				newToken := func() string {
-					b := make([]byte, 20)
-					rand.Read(b)
-					return hex.EncodeToString(b)
-				}()
-				// Push to node via tunnel proxy on its management port (7443 → local proxy)
-				proxyAddr := TunnelMgr.GetNodeProxyAddr(nr.name, 7443)
-				if proxyAddr == "" {
-					slog.Warn("token-rotate: node not connected via tunnel, skipping", "node", nr.name)
-					continue
-				}
-				body, _ := json.Marshal(map[string]string{"tunnel_token": newToken})
-				resp, err := http.Post("http://"+proxyAddr+"/api/node/rotate-tunnel-token", "application/json", bytes.NewReader(body))
-				if err != nil || resp.StatusCode != http.StatusNoContent {
-					slog.Warn("token-rotate: push failed", "node", nr.name, "err", err)
-					if resp != nil { resp.Body.Close() }
-					continue
-				}
-				resp.Body.Close()
-				// Store new token, move old to prev for grace period
-				db.Exec(`UPDATE nodes SET tunnel_token=?, tunnel_token_prev=?, tunnel_rotated_at=datetime('now') WHERE id=?`,
-					newToken, nr.token, nr.id)
-				slog.Info("token-rotate: rotated tunnel token", "node", nr.name)
-			}
-		}
-	}()
 
 	// ─── Split-brain Prevention ───
-	if b, err := heartbeat.ReadBrain(db); err == nil && b.Alive && b.BrainID != "main" {
-		slog.Warn("Split-brain prevention: I am no longer the brain. Starting in worker mode.", "active_brain", b.BrainID)
-		
-		wsURL := strings.Replace(b.BrainAddr, "http", "ws", 1) + "/api/cluster/tunnel"
-		tlsCfg := &tls.Config{InsecureSkipVerify: true}
-		
-		// Wait until tunnel is established, then set up proxies
-		go func() {
-			TunnelMgr.StartClient(context.Background(), wsURL, "main", *jwtSecret, tlsCfg)
-		}()
-		time.Sleep(3 * time.Second)
-		TunnelMgr.ProxyNodeToBrain(4001, 4001)
-		TunnelMgr.ProxyNodeToBrain(4002, 4002)
-		TunnelMgr.ProxyNodeToBrain(2379, 2379)
-		TunnelMgr.ProxyNodeToBrain(2380, 2380)
-
-		// Brain discovery loop (like in node/main.go)
-		var knownBrain = strings.TrimRight(b.BrainAddr, "/")
-		ticker := time.NewTicker(15 * time.Second)
-		defer ticker.Stop()
-		for range ticker.C {
-			newB, err := heartbeat.ReadBrain(db)
-			if err != nil || !newB.Alive {
-				continue
-			}
-			if newB.BrainID == "main" {
-				slog.Warn("I am the brain again! Restarting process to resume duties...")
-				os.Exit(0)
-			}
-			brainAddr := strings.TrimRight(newB.BrainAddr, "/")
-			if brainAddr == knownBrain {
-				continue
-			}
-			slog.Info("server-worker: brain changed, reconnecting tunnel", "old", knownBrain, "new", brainAddr)
-			knownBrain = brainAddr
-			newWS := strings.Replace(brainAddr, "http", "ws", 1) + "/api/cluster/tunnel"
-			go TunnelMgr.StartClient(context.Background(), newWS, "main", *jwtSecret, tlsCfg)
-		}
-		select {} // Block forever (HTTP server won't start)
-	}
 
 	// Add the tunnel endpoint to the router later in the file...
 
-	// Sync cluster_port back to the DB for all services whose fdnet proxy was
-	// restored from the state file.  This is required so Caddy's buildConfig
-	// picks up the correct proxy port (via COALESCE(cluster_port, host_port))
-	// after a server restart without waiting for the next deployment.
-	go syncFdnetClusterPorts(db, netDaemon)
 
 
-	// Re-sync database container states after a restart or update.
-	// Must run after SetNetDaemon so that re-registered containers can be
-	// proxied immediately.  Databases whose container is still running need
-	// no intervention — fdnet already restored their TCP proxy above via
-	// ReconcileRegistered().  Databases whose container stopped while we were
-	// down are attempted a re-start here so services don't see a dead proxy.
 	go reconcileDatabaseStates(db)
 
 	// Re-apply iptables ACCEPT rules for databases marked as public.
@@ -431,28 +306,16 @@ func serve() {
 	go reconcilePublicDBIPTables(db)
 	go deploy.ReconcileNodeRqliteIPTables(db)
 
-	// Reload Caddy after every process restart so the domain→port mapping in
-	// /etc/caddy/featherdeploy-services.caddy is always current with the DB.
-	// Without this, if a domain was added while Caddy was running under the
-	// previous process the new block would already be on disk; but if the Caddy
-	// config was manually cleared or the file was recreated by build.sh the
-	// reload here repairs it before any user traffic arrives.
-	go caddy.PublishRoutes(db)
+	// Reload Nginx after every process restart
+	go nginx.PublishRoutes(db)
 
-	// Write a Caddy snippet for the panel domain with flush_interval -1 so SSE
-	// log streams are not buffered by Caddy's 30-second proxy timeout.
+	// Configure Nginx for the panel domain
 	go func() {
 		panelDomain := ""
 		for _, o := range strings.Split(*origin, ",") {
 			o = strings.TrimSpace(o)
-			if o == "" {
-				continue
-			}
-			// Skip localhost/dev origins, only write for real domains
-			if strings.Contains(o, "localhost") || strings.Contains(o, "127.0.0.1") {
-				continue
-			}
-			// Strip scheme to get just the domain
+			if o == "" { continue }
+			if strings.Contains(o, "localhost") || strings.Contains(o, "127.0.0.1") { continue }
 			o = strings.TrimPrefix(o, "https://")
 			o = strings.TrimPrefix(o, "http://")
 			o = strings.TrimRight(o, "/")
@@ -462,22 +325,27 @@ func serve() {
 			}
 		}
 		if panelDomain != "" {
-			listenAddr := *addr
-			if strings.HasPrefix(listenAddr, ":") {
-				listenAddr = "127.0.0.1" + listenAddr
-			}
-			caddy.WritePanelSnippet(panelDomain, listenAddr)
+			nginx.WriteServiceConfig(panelDomain, fmt.Sprintf(`server {
+    listen 80;
+    server_name %s;
+    location / {
+        proxy_pass http://127.0.0.1:%s;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+`, panelDomain, *addr))
 		}
 	}()
 
-	// Periodic Caddy sync: re-generate and reload the services file every 60s.
-	// This self-heals any situation where the initial reload failed (e.g. Caddy
-	// started after featherdeploy, a transient sudo timeout, etc.).
+	// Periodic Nginx sync
 	go func() {
 		ticker := time.NewTicker(60 * time.Second)
 		defer ticker.Stop()
 		for range ticker.C {
-			caddy.PublishRoutes(db)
+			nginx.PublishRoutes(db)
 		}
 	}()
 
@@ -620,41 +488,6 @@ func serve() {
 	r.Get("/api/nodes/server-binary", nodeH.ServerBinaryDownload)
 	r.Get("/api/nodes/ca-cert", nodeH.CACert)
 	
-	// Cluster Tunnel (WebSocket) — token-based auth, WSS handles encryption
-	TunnelMgr.ValidateToken = func(token string) string {
-		if token == *jwtSecret {
-			return "main" // The original brain authenticating as a worker node
-		}
-		var id int64
-		// Accept current token OR previous token (24h grace period after rotation)
-		err := db.QueryRow(`
-			SELECT id FROM nodes 
-			WHERE tunnel_token = ? 
-			   OR (tunnel_token_prev = ? AND tunnel_rotated_at > datetime('now', '-24 hours'))
-			LIMIT 1`, token, token).Scan(&id)
-		if err != nil {
-			return ""
-		}
-		return fmt.Sprintf("node-%d", id)
-	}
-
-	TunnelMgr.OnNodeConnect = func(nodeID, newIP string) {
-		if strings.HasPrefix(nodeID, "node-") {
-			idStr := strings.TrimPrefix(nodeID, "node-")
-			var oldIP, wgMeshIP string
-			err := db.QueryRow(`SELECT ip, wg_mesh_ip FROM nodes WHERE id = ?`, idStr).Scan(&oldIP, &wgMeshIP)
-			if err == nil && wgMeshIP == "" && oldIP != newIP {
-				// Record history and update
-				if oldIP != "" {
-					db.Exec(`INSERT INTO node_ip_history (node_id, old_ip, new_ip) VALUES (?, ?, ?)`, idStr, oldIP, newIP)
-				}
-				db.Exec(`UPDATE nodes SET ip = ? WHERE id = ?`, newIP, idStr)
-				slog.Info("tunnel server: node ip updated", "node", nodeID, "old_ip", oldIP, "new_ip", newIP)
-			}
-		}
-	}
-
-	r.Get("/api/cluster/tunnel", TunnelMgr.HTTPHandler())
 
 	// ── Storage Object API — service key auth (X-Storage-Key), no JWT required ───
 	// Services (containers) call these endpoints using their per-service API key.
@@ -1623,14 +1456,7 @@ func pushCertToNode(name string, ip string, port int, cert *pki.NodeCert, caPEM 
 
 	url := fmt.Sprintf("https://%s:%d/api/node/rotate-cert", ip, port)
 	
-	// If the node is connected via tunnel, use the tunnel address instead of the public IP
-	// (NodeID is currently the hostname/name in our DB)
-	if TunnelMgr != nil {
-		if proxyAddr := TunnelMgr.GetNodeProxyAddr(name, 7443); proxyAddr != "" {
-			url = fmt.Sprintf("https://%s/api/node/rotate-cert", proxyAddr)
-			slog.Info("pki: using tunnel for cert push", "node", name, "addr", url)
-		}
-	}
+	// mTLS cert push always uses direct IP/Port in the new architecture
 
 	resp, err := client.Post(url, "application/json", bytes.NewReader(body))
 	if err != nil {

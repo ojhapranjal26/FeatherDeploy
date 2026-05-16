@@ -102,7 +102,7 @@ func (p *tcpProxy) accept() {
 			return
 		}
 
-		slog.Info("fdnet proxy: incoming connection",
+		slog.Debug("fdnet proxy: incoming connection",
 			"listenPort", p.listenPort,
 			"client", conn.RemoteAddr().String(),
 			"target", p.targetAddr)
@@ -130,6 +130,11 @@ func (p *tcpProxy) forward(src net.Conn) {
 	// and cleaned up instead of accumulating as zombie goroutines.
 	setKeepalive(src)
 	setKeepalive(dst)
+	
+	// Set read/write deadlines to prevent lingering connections from consuming RAM
+	deadline := time.Now().Add(2 * time.Hour) 
+	src.SetDeadline(deadline)
+	dst.SetDeadline(deadline)
 
 	var wg sync.WaitGroup
 	wg.Add(2)

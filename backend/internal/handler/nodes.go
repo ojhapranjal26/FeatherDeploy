@@ -27,7 +27,6 @@ import (
 	crypto "github.com/ojhapranjal26/featherdeploy/backend/internal/crypto"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/middleware"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/model"
-	"github.com/ojhapranjal26/featherdeploy/backend/internal/netdaemon"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/pki"
 	v "github.com/ojhapranjal26/featherdeploy/backend/internal/validator"
 )
@@ -216,9 +215,13 @@ func (h *NodeHandler) List(w http.ResponseWriter, r *http.Request) {
 		var assignedDomainsJSON string
 		h.db.QueryRowContext(r.Context(), `SELECT hostname, os_info, node_id, node_type, assigned_domains FROM nodes WHERE id=?`, n.ID).Scan(&n.Hostname, &n.OSInfo, &n.NodeID, &n.NodeType, &assignedDomainsJSON)
 		n.IsBrain = n.NodeType == model.NodeTypeBrain
-		if n.NodeID != "" && netdaemon.GlobalTunnel != nil {
-			n.TunnelConnected = netdaemon.GlobalTunnel.GetNodeProxyAddr(n.NodeID, 443) != "" || 
-				netdaemon.GlobalTunnel.GetNodeProxyAddr(n.NodeID, 7443) != ""
+		if n.NodeID != "" {
+			// Check if we can reach the node's API port (443) directly
+			conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:443", n.IP), 2*time.Second)
+			n.TunnelConnected = err == nil
+			if conn != nil {
+				conn.Close()
+			}
 		}
 		if assignedDomainsJSON != "" && assignedDomainsJSON != "[]" {
 			json.Unmarshal([]byte(assignedDomainsJSON), &n.AssignedDomains)
@@ -402,8 +405,9 @@ func (h *NodeHandler) NodeLogs(w http.ResponseWriter, r *http.Request) {
 
 		var dbNodeID string
 		var port int
+		var ip string
 		err = h.db.QueryRowContext(r.Context(),
-			`SELECT node_id, port FROM nodes WHERE id=?`, nodeID).Scan(&dbNodeID, &port)
+			`SELECT node_id, port, ip FROM nodes WHERE id=?`, nodeID).Scan(&dbNodeID, &port, &ip)
 		if err != nil {
 			fmt.Fprintf(w, "data: {\"error\":\"node not found\"}\n\n")
 			flusher.Flush()
@@ -413,31 +417,8 @@ func (h *NodeHandler) NodeLogs(w http.ResponseWriter, r *http.Request) {
 		// All node API traffic routes through the persistent yamux tunnel.
 		// The tunnel proxy gives us a loopback address that maps to the remote port.
 		scheme := "https"
-		ip := ""
 		tunnelPort := port
-		if netdaemon.GlobalTunnel != nil {
-			proxyAddr := netdaemon.GlobalTunnel.GetNodeProxyAddr(dbNodeID, 443)
-			if proxyAddr == "" {
-				proxyAddr = netdaemon.GlobalTunnel.GetNodeProxyAddr(dbNodeID, 7443)
-			}
-			if proxyAddr == "" && port != 7443 && port != 443 {
-				proxyAddr = netdaemon.GlobalTunnel.GetNodeProxyAddr(dbNodeID, port)
-			}
-			if proxyAddr != "" {
-				ip = "127.0.0.1"
-				parts := strings.Split(proxyAddr, ":")
-				if len(parts) == 2 {
-					if p, err2 := strconv.Atoi(parts[1]); err2 == nil {
-						tunnelPort = p
-					}
-				}
-			}
-		}
-		if ip == "" {
-			fmt.Fprintf(w, "data: {\"error\":\"node tunnel not connected\"}\n\n")
-			flusher.Flush()
-			return
-		}
+		// ip is already populated from the DB
 
 		// The node exposes /api/node/logs as an SSE endpoint, we proxy it
 		nodeURL := fmt.Sprintf("%s://%s:%d/api/node/logs", scheme, ip, tunnelPort)
@@ -723,11 +704,12 @@ func (h *NodeHandler) CompleteJoin(w http.ResponseWriter, r *http.Request) {
 	sshPubKey := heartbeat.GetSSHPublicKey(h.db)
 
 	// Cluster transport addresses:
-	// rqlite and etcd traffic travels through the persistent yamux tunnel.
-	// The node sets up local proxy ports (127.0.0.1:4001→brain via tunnel) during
-	// featherdeploy-node serve startup, so we advertise loopback addresses.
-	rqliteMain := "127.0.0.1:4001" // proxy port the node establishes on its own loopback
-	etcdMain := "main=http://127.0.0.1:2380"
+	// With direct port communication, we use the brain's IP.
+	rqliteMain := fmt.Sprintf("%s:4001", os.Getenv("SERVER_IP"))
+	if rqliteMain == ":4001" {
+		rqliteMain = "127.0.0.1:4001"
+	}
+	etcdMain := fmt.Sprintf("main=http://%s:2380", os.Getenv("SERVER_IP"))
 
 	// Fetch current cluster leader info so the joining node can connect correctly
 	var leaderNodeID, leaderPublicIP string
@@ -1067,6 +1049,27 @@ run_as_user_session() {
 	su -s /bin/sh "$user" -c "cd / && ${shell_cmd}"
 }
 
+check_ports() {
+	echo "==> Verifying required ports (4001, 4002, 2379, 2380, 80, 443)..."
+	local ports=(4001 4002 2379 2380 80 443)
+	for port in "${ports[@]}"; do
+		if ! timeout 2 bash -c "cat < /dev/null > /dev/tcp/127.0.0.1/$port" 2>/dev/null; then
+			echo "  ✓ Port $port is available locally"
+		else
+			echo "ERROR: Port $port is already in use. Please free it before joining." >&2; exit 1
+		fi
+	done
+}
+
+verify_connectivity() {
+	echo "==> Verifying connectivity to Brain node at ${MAIN_URL}..."
+	local brain_host; brain_host=$(echo "$MAIN_URL" | awk -F[/:] '{print $4}')
+	if ! timeout 5 bash -c "cat < /dev/null > /dev/tcp/$brain_host/4001" 2>/dev/null; then
+		echo "ERROR: Cannot reach Brain rqlite port (4001). Please ensure it is open on the Brain node." >&2; exit 1
+	fi
+	echo "  ✓ Connectivity verified"
+}
+
 reset_host() {
 	echo "==> Resetting previous FeatherDeploy/node state..."
 	for svc in featherdeploy featherdeploy-node featherdeploy-brain rqlite rqlite-node etcd etcd-node; do
@@ -1220,18 +1223,20 @@ if command -v apt-get >/dev/null 2>&1; then
 	export DEBIAN_FRONTEND=noninteractive
 	apt-get update -y -q
 	apt-get install -y -q curl uidmap slirp4netns netavark aardvark-dns passt containernetworking-plugins 2>/dev/null || true
-	apt-get install -y -q podman crun caddy openssh-server 2>/dev/null || apt-get install -y -q curl podman caddy openssh-server uidmap
+	apt-get install -y -q podman crun nginx certbot python3-certbot-nginx openssh-server 2>/dev/null || apt-get install -y -q curl podman nginx openssh-server uidmap
 elif command -v dnf >/dev/null 2>&1; then
 	dnf install -y -q curl shadow-utils slirp4netns netavark aardvark-dns passt containernetworking-plugins 2>/dev/null || true
-	dnf install -y -q podman crun caddy openssh-server 2>/dev/null || dnf install -y -q curl podman caddy openssh-server
+	dnf install -y -q podman crun nginx certbot python3-certbot-nginx openssh-server 2>/dev/null || dnf install -y -q curl podman nginx openssh-server
 elif command -v yum >/dev/null 2>&1; then
 	yum install -y -q curl shadow-utils slirp4netns netavark aardvark-dns passt containernetworking-plugins 2>/dev/null || true
-	yum install -y -q podman crun openssh-server 2>/dev/null || yum install -y -q curl podman openssh-server
+	yum install -y -q podman crun nginx certbot openssh-server 2>/dev/null || yum install -y -q curl podman openssh-server
 elif command -v apk >/dev/null 2>&1; then
-	apk add --no-cache curl podman caddy crun openssh 2>/dev/null || apk add --no-cache curl podman caddy openssh
+	apk add --no-cache curl podman nginx certbot crun openssh 2>/dev/null || apk add --no-cache curl podman nginx openssh
 	apk add --no-cache slirp4netns netavark aardvark-dns passt 2>/dev/null || true
 fi
 
+check_ports
+verify_connectivity
 install_rqlite
 install_etcd
 configure_crun

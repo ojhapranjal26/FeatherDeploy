@@ -37,7 +37,7 @@ import (
 
 	appCrypto "github.com/ojhapranjal26/featherdeploy/backend/internal/crypto"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/pki"
-	"github.com/ojhapranjal26/featherdeploy/backend/internal/caddy"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/nginx"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/detect"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/netdaemon"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/coordination"
@@ -882,7 +882,7 @@ func Run(ctx context.Context, db *sql.DB, jwtSecret string, depID, svcID, userID
 			if err == nil {
 				conn.Close()
 				// App is up — reload Caddy so traffic starts flowing immediately.
-				caddy.PublishRoutes(db)
+				nginx.PublishRoutes(db)
 				return
 			}
 
@@ -904,7 +904,7 @@ func Run(ctx context.Context, db *sql.DB, jwtSecret string, depID, svcID, userID
 					"\n%s",
 					hPort, hPort, sID, logs),
 			dID)
-		caddy.PublishRoutes(db)
+		nginx.PublishRoutes(db)
 	}(hostPort, depID, svcID)
 
 	// Tag the freshly built image as the stable snapshot so it can be used as
@@ -2680,13 +2680,8 @@ func migrateDatabaseDataBackground(db *sql.DB, secret string, taskID, dbID int64
 		return fmt.Errorf("old node %q not found", oldNodeID)
 	}
 
-	if tunnelIP, tunnelPort, _ := resolveNodeTunnel(oldNodeID, port); tunnelIP != "" {
-		ip = tunnelIP
-		port = tunnelPort
-	}
-	viaTunnel := netdaemon.GlobalTunnel != nil && ip == "127.0.0.1"
-
-	client, scheme := nodeHTTPClient(viaTunnel, 0) // 0 = no timeout for long transfers
+	ip, port = resolveNodeAddress(oldNodeID, ip, port)
+	client, scheme := nodeHTTPClient(0) // 0 = no timeout for long transfers
 
 	// 1. Trigger backup on old node
 	payload := map[string]any{
@@ -3754,66 +3749,19 @@ func extractTarGz(archivePath, destDir string, log *logBuf) error {
 // The node API always listens on port 7443 regardless of what is stored in the
 // DB (the DB port can be 443 from old registrations). We try the DB port first,
 // then fall back to 7443.
-func resolveNodeTunnel(nodeID string, dbPort int) (ip string, port int, viaTunnel bool) {
-	// If it's the brain node, talk to localhost directly (bypassing tunnel)
+func resolveNodeAddress(nodeID, ip string, port int) (string, int) {
 	if nodeID == "main" || nodeID == "" {
-		return "127.0.0.1", dbPort, false
+		return "127.0.0.1", port
 	}
-
-	// We allow up to 15 seconds for a node to re-establish its tunnel session
-	// after a brain restart. This prevents "node unreachable" errors during 
-	// the window where nodes are still reconnecting.
-	deadline := time.Now().Add(15 * time.Second)
-	slog.Info("[deploy] resolveNodeTunnel: searching for node tunnel", "node", nodeID, "deadline", "15s")
-	
-	for {
-		viaTunnel = false
-		if netdaemon.GlobalTunnel != nil {
-			// For worker nodes, we exclusively use the tunnel. 
-			// We prioritize port 8080 (the actual Node API port) and 7443/443.
-			
-			// 1. Try to find an existing tunnel proxy for port 8080 (internal API)
-			proxyAddr := netdaemon.GlobalTunnel.GetNodeProxyAddr(nodeID, 8080)
-			if proxyAddr != "" { slog.Info("[deploy] resolveNodeTunnel: found tunnel proxy via 8080", "node", nodeID, "proxy", proxyAddr) }
-			
-			// 2. Fallback: try port 7443 (default mTLS port)
-			if proxyAddr == "" {
-				proxyAddr = netdaemon.GlobalTunnel.GetNodeProxyAddr(nodeID, 7443)
-				if proxyAddr != "" { slog.Info("[deploy] resolveNodeTunnel: found tunnel proxy via 7443", "node", nodeID, "proxy", proxyAddr) }
-			}
-
-			// 3. Last resort: try port 443 (ingress port)
-			if proxyAddr == "" {
-				proxyAddr = netdaemon.GlobalTunnel.GetNodeProxyAddr(nodeID, 443)
-				if proxyAddr != "" { slog.Info("[deploy] resolveNodeTunnel: found tunnel proxy via 443", "node", nodeID, "proxy", proxyAddr) }
-			}
-
-			if proxyAddr != "" {
-				parts := strings.Split(proxyAddr, ":")
-				if len(parts) == 2 {
-					if p, err := strconv.Atoi(parts[1]); err == nil {
-						return "127.0.0.1", p, true
-					}
-				}
-			}
-		}
-
-		if time.Now().After(deadline) {
-			slog.Warn("[deploy] resolveNodeTunnel: failed to find active tunnel session", "node", nodeID)
-			break
-		}
-		time.Sleep(2 * time.Second)
+	if ip == "" {
+		return "127.0.0.1", port
 	}
-
-	return "", dbPort, false
+	return ip, port
 }
 
-// nodeHTTPClient builds the appropriate HTTP client for talking to a node.
-// When viaTunnel is true the request goes over the yamux tunnel proxy (plain HTTP,
-// no mTLS needed because the tunnel itself is the encrypted channel).
-// When viaTunnel is false we are talking directly to the node over the public network
-// and need a full mTLS client.
-func nodeHTTPClient(viaTunnel bool, timeout time.Duration) (*http.Client, string) {
+
+
+func nodeHTTPClient(timeout time.Duration) (*http.Client, string) {
 	// Search paths for mTLS certificates
 	paths := []string{
 		"/etc/featherdeploy",
@@ -3822,7 +3770,6 @@ func nodeHTTPClient(viaTunnel bool, timeout time.Duration) (*http.Client, string
 	}
 	
 	var caPEM, certPEM, keyPEM []byte
-	var err error
 	for _, p := range paths {
 		caPEM, _ = os.ReadFile(p + "/ca.crt")
 		certPEM, _ = os.ReadFile(p + "/node.crt")
@@ -3834,16 +3781,11 @@ func nodeHTTPClient(viaTunnel bool, timeout time.Duration) (*http.Client, string
 
 	tlsCfg, err := pki.TLSConfig(string(certPEM), string(keyPEM), string(caPEM))
 	if err != nil {
-		slog.Warn("nodeHTTPClient: mTLS config failed (client certificates missing or invalid), falling back to insecure", "err", err)
+		slog.Warn("nodeHTTPClient: mTLS config failed, falling back to insecure", "err", err)
 		return &http.Client{
 			Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
 			Timeout:   timeout,
 		}, "https"
-	}
-	if viaTunnel {
-		// When routing through the yamux loopback proxy, target hostname is 127.0.0.1.
-		// Skip hostname verification while preserving our loaded client certificate to satisfy worker node mTLS requirements.
-		tlsCfg.InsecureSkipVerify = true
 	}
 	return &http.Client{
 		Transport: &http.Transport{TLSClientConfig: tlsCfg},
@@ -3859,16 +3801,7 @@ func dispatchToNode(db *sql.DB, nodeID string, depID, svcID, userID int64, secre
 		return fmt.Errorf("node %q not found in DB: %w", nodeID, err)
 	}
 
-	// All inter-node dispatch routes through the persistent tunnel.
-	viaTunnel := false
-	if tunnelIP, tunnelPort, isTunnel := resolveNodeTunnel(nodeID, port); tunnelIP != "" {
-		ip = tunnelIP
-		port = tunnelPort
-		viaTunnel = isTunnel
-	} else {
-		// If tunnel is down, worker is unreachable due to restricted VPS ports.
-		return fmt.Errorf("node %q is unreachable (tunnel disconnected and public ports blocked)", nodeID)
-	}
+	ip, port = resolveNodeAddress(nodeID, ip, port)
 	
 	// Prepare payload
 	payload := map[string]any{
@@ -3879,7 +3812,7 @@ func dispatchToNode(db *sql.DB, nodeID string, depID, svcID, userID int64, secre
 	}
 	body, _ := json.Marshal(payload)
 
-	client, scheme := nodeHTTPClient(viaTunnel, 30*time.Second)
+	client, scheme := nodeHTTPClient(30*time.Second)
 	url := fmt.Sprintf("%s://%s:%d/api/node/deploy", scheme, ip, port)
 	resp, err := client.Post(url, "application/json", bytes.NewReader(body))
 	if err != nil {
@@ -3912,17 +3845,10 @@ func SendArtifactToNode(db *sql.DB, nodeID string, depID int64, tarballPath stri
 		return fmt.Errorf("node %q not found in DB: %w", nodeID, err)
 	}
 
-	viaTunnel := false
-	if tunnelIP, tunnelPort, isTunnel := resolveNodeTunnel(nodeID, port); tunnelIP != "" {
-		ip = tunnelIP
-		port = tunnelPort
-		viaTunnel = isTunnel
-	} else {
-		return fmt.Errorf("node %q unreachable (tunnel disconnected)", nodeID)
-	}
+	ip, port = resolveNodeAddress(nodeID, ip, port)
 
 	// Artifact transfers can be large; use a 5-minute timeout.
-	client, scheme := nodeHTTPClient(viaTunnel, 5*time.Minute)
+	client, scheme := nodeHTTPClient(5*time.Minute)
 
 	chunker := &transfer.Chunker{FilePath: tarballPath, ChunkSize: transfer.DefaultChunkSize}
 	totalChunks, _, err := chunker.ChunkCount()
@@ -3964,19 +3890,12 @@ func stopContainerOnNode(db *sql.DB, nodeID, containerID string) error {
 		return fmt.Errorf("node %q not found: %w", nodeID, err)
 	}
 
-	viaTunnel := false
-	if tunnelIP, tunnelPort, isTunnel := resolveNodeTunnel(nodeID, port); tunnelIP != "" {
-		ip = tunnelIP
-		port = tunnelPort
-		viaTunnel = isTunnel
-	} else {
-		return fmt.Errorf("node %q unreachable", nodeID)
-	}
+	ip, port = resolveNodeAddress(nodeID, ip, port)
 
 	payload := map[string]any{"container_id": containerID}
 	body, _ := json.Marshal(payload)
 
-	client, scheme := nodeHTTPClient(viaTunnel, 10*time.Second)
+	client, scheme := nodeHTTPClient(10*time.Second)
 	url := fmt.Sprintf("%s://%s:%d/api/node/stop", scheme, ip, port)
 	resp, err := client.Post(url, "application/json", bytes.NewReader(body))
 	if err != nil {
@@ -4000,11 +3919,7 @@ func dispatchDatabaseToNode(db *sql.DB, secret, nodeID string, dbID int64) error
 		return fmt.Errorf("node %q not found", nodeID)
 	}
 
-	if tunnelIP, tunnelPort, _ := resolveNodeTunnel(nodeID, port); tunnelIP != "" {
-		ip = tunnelIP
-		port = tunnelPort
-	}
-	viaTunnel := netdaemon.GlobalTunnel != nil && ip == "127.0.0.1"
+	ip, port = resolveNodeAddress(nodeID, ip, port)
 
 	payload := map[string]any{
 		"db_id":      dbID,
@@ -4012,7 +3927,7 @@ func dispatchDatabaseToNode(db *sql.DB, secret, nodeID string, dbID int64) error
 	}
 	body, _ := json.Marshal(payload)
 
-	client, scheme := nodeHTTPClient(viaTunnel, 30*time.Second)
+	client, scheme := nodeHTTPClient(30 * time.Second)
 	url := fmt.Sprintf("%s://%s:%d/api/node/db-start", scheme, ip, port)
 	resp, err := client.Post(url, "application/json", bytes.NewReader(body))
 	if err != nil {
@@ -4034,13 +3949,9 @@ func migrateDatabaseData(db *sql.DB, secret, oldNodeID string, dbID int64) error
 		return fmt.Errorf("old node %q not found", oldNodeID)
 	}
 
-	if tunnelIP, tunnelPort, _ := resolveNodeTunnel(oldNodeID, port); tunnelIP != "" {
-		ip = tunnelIP
-		port = tunnelPort
-	}
-	viaTunnel := netdaemon.GlobalTunnel != nil && ip == "127.0.0.1"
+	ip, port = resolveNodeAddress(oldNodeID, ip, port)
 
-	client, scheme := nodeHTTPClient(viaTunnel, 2*time.Minute)
+	client, scheme := nodeHTTPClient(2*time.Minute)
 
 	// 1. Trigger backup on old node
 	payload := map[string]any{

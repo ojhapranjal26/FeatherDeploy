@@ -10,7 +10,7 @@ import (
 	"strconv"
 	"strings"
 
-	caddypkg "github.com/ojhapranjal26/featherdeploy/backend/internal/caddy"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/nginx"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/deploy"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/model"
 	v "github.com/ojhapranjal26/featherdeploy/backend/internal/validator"
@@ -216,7 +216,7 @@ func (h *ServiceHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	deploy.CleanupProjectRuntimeIfUnused(h.db, projectID)
 
 	// ── Update Caddy (domain removed) ────────────────────────────────────────
-	go caddypkg.PublishRoutes(h.db)
+	go nginx.PublishRoutes(h.db)
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -238,7 +238,7 @@ func (h *ServiceHandler) Restart(w http.ResponseWriter, r *http.Request) {
 	}
 	h.db.ExecContext(r.Context(), //nolint
 		`UPDATE services SET status='running', updated_at=datetime('now') WHERE id=?`, svcID)
-	go caddypkg.PublishRoutes(h.db)
+	go nginx.PublishRoutes(h.db)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "restarted"})
 }
 func splitLines(s string) []string {

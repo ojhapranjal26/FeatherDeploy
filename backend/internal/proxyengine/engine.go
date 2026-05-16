@@ -1,13 +1,10 @@
 package proxyengine
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
-	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -15,7 +12,7 @@ import (
 	"go.etcd.io/etcd/api/v3/mvccpb"
 	clientv3 "go.etcd.io/etcd/client/v3"
 
-	"github.com/ojhapranjal26/featherdeploy/backend/internal/netdaemon"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/nginx"
 )
 
 // Route defines the desired state of a routing rule in Etcd.
@@ -88,18 +85,16 @@ func (e *Engine) triggerUpdate() {
 }
 
 func (e *Engine) updateLoop(ctx context.Context) {
-	var timer *time.Timer
+	timer := time.NewTimer(time.Hour) // long initial wait
+	timer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-e.updateCh:
-			if timer != nil {
-				timer.Stop()
-			}
-			timer = time.AfterFunc(500*time.Millisecond, func() {
-				e.applyToCaddy()
-			})
+			timer.Reset(500 * time.Millisecond)
+		case <-timer.C:
+			e.applyToNginx()
 		}
 	}
 }
@@ -231,150 +226,67 @@ func (e *Engine) watchNodes(ctx context.Context) {
 	}
 }
 
-func (e *Engine) applyToCaddy() {
+func (e *Engine) applyToNginx() {
 	e.mu.RLock()
 	routes := make([]Route, 0, len(e.routes))
 	for _, r := range e.routes {
 		routes = append(routes, r)
 	}
-	// Take snapshot of nodes to resolve IPs
 	nodes := make(map[string]NodeState)
 	for k, v := range e.nodes {
 		nodes[k] = v
 	}
 	e.mu.RUnlock()
 
-	caddyRoutes := buildCaddyRoutes(routes, nodes, e.nodeID)
-	// 1. Fetch existing routes from Caddy to preserve the Panel route and other Caddyfile routes.
-	var existingRoutes []map[string]any
-	respGet, err := http.Get("http://localhost:2019/config/apps/http/servers/srv0/routes")
-	if err == nil && respGet.StatusCode == 200 {
-		b, _ := io.ReadAll(respGet.Body)
-		json.Unmarshal(b, &existingRoutes)
-		respGet.Body.Close()
-	} else if respGet != nil {
-		respGet.Body.Close()
-	}
-
-	// 2. Filter out our old dynamic routes (identified by @id starting with fd_dynamic_)
-	var mergedRoutes []map[string]any
-	for _, r := range existingRoutes {
-		idStr, _ := r["@id"].(string)
-		if !strings.HasPrefix(idStr, "fd_dynamic_") {
-			mergedRoutes = append(mergedRoutes, r)
-		}
-	}
-
-	// 3. Append our new dynamic routes
-	mergedRoutes = append(mergedRoutes, caddyRoutes...)
-
-	payload, _ := json.Marshal(mergedRoutes)
-
-	req, err := http.NewRequest("PATCH", "http://localhost:2019/config/apps/http/servers/srv0/routes", bytes.NewReader(payload))
-	if err != nil {
-		return
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		slog.Warn("proxyengine: failed to patch caddy", "err", err)
-		return
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		b, _ := io.ReadAll(resp.Body)
-		slog.Warn("proxyengine: caddy rejected config", "status", resp.StatusCode, "body", string(b))
-	} else {
-		slog.Info("proxyengine: successfully pushed batched routes to Caddy", "dynamic_count", len(caddyRoutes), "total_count", len(mergedRoutes))
-	}
-}
-
-func buildCaddyRoutes(routes []Route, nodes map[string]NodeState, myNodeID string) []map[string]any {
-	var out []map[string]any
-
+	anyChanged := false
 	for _, r := range routes {
-		var dialAddr string
-		var useTLS bool
-		if r.TargetNode == myNodeID || (myNodeID == "main" && (r.TargetNode == "" || r.TargetNode == "main")) {
-			// Local routing: talk directly to Podman host port if available, otherwise cluster port
-			port := r.TargetPort
-			if r.HostPort > 0 {
-				port = r.HostPort
-			}
-			dialAddr = fmt.Sprintf("127.0.0.1:%d", port)
-			useTLS = false
-		} else {
-			// Cross-node routing
-			var targetIP string
-			ns, healthy := nodes[r.TargetNode]
-			if !healthy {
-				slog.Debug("proxyengine: dropping route, target node offline", "domain", r.Domain, "target", r.TargetNode)
-				continue
-			}
-
-			if ns.WgMeshIP != "" {
-				targetIP = ns.WgMeshIP
-			} else {
-				targetIP = ns.IP
-			}
-
-			// If we are on the brain, prioritize routing through the tunnel directly to the worker's application port.
-			// This is much more reliable as it bypasses the worker's Caddy and its potential certificate issues.
-			if myNodeID == "main" && netdaemon.GlobalTunnel != nil {
-				if localPort := netdaemon.GlobalTunnel.EnsureServiceProxy(r.TargetNode, r.TargetPort); localPort > 0 {
-					dialAddr = fmt.Sprintf("127.0.0.1:%d", localPort)
-					useTLS = false // Tunnel is already secure, backend (fdnet/container) speaks HTTP
-				} else if proxyAddr := netdaemon.GlobalTunnel.GetNodeProxyAddr(r.TargetNode, 443); proxyAddr != "" {
-					dialAddr = proxyAddr
-					useTLS = true
-				} else {
-					dialAddr = fmt.Sprintf("%s:443", targetIP)
-					useTLS = true
-				}
-			} else {
-				// Fallback to mesh/public IP + TLS
-				dialAddr = fmt.Sprintf("%s:443", targetIP)
-				useTLS = true
-			}
+		config := buildNginxConfig(r, nodes, e.nodeID)
+		if config == "" {
+			continue
 		}
-
-		route := map[string]any{
-			"@id": "fd_dynamic_" + r.Domain,
-			"match": []map[string]any{
-				{
-					"host": []string{r.Domain},
-					"not": []map[string]any{
-						{
-							"path": []string{"/.well-known/acme-challenge/*"},
-						},
-					},
-				},
-			},
-			"handle": []map[string]any{
-				{
-					"handler": "reverse_proxy",
-					"upstreams": []map[string]any{
-						{
-							"dial": dialAddr,
-						},
-					},
-				},
-			},
-			"terminal": true,
+		changed, err := nginx.WriteServiceConfig(r.Domain, config)
+		if err != nil {
+			slog.Warn("proxyengine: failed to write nginx config", "domain", r.Domain, "err", err)
 		}
-
-		// If TLS is required for this hop, configure the transport
-		if useTLS {
-			route["handle"].([]map[string]any)[0]["transport"] = map[string]any{
-				"protocol": "http",
-				"tls": map[string]any{
-					"insecure_skip_verify": true, // Using self-signed / internal CA
-				},
-			}
+		if changed {
+			anyChanged = true
 		}
-
-		out = append(out, route)
 	}
 
-	return out
+	if anyChanged {
+		if err := nginx.ReloadNginx(); err != nil {
+			slog.Error("proxyengine: batch nginx reload failed", "err", err)
+		}
+	}
 }
+
+func buildNginxConfig(r Route, nodes map[string]NodeState, myNodeID string) string {
+	var dialAddr string
+	if r.TargetNode == myNodeID || (myNodeID == "main" && (r.TargetNode == "" || r.TargetNode == "main")) {
+		port := r.TargetPort
+		if r.HostPort > 0 {
+			port = r.HostPort
+		}
+		dialAddr = fmt.Sprintf("127.0.0.1:%d", port)
+	} else {
+		ns, healthy := nodes[r.TargetNode]
+		if !healthy {
+			return ""
+		}
+		targetIP := ns.IP
+		if ns.WgMeshIP != "" {
+			targetIP = ns.WgMeshIP
+		}
+		dialAddr = fmt.Sprintf("%s:%d", targetIP, r.TargetPort)
+	}
+
+	var sb strings.Builder
+	sb.Grow(256)
+	sb.WriteString("server {\n    listen 80;\n    server_name ")
+	sb.WriteString(r.Domain)
+	sb.WriteString(";\n\n    location / {\n        proxy_pass http://")
+	sb.WriteString(dialAddr)
+	sb.WriteString(";\n        proxy_set_header Host $host;\n        proxy_set_header X-Real-IP $remote_addr;\n        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n        proxy_set_header X-Forwarded-Proto $scheme;\n    }\n}\n")
+	return sb.String()
+}
+

@@ -41,7 +41,8 @@ const (
 	dataDir        = "/var/lib/featherdeploy"
 	configDir      = "/etc/featherdeploy"
 	envFile        = "/etc/featherdeploy/featherdeploy.env"
-	caddyConf      = "/etc/caddy/Caddyfile"
+	nginxConf      = "/etc/nginx/sites-available/featherdeploy"
+	nginxEnabled   = "/etc/nginx/sites-enabled/featherdeploy"
 	systemdUnit    = "/etc/systemd/system/featherdeploy.service"
 	defaultSvcUser = "featherdeploy"
 	backendPort    = "8080"
@@ -124,6 +125,12 @@ func Run() {
 	}
 	configureCrun()
 
+	// ── Step 3b: Port checks ──────────────────────────────────────────────────
+	requiredPorts := []int{4001, 4002, 2379, 2380, 80, 443}
+	if err := checkPortsOpen(requiredPorts); err != nil {
+		die("Port check failed: %v", err)
+	}
+
 	// ── Step 4: Create service OS user + directories ─────────────────────────
 	fmt.Println("\n── Preparing service user and directories ──────────────────────")
 	// On a reinstall the previous featherdeploy/rqlite services may still be
@@ -163,8 +170,14 @@ func Run() {
 	fmt.Println("\n── Configuring rqlite and etcd ───────────────────────────")
 	installRqlite()
 	installEtcd()
-	writeRqliteService(svcUser)
-	writeEtcdService(svcUser)
+	
+	serverIP := installerDetectPublicIP()
+	if serverIP == "" {
+		serverIP = "127.0.0.1"
+	}
+
+	writeRqliteService(svcUser, "main", true, "")
+	writeEtcdService(svcUser, "main", fmt.Sprintf("main=http://%s:2380", serverIP), "new")
 	mustRun("systemctl", "daemon-reload")
 	mustRun("systemctl", "enable", "rqlite")
 	mustRun("systemctl", "enable", "etcd")
@@ -196,8 +209,13 @@ func Run() {
 	frontendOrigin := "https://" + domain
 	rqliteURL := "http://127.0.0.1:4001"
 
-	// Detect the server's public IP so DNS verification works correctly.
-	serverIP := installerDetectPublicIP()
+	// Ensure serverIP is set for the env file (already detected in Step 5a).
+	if serverIP == "" {
+		serverIP = installerDetectPublicIP()
+	}
+	if serverIP == "" {
+		serverIP = "127.0.0.1"
+	}
 
 	envContent := fmt.Sprintf(`# FeatherDeploy — generated %s
 RQLITE_URL=%s
@@ -224,15 +242,12 @@ SERVER_IP=%s
 	db.Close()
 	fmt.Printf("  ✓ superadmin created (%s)\n", adminEmail)
 
-	// ── Step 8: Write Caddyfile ───────────────────────────────────────────────
-	fmt.Println("\n── Configuring Caddy ───────────────────────────────────────────")
-	writeCaddyfile(domain)
-	fmt.Printf("  ✓ wrote %s\n", caddyConf)
-	// Hand ownership of the Caddyfile to the service user so ensureImport()
-	// can update the import directive directly without needing sudo.
-	exec.Command("chown", svcUser+":"+svcUser, caddyConf).Run() //nolint
-
-	// ── Step 8b: Write sudoers rules so featherdeploy can reload Caddy ───────
+	// ── Step 8: Write Nginx Config ───────────────────────────────────────────────
+	fmt.Println("\n── Configuring Nginx ───────────────────────────────────────────")
+	writeNginxConfig(domain)
+	setupNginxSudoers(svcUser)
+	
+	// ── Step 8b: Write sudoers rules so featherdeploy can reload Nginx ───────
 	writeSudoersFile(svcUser)
 	fmt.Println("  ✓ sudoers rules written")
 
@@ -244,21 +259,46 @@ SERVER_IP=%s
 	mustRun("systemctl", "start", "featherdeploy")
 	fmt.Println("  ✓ featherdeploy service enabled and started")
 
-	// ── Step 10: Reload or start Caddy ───────────────────────────────────────
+	// ── Step 10: Reload or start Nginx ───────────────────────────────────────
 	if _, err := exec.LookPath("systemctl"); err == nil {
-		if runSilent("systemctl", "is-active", "--quiet", "caddy") == nil {
-			runSilent("systemctl", "reload", "caddy")
+		if runSilent("systemctl", "is-active", "--quiet", "nginx") == nil {
+			runSilent("systemctl", "reload", "nginx")
 		} else {
-			mustRun("systemctl", "enable", "caddy")
-			mustRun("systemctl", "start", "caddy")
+			mustRun("systemctl", "enable", "nginx")
+			mustRun("systemctl", "start", "nginx")
 		}
-		fmt.Println("  ✓ Caddy reloaded")
+		fmt.Println("  ✓ Nginx reloaded")
 	}
 
 	// ── Step 11: Protect internal port ranges ────────────────────────────────
 	setupIPTablesProtection()
 
 	printSuccess(domain, svcUser)
+}
+
+func checkPortsOpen(ports []int) error {
+	fmt.Println("\n── Checking required ports ─────────────────────────────────────")
+	for _, p := range ports {
+		ln, err := net.Listen("tcp", fmt.Sprintf(":%d", p))
+		if err != nil {
+			return fmt.Errorf("port %d is not available: %v. Please ensure it is open and not in use.", p, err)
+		}
+		ln.Close()
+		fmt.Printf("  ✓ port %d is available\n", p)
+	}
+	return nil
+}
+
+func handshakeLeader(leaderIP string) error {
+	fmt.Printf("\n── Handshaking with leader at %s ────────────────────────────\n", leaderIP)
+	// Try to connect to leader's rqlite port to verify connectivity
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:4001", leaderIP), 5*time.Second)
+	if err != nil {
+		return fmt.Errorf("failed to connect to leader at %s:4001. Please check if the port is open and the leader is running.", leaderIP)
+	}
+	conn.Close()
+	fmt.Println("  ✓ connection to leader successful")
+	return nil
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
@@ -852,11 +892,9 @@ func mustMkdir(path string) {
 // regardless of which install path was used.
 func writeSudoersFile(svcUser string) {
 	const sudoersFile = "/etc/sudoers.d/featherdeploy-podman"
-	content := svcUser + " ALL=(root) NOPASSWD: /bin/systemctl reload caddy\n" +
-		svcUser + " ALL=(root) NOPASSWD: /usr/bin/systemctl reload caddy\n" +
-		svcUser + " ALL=(root) NOPASSWD: /usr/bin/tee /etc/caddy/featherdeploy-services.caddy\n" +
-		// Allow tee-based append for the main Caddyfile (used by ensureImport fallback).
-		svcUser + " ALL=(root) NOPASSWD: /usr/bin/tee /etc/caddy/Caddyfile\n" +
+	content := svcUser + " ALL=(root) NOPASSWD: /usr/bin/systemctl reload nginx\n" +
+		svcUser + " ALL=(root) NOPASSWD: /usr/bin/systemctl restart nginx\n" +
+		svcUser + " ALL=(root) NOPASSWD: /usr/bin/certbot\n" +
 		svcUser + " ALL=(root) NOPASSWD: /usr/local/bin/featherdeploy-update\n" +
 		// Allow iptables for public database access toggle.
 		svcUser + " ALL=(root) NOPASSWD: /sbin/iptables\n" +
@@ -914,7 +952,7 @@ func writeFile(path, content string, perm os.FileMode) {
 // reliably (loopback-only binding is unreliable in some nftables/netavark
 // configurations). These iptables rules ensure those ports are never
 // reachable from the internet while still being accessible via localhost
-// (Caddy → fdnet → rootlessport → container).
+// (Nginx → rootlessport → container).
 //
 // IMPORTANT: rules use -m conntrack --ctstate NEW so that only brand-new
 // inbound connections are dropped.  Response packets for connections this
@@ -1225,41 +1263,24 @@ type pkgCmd struct {
 var pkgManagers = map[string]pkgCmd{
 	"apt-get": {
 		update: []string{"apt-get", "update", "-y"},
-		// aardvark-dns is REQUIRED by netavark bridge networking — without it,
-		// netavark cannot start the per-network DNS forwarder and 'podman run
-		// --network <name>' fails with the misleading error "network not found"
-		// (netavark tries to exec aardvark-dns, gets ENOENT, exits 127, and
-		// Podman maps the helper failure to "unable to find network").
-		// passt is still useful to have available, but FeatherDeploy pins
-		// slirp4netns for rootless user-defined networks because inter-container
-		// connectivity is a first-class requirement.
-		install: []string{"apt-get", "install", "-y", "podman", "crun", "caddy", "netavark", "aardvark-dns", "slirp4netns", "passt", "containernetworking-plugins", "wireguard", "wireguard-tools"},
+		install: []string{"apt-get", "install", "-y", "podman", "crun", "nginx", "certbot", "python3-certbot-nginx", "netavark", "aardvark-dns", "slirp4netns", "passt", "containernetworking-plugins", "wireguard", "wireguard-tools"},
 	},
 	"dnf": {
 		update: []string{"dnf", "check-update"},
-		// netavark and aardvark-dns are NOT pulled in as podman dependencies on
-		// RHEL 9 / AlmaLinux / Rocky Linux. Without them, `podman network create`
-		// appears to succeed (writes a JSON file) but `podman run --network <name>`
-		// exits with code 127 because the netavark binary is missing.
-		// passt is installed as an available helper, but FeatherDeploy keeps
-		// slirp4netns as the explicit rootless network command for named networks.
-		install: []string{"dnf", "install", "-y", "podman", "crun", "caddy", "netavark", "aardvark-dns", "slirp4netns", "passt", "containernetworking-plugins", "wireguard-tools"},
+		install: []string{"dnf", "install", "-y", "podman", "crun", "nginx", "certbot", "python3-certbot-nginx", "netavark", "aardvark-dns", "slirp4netns", "passt", "containernetworking-plugins", "wireguard-tools"},
 	},
 	"yum": {
 		update: nil,
-		// On RHEL 8, netavark and passt may not exist in repos; containernetworking-plugins
-		// is the CNI fallback. All are listed — yum ignores unavailable packages
-		// when using --skip-broken.
-		install: []string{"yum", "install", "-y", "--skip-broken", "podman", "crun",
+		install: []string{"yum", "install", "-y", "--skip-broken", "podman", "crun", "nginx", "certbot",
 			"netavark", "aardvark-dns", "slirp4netns", "containernetworking-plugins", "passt", "wireguard-tools"},
 	},
 	"pacman": {
 		update:  []string{"pacman", "-Sy"},
-		install: []string{"pacman", "-S", "--noconfirm", "podman", "crun", "caddy", "netavark", "aardvark-dns", "slirp4netns", "passt", "wireguard-tools"},
+		install: []string{"pacman", "-S", "--noconfirm", "podman", "crun", "nginx", "certbot", "netavark", "aardvark-dns", "slirp4netns", "passt", "wireguard-tools"},
 	},
 	"apk": {
 		update:  []string{"apk", "update"},
-		install: []string{"apk", "add", "--no-cache", "podman", "crun", "caddy", "wireguard-tools"},
+		install: []string{"apk", "add", "--no-cache", "podman", "crun", "nginx", "certbot", "wireguard-tools"},
 	},
 }
 
@@ -1539,16 +1560,16 @@ StartLimitIntervalSec=0
 Type=simple
 User={{.User}}
 Group={{.User}}
-# Ensure the data directory is owned by the service user on every start
-# (handles reboots where ownership may be reset or the dir was created as root)
 ExecStartPre=/bin/bash -c 'mkdir -p {{.DataDir}}/rqlite-data && chown -R {{.User}}:{{.User}} {{.DataDir}}/rqlite-data'
+Environment=GOMEMLIMIT=256MiB
+Environment=GOGC=50
 ExecStart=/usr/local/bin/rqlited \
-  -node-id=main \
+  -node-id={{.NodeID}} \
   -http-addr=0.0.0.0:4001 \
   -http-adv-addr={{.PublicIP}}:4001 \
   -raft-addr=0.0.0.0:4002 \
   -raft-adv-addr={{.PublicIP}}:4002 \
-  -bootstrap-expect=1 \
+  {{if .IsLeader}}-bootstrap-expect=1{{else}}-join http://{{.LeaderIP}}:4001{{end}} \
   {{.DataDir}}/rqlite-data
 Restart=always
 RestartSec=5s
@@ -1559,14 +1580,17 @@ StandardError=journal
 WantedBy=multi-user.target
 `
 
-func writeRqliteService(svcUser string) {
+func writeRqliteService(svcUser string, nodeID string, isLeader bool, leaderIP string) {
 	publicIP := installerDetectPublicIP()
 	if publicIP == "" {
 		publicIP = "127.0.0.1"
 	}
 	tmpl := template.Must(template.New("rqlite").Parse(rqliteServiceTmpl))
 	var buf strings.Builder
-	tmpl.Execute(&buf, struct{ User, DataDir, PublicIP string }{svcUser, dataDir, publicIP})
+	tmpl.Execute(&buf, struct {
+		User, DataDir, PublicIP, NodeID, LeaderIP string
+		IsLeader                                  bool
+	}{svcUser, dataDir, publicIP, nodeID, leaderIP, isLeader})
 	writeFile(rqliteSystemdUnit, buf.String(), 0644)
 	fmt.Printf("  ✓ wrote %s\n", rqliteSystemdUnit)
 }
@@ -1580,16 +1604,18 @@ Type=simple
 User={{.User}}
 Group={{.User}}
 ExecStartPre=/bin/bash -c 'mkdir -p {{.DataDir}}/etcd-data && chown -R {{.User}}:{{.User}} {{.DataDir}}/etcd-data'
+Environment=GOMEMLIMIT=128MiB
+Environment=GOGC=40
 ExecStart=/usr/local/bin/etcd \
-  --name=main \
+  --name={{.NodeID}} \
   --data-dir={{.DataDir}}/etcd-data \
   --listen-client-urls=http://0.0.0.0:2379 \
   --advertise-client-urls=http://{{.PublicIP}}:2379 \
   --listen-peer-urls=http://0.0.0.0:2380 \
   --initial-advertise-peer-urls=http://{{.PublicIP}}:2380 \
-  --initial-cluster=main=http://{{.PublicIP}}:2380 \
+  --initial-cluster={{.ClusterSpec}} \
   --initial-cluster-token=etcd-cluster-1 \
-  --initial-cluster-state=new
+  --initial-cluster-state={{.ClusterState}}
 Restart=always
 RestartSec=5s
 
@@ -1597,14 +1623,16 @@ RestartSec=5s
 WantedBy=multi-user.target
 `
 
-func writeEtcdService(svcUser string) {
+func writeEtcdService(svcUser string, nodeID string, clusterSpec string, clusterState string) {
 	publicIP := installerDetectPublicIP()
 	if publicIP == "" {
 		publicIP = "127.0.0.1"
 	}
 	tmpl := template.Must(template.New("etcd").Parse(etcdServiceTmpl))
 	var buf strings.Builder
-	tmpl.Execute(&buf, struct{ User, DataDir, PublicIP string }{svcUser, dataDir, publicIP})
+	tmpl.Execute(&buf, struct {
+		User, DataDir, PublicIP, NodeID, ClusterSpec, ClusterState string
+	}{svcUser, dataDir, publicIP, nodeID, clusterSpec, clusterState})
 	writeFile(etcdSystemdUnit, buf.String(), 0644)
 	fmt.Printf("  ✓ wrote %s\n", etcdSystemdUnit)
 }
@@ -1648,98 +1676,51 @@ func createSuperAdmin(db *sql.DB, email, name, password string) error {
 	return err
 }
 
-// ─── Caddyfile ────────────────────────────────────────────────────────────────
+// ─── Nginx Configuration ──────────────────────────────────────────────────────
 
-const caddyfileTmpl = `# FeatherDeploy — generated by installer
-{
-    # Global options
-    email admin@{{.Domain}}
+const nginxConfigTmpl = `# FeatherDeploy Panel — generated by installer
+server {
+    listen 80;
+    server_name {{.Domain}};
+
+    location / {
+        proxy_pass http://127.0.0.1:{{.Port}};
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # WebSockets
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+
+    access_log /var/log/nginx/featherdeploy_access.log;
+    error_log /var/log/nginx/featherdeploy_error.log;
 }
-
-{{.Domain}} {
-    # The deploypaaas binary serves both the API and the embedded frontend.
-    reverse_proxy 127.0.0.1:{{.Port}} {
-        header_up Host {host}
-        header_up X-Real-IP {remote_host}
-    }
-
-    # Security headers
-    header {
-        Strict-Transport-Security "max-age=31536000; includeSubDomains"
-        X-Frame-Options "SAMEORIGIN"
-        X-Content-Type-Options "nosniff"
-        Referrer-Policy "strict-origin-when-cross-origin"
-        -Server
-    }
-
-    encode gzip
-    log {
-        output file /var/log/caddy/deploypaaas.log
-    }
-}
-
-# Service domain routing — managed automatically by FeatherDeploy
-import /etc/caddy/featherdeploy-services.caddy
 `
 
-func writeCaddyfile(domain string) {
-	tmpl := template.Must(template.New("caddy").Parse(caddyfileTmpl))
+func writeNginxConfig(domain string) {
+	tmpl := template.Must(template.New("nginx").Parse(nginxConfigTmpl))
 	var buf strings.Builder
 	tmpl.Execute(&buf, struct{ Domain, Port string }{domain, backendPort})
-	writeFile(caddyConf, buf.String(), 0644)
-	// Ensure Caddy log dir exists
-	os.MkdirAll("/var/log/caddy", 0755)
-	// Create the services include file so the import directive doesn't fail
-	// on a fresh install before any service has been deployed.
-	ensureCaddyServicesFile(defaultSvcUser)
+	writeFile(nginxConf, buf.String(), 0644)
+	
+	// Create symlink to enable site
+	os.MkdirAll(filepath.Dir(nginxEnabled), 0755)
+	_ = os.Symlink(nginxConf, nginxEnabled)
+
+	fmt.Printf("  ✓ wrote %s and enabled via %s\n", nginxConf, nginxEnabled)
 }
 
-// ensureCaddyServicesFile creates /etc/caddy/featherdeploy-services.caddy with
-// correct ownership if it does not already exist.
-func ensureCaddyServicesFile(svcUser string) {
-	const servicesFile = "/etc/caddy/featherdeploy-services.caddy"
-	if _, err := os.Stat(servicesFile); err == nil {
-		// File exists — ensure correct ownership so the service process can update it.
-		exec.Command("chown", svcUser+":"+svcUser, servicesFile).Run() //nolint
-	} else {
-		if err := os.WriteFile(servicesFile, []byte("# Auto-generated by FeatherDeploy\n"), 0644); err != nil {
-			slog.Warn("installer: could not create caddy services file", "err", err)
-		} else {
-			exec.Command("chown", svcUser+":"+svcUser, servicesFile).Run() //nolint
-		}
-	}
-	// Make /etc/caddy/ writable by the service user's primary group so the
-	// running daemon can atomically rename temp config files into the directory
-	// (the fastest / safest write path in writeServicesFile).
-	exec.Command("chgrp", svcUser, "/etc/caddy").Run()  //nolint
-	exec.Command("chmod", "g+w", "/etc/caddy").Run()    //nolint
-	// Transfer Caddyfile ownership so ensureImport() can append to it directly
-	// without sudo.  (Belt-and-suspenders: the installer also does this after
-	// writeCaddyfile, but update runs ensureCaddyServicesFile without calling
-	// writeCaddyfile.)
-	if _, err := os.Stat(caddyConf); err == nil {
-		exec.Command("chown", svcUser, caddyConf).Run() //nolint
-	}
-}
-
-// ensureCaddyImport appends the services import directive to the main Caddyfile
-// if it is missing.  Called during updates to migrate existing installations.
-func ensureCaddyImport() {
-	data, err := os.ReadFile(caddyConf)
-	if err != nil {
-		return
-	}
-	if strings.Contains(string(data), "featherdeploy-services.caddy") {
-		return
-	}
-	f, err := os.OpenFile(caddyConf, os.O_APPEND|os.O_WRONLY, 0644)
-	if err != nil {
-		slog.Warn("installer: could not update Caddyfile", "err", err)
-		return
-	}
-	defer f.Close()
-	fmt.Fprintf(f, "\n# Service domain routing — managed automatically by FeatherDeploy\nimport /etc/caddy/featherdeploy-services.caddy\n")
-	slog.Info("installer: added caddy services import to Caddyfile")
+func setupNginxSudoers(svcUser string) {
+	const sudoersFile = "/etc/sudoers.d/featherdeploy-nginx"
+	content := fmt.Sprintf("%s ALL=(root) NOPASSWD: /usr/sbin/nginx -t\n", svcUser) +
+		fmt.Sprintf("%s ALL=(root) NOPASSWD: /usr/bin/systemctl reload nginx\n", svcUser) +
+		fmt.Sprintf("%s ALL=(root) NOPASSWD: /usr/bin/tee /etc/nginx/sites-available/*\n", svcUser)
+	
+	_ = os.WriteFile(sudoersFile, []byte(content), 0440)
 }
 
 // ─── Systemd service ──────────────────────────────────────────────────────────
@@ -1768,6 +1749,8 @@ PAMName=systemd-user
 # RuntimeDirectory creates /run/featherdeploy-runtime owned by the service user
 # before the process starts, making it available as a stable XDG runtime dir.
 Environment=HOME={{.DataDir}}
+Environment=GOMEMLIMIT=150MiB
+Environment=GOGC=50
 # XDG_RUNTIME_DIR is the standard rootless-podman runtime directory.
 # We embed the service user's numeric UID directly (resolved at install/update
 # time) rather than using the %U specifier, which systemd documents as
@@ -1869,8 +1852,12 @@ func RunUpdate() {
 		}
 	}
 	writeSystemdService(svcUser)
-	writeRqliteService(svcUser)
-	writeEtcdService(svcUser)
+	serverIP := installerDetectPublicIP()
+	if serverIP == "" {
+		serverIP = "127.0.0.1"
+	}
+	writeRqliteService(svcUser, "main", true, "")
+	writeEtcdService(svcUser, "main", fmt.Sprintf("main=http://%s:2380", serverIP), "new")
 	fmt.Printf("  ✓ systemd units updated (User=%s)\n", svcUser)
 
 	// Re-enable linger for the service user so /run/user/<uid> is created
@@ -1965,13 +1952,18 @@ func RunUpdate() {
 
 	// (No WireGuard setup required: cluster transport uses persistent tunnel)
 
-	// ── Reload Caddy ──────────────────────────────────────────────────────────
-	if runSilent("systemctl", "is-active", "--quiet", "caddy") == nil {
-		ensureCaddyServicesFile(defaultSvcUser)
-		ensureCaddyImport()
-		writeSudoersFile(defaultSvcUser)
-		runSilent("systemctl", "reload", "caddy")
-		fmt.Println("  ✓ Caddy reloaded")
+	// ── Reload Nginx ──────────────────────────────────────────────────────────
+	if runSilent("systemctl", "is-active", "--quiet", "nginx") == nil {
+		domain := readEnvVar(envFile, "ORIGIN")
+		domain = strings.TrimPrefix(domain, "https://")
+		domain = strings.TrimPrefix(domain, "http://")
+		if domain != "" {
+			writeNginxConfig(domain)
+		}
+		setupNginxSudoers(svcUser)
+		writeSudoersFile(svcUser)
+		runSilent("systemctl", "reload", "nginx")
+		fmt.Println("  ✓ Nginx reloaded")
 	}
 
 	// ── Protect internal port ranges ──────────────────────────────────────────

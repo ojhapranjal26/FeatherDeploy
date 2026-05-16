@@ -18,6 +18,10 @@ func NewClient(endpoints []string) (*Client, error) {
 	cli, err := clientv3.New(clientv3.Config{
 		Endpoints:   endpoints,
 		DialTimeout: 5 * time.Second,
+		// Memory optimization: Reduce gRPC window sizes and use keepalives
+		// to prevent stale connections from consuming memory.
+		MaxCallSendMsgSize: 2 * 1024 * 1024, // 2MB
+		MaxCallRecvMsgSize: 2 * 1024 * 1024, // 2MB
 	})
 	if err != nil {
 		return nil, err

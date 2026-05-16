@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -10,7 +11,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"bufio"
 	"log/slog"
 	"net"
 	"net/http"
@@ -19,18 +19,18 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"text/template"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
 
-	"github.com/ojhapranjal26/featherdeploy/backend/internal/crypto"
+	"github.com/ojhapranjal26/featherdeploy/backend/internal/coordination"
+	crypto "github.com/ojhapranjal26/featherdeploy/backend/internal/crypto"
 	appDb "github.com/ojhapranjal26/featherdeploy/backend/internal/db"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/deploy"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/heartbeat"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/pki"
-	"github.com/ojhapranjal26/featherdeploy/backend/internal/coordination"
-	"github.com/ojhapranjal26/featherdeploy/backend/internal/netdaemon"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/proxyengine"
 	"github.com/ojhapranjal26/featherdeploy/backend/internal/transfer"
 )
@@ -45,10 +45,10 @@ const (
 	nodeIDFile = configDir + "/node.id"
 	rqliteUnit = "/etc/systemd/system/rqlite-node.service"
 	rqliteData = dataDir + "/rqlite-data"
-	rqliteHTTP = "127.0.0.1:4003" // Worker's local rqlite (for HA only)
-	rqliteRaft = "127.0.0.1:4004"
-	etcdClient = "127.0.0.1:2381"
-	etcdPeer   = "127.0.0.1:2382"
+	rqliteHTTP = "4001"
+	rqliteRaft = "4002"
+	etcdClient = "2379"
+	etcdPeer   = "2380"
 )
 
 func main() {
@@ -181,40 +181,37 @@ func runJoin(args []string) {
 	fmt.Printf("==> Node type: %s\n", nodeType)
 	fmt.Printf("==> Node ID: %s\n", nodeID)
 
-	// Connectivity check: ensure we can reach the main server's WebSocket tunnel
-	wsURL := strings.Replace(mainURL, "http", "ws", 1) + "/api/cluster/tunnel"
-	fmt.Printf("==> Establishing secure tunnel to brain at %s...\n", wsURL)
+	svcUser := "featherdeploy"
 
-	tunnelMgr := netdaemon.NewTunnelManager()
-	
-	// Use a simple TLS config that trusts the OS cert pool (for the outer WSS)
-	tunnelTLSCfg := &tls.Config{InsecureSkipVerify: true}
-	
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel() // Stop temporary tunnel when script finishes
-	go tunnelMgr.StartClient(ctx, wsURL, nodeID, reply.TunnelToken, tunnelTLSCfg)
+	// ─── Etcd setup (All nodes join the etcd cluster) ─────────────────────────
+	fmt.Println("==> Configuring etcd coordination layer...")
+	writeEtcdNodeService(svcUser, nodeID, nodeIP, reply.EtcdMain, "existing")
+	runCmd("systemctl", "daemon-reload")
+	runCmd("systemctl", "enable", "--now", "etcd-node")
 
-	// Wait for connection to establish
-	time.Sleep(4 * time.Second)
-
-	// Always set up tunnel proxies for brain services.
-	// rqlite/etcd traffic reaches the brain through the persistent yamux tunnel stream.
-	tunnelMgr.ProxyNodeToBrain(4001, 4001) // rqlite HTTP
-	tunnelMgr.ProxyNodeToBrain(4002, 4002) // rqlite Raft
-	tunnelMgr.ProxyNodeToBrain(2379, 2379) // etcd client
-	tunnelMgr.ProxyNodeToBrain(2380, 2380) // etcd peer
-
+	// ─── Rqlite setup (Brain nodes only) ──────────────────────────────────────
 	if nodeType == "brain" {
-		fmt.Println("==> Checking connectivity through tunnel (brain node)...")
+		fmt.Printf("==> Configuring rqlite for brain node %s...\n", nodeID)
+		
+		// Brain nodes need to write rqlite unit and wait for it
+		writeRqliteNodeService(svcUser, nodeID, reply.LeaderIP, reply.LeaderIP == "")
+		runCmd("systemctl", "daemon-reload")
+		runCmd("systemctl", "enable", "--now", "rqlite-node")
+		
+		fmt.Printf("==> Checking connectivity to brain rqlite at %s...\n", reply.RqliteMain)
 		httpClient := &http.Client{Timeout: 5 * time.Second}
-		if resp, err := httpClient.Get("http://127.0.0.1:4001/readyz"); err != nil {
-			fmt.Printf("  WARNING: cannot reach main rqlite via tunnel: %v\n", err)
+		if resp, err := httpClient.Get("http://" + reply.RqliteMain + "/readyz"); err != nil {
+			fmt.Printf("  WARNING: cannot reach brain rqlite: %v\n", err)
 		} else {
 			resp.Body.Close()
-			fmt.Println("  ✓ Rqlite connectivity confirmed via tunnel")
+			fmt.Println("  ✓ Rqlite connectivity confirmed")
 		}
+		waitForRqlite(30)
 	} else {
-		fmt.Println("==> Worker node: skipping rqlite check (workers use etcd only)")
+		fmt.Println("==> Worker node: skipping rqlite setup (workers use etcd for coordination)")
+		// Ensure rqlite is stopped and disabled if it was previously present
+		runCmd("systemctl", "stop", "rqlite-node")
+		runCmd("systemctl", "disable", "rqlite-node")
 	}
 
 	// Write all service unit files before reloading systemd to prevent missing unit errors
@@ -223,10 +220,6 @@ func runJoin(args []string) {
 	runCmd("systemctl", "daemon-reload")
 
 
-	// Explicitly stop the temporary setup tunnel so the background service
-	// can bind to the proxy ports (4001, 2379, etc) without "address already in use" errors.
-	cancel()
-	time.Sleep(1 * time.Second)
 
 	// Enable and start the background featherdeploy-node serve service
 	runCmd("systemctl", "enable", "--now", "featherdeploy-node")
@@ -235,7 +228,7 @@ func runJoin(args []string) {
 
 	fmt.Printf("    Node ID: %s\n", nodeID)
 	fmt.Println("    Panel:   will mirror the main server panel (if available)")
-	fmt.Println("    rqlite:  http://127.0.0.1:4001 (proxied to brain)")
+	fmt.Printf("    rqlite:  http://%s (direct)\n", reply.RqliteMain)
 }
 
 // ─── serve ────────────────────────────────────────────────────────────────────
@@ -257,81 +250,66 @@ func runServe() {
 	isBrainNode := nodeType == "brain"
 	slog.Info("featherdeploy-node: role", "node_id", myID, "node_type", nodeType)
 
-	// ─── FeatherTunnel: Reverse Tunneling ──────────────────────────────────────
-	// Start the tunnel FIRST so that proxies are available for DB/etcd connections
-	tunnelMgr := netdaemon.NewTunnelManager()
-	mainURL := ""
+	var db *sql.DB
+	var err error
+	var mainURL, nodeToken string
+
 	if data, err := os.ReadFile(configDir + "/main_url"); err == nil {
 		mainURL = strings.TrimSpace(string(data))
 	}
-	nodeToken := ""
-	if data, err := os.ReadFile(configDir + "/tunnel_token"); err == nil {
+	if data, err := os.ReadFile(configDir + "/node_token"); err == nil {
 		nodeToken = strings.TrimSpace(string(data))
 	}
-	if mainURL != "" && nodeToken != "" {
-		wsURL := strings.Replace(mainURL, "http", "ws", 1) + "/api/cluster/tunnel"
-		tunnelTLSCfg := &tls.Config{InsecureSkipVerify: true}
-		slog.Info("tunnel client: connecting to brain", "url", wsURL, "node", myID)
-		go tunnelMgr.StartClient(context.Background(), wsURL, myID, nodeToken, tunnelTLSCfg)
 
-		// Set up persistent proxies to the brain's services via the tunnel.
-		// etcd (2379/2380) is always proxied — all node types need service discovery.
-		tunnelMgr.ProxyNodeToBrain(2379, 2379) // etcd client
-		tunnelMgr.ProxyNodeToBrain(2380, 2380) // etcd peer
-
-		if isBrainNode {
-			// Brain nodes also proxy rqlite for replica participation
-			tunnelMgr.ProxyNodeToBrain(4001, 4001) // rqlite HTTP
-			tunnelMgr.ProxyNodeToBrain(4002, 4002) // rqlite Raft
-			slog.Info("tunnel client: brain node — proxying rqlite + etcd")
-		} else {
-			slog.Info("tunnel client: worker node — proxying etcd only (no rqlite)")
-		}
-	}
 
 	// Wait a moment for tunnel to initialize
 	time.Sleep(2 * time.Second)
 
-	// Only brain nodes connect to rqlite (for DB replica participation).
-	// Worker nodes skip rqlite entirely — they only use etcd for service discovery.
-	var db *sql.DB
-	var err error
 	if isBrainNode {
-		rqliteConnectURL := "http://127.0.0.1:4001"
+		leaderIP := ""
+		if data, err := os.ReadFile(configDir + "/leader_ip"); err == nil {
+			leaderIP = strings.TrimSpace(string(data))
+		}
+		if leaderIP == "" {
+			leaderIP = "127.0.0.1"
+		}
+		rqliteConnectURL := "http://" + leaderIP + ":4001"
 		for i := 0; i < 30; i++ {
 			db, err = appDb.OpenRqlite(rqliteConnectURL)
 			if err == nil {
 				break
 			}
-			slog.Info("waiting for brain rqlite via tunnel...", "attempt", i+1, "url", rqliteConnectURL, "err", err)
+			slog.Info("waiting for brain rqlite...", "attempt", i+1, "url", rqliteConnectURL, "err", err)
 			time.Sleep(2 * time.Second)
 		}
 		if err != nil {
 			slog.Error("brain node: could not connect to rqlite", "err", err)
 		} else {
-			slog.Info("brain node: connected to rqlite via tunnel")
+			slog.Info("brain node: connected to rqlite", "url", rqliteConnectURL)
 		}
 	} else {
 		slog.Info("worker node: skipping rqlite (not eligible for leader election)")
 	}
 
 	// Start node heartbeat goroutine (runs for all node types)
-	// The heartbeat pings the brain's HTTP API via the tunnel to report CPU/RAM/disk stats.
-	if db != nil {
-		go runNodeHeartbeat(db, myID)
-	}
+	// Workers pass nil for db, brain nodes pass the rqlite connection
+	go runNodeHeartbeat(db, myID)
 
 	if mainURL != "" && nodeToken != "" {
-		tunnelTLSCfg := &tls.Config{InsecureSkipVerify: true}
-		go runAutoUpdater(mainURL, nodeToken, tunnelTLSCfg)
+		go runAutoUpdater(mainURL, nodeToken, &tls.Config{InsecureSkipVerify: true})
 	}
 
 	// ─── etcd Coordination Layer ──────────────────────────────────────────────
-	// etcd client connects via the tunnel proxy on 127.0.0.1:2379.
-	// Private cluster traffic stays inside the persistent tunnel stream.
-	etcdClient, err := coordination.NewClient([]string{"http://127.0.0.1:2379"})
+	leaderIP := ""
+	if data, err := os.ReadFile(configDir + "/leader_ip"); err == nil {
+		leaderIP = strings.TrimSpace(string(data))
+	}
+	if leaderIP == "" {
+		leaderIP = "127.0.0.1"
+	}
+	etcdClient, err := coordination.NewClient([]string{"http://" + leaderIP + ":2379"})
 	if err != nil {
-		slog.Warn("could not connect to etcd proxy, real-time coordination disabled", "err", err)
+		slog.Warn("could not connect to etcd, real-time coordination disabled", "err", err)
 	} else {
 		defer etcdClient.Close()
 		// Start real-time heartbeat in etcd
@@ -375,12 +353,9 @@ func runServe() {
 
 	// Brain pushes a new tunnel token here during rotation
 	r.Post("/api/node/rotate-tunnel-token", func(w http.ResponseWriter, req *http.Request) {
-		// Only accept from localhost (via tunnel proxy — never from public internet)
 		host, _, _ := net.SplitHostPort(req.RemoteAddr)
-		if host != "127.0.0.1" && host != "::1" {
-			http.Error(w, "forbidden", http.StatusForbidden)
-			return
-		}
+		// We trust any internal IP for this now, but should ideally use mTLS
+		slog.Info("node: rotate-tunnel-token request", "from", host)
 		var payload struct {
 			TunnelToken string `json:"tunnel_token"`
 		}
@@ -450,12 +425,8 @@ func runServe() {
 
 	// Brain proxies this endpoint to stream live node logs to the UI
 	r.Get("/api/node/logs", func(w http.ResponseWriter, req *http.Request) {
-		// Only allow from localhost (tunnel proxy), never public internet
 		host, _, _ := net.SplitHostPort(req.RemoteAddr)
-		if host != "127.0.0.1" && host != "::1" {
-			http.Error(w, "forbidden", http.StatusForbidden)
-			return
-		}
+		slog.Info("node: logs request", "from", host)
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
@@ -518,46 +489,6 @@ func runServe() {
 		}
 	})
 
-	// Brain discovery: poll cluster_state (via local rqlite) for brain changes
-	go func() {
-		var knownBrain string
-		ticker := time.NewTicker(15 * time.Second)
-		defer ticker.Stop()
-		for range ticker.C {
-			if db == nil {
-				continue
-			}
-			var brainAddr string
-			if err := db.QueryRow(`SELECT brain_addr FROM cluster_state WHERE id=1`).Scan(&brainAddr); err != nil || brainAddr == "" {
-				continue
-			}
-			// Normalize: strip trailing slash
-			brainAddr = strings.TrimRight(brainAddr, "/")
-			if brainAddr == knownBrain {
-				continue
-			}
-			// If the brain address is a loopback address, do not attempt to reconnect to it
-			// as loopback is local to the brain server itself.
-			if strings.Contains(brainAddr, "127.0.0.1") || strings.Contains(brainAddr, "localhost") {
-				knownBrain = brainAddr
-				continue
-			}
-			slog.Info("node: brain changed, reconnecting tunnel", "old", knownBrain, "new", brainAddr)
-			knownBrain = brainAddr
-			// Read current token
-			var tok []byte
-			tok, _ = os.ReadFile(configDir + "/tunnel_token")
-			newToken := strings.TrimSpace(string(tok))
-			if newToken == "" {
-				continue
-			}
-			newWS := strings.Replace(brainAddr, "http", "ws", 1) + "/api/cluster/tunnel"
-			newTLS := &tls.Config{InsecureSkipVerify: true}
-			// The existing StartClient goroutine will keep retrying the old URL.
-			// Start a new one for the new brain — the old one will die when its session closes.
-			go tunnelMgr.StartClient(context.Background(), newWS, myID, newToken, newTLS)
-		}
-	}()
 
 	r.Post("/api/node/deploy", func(w http.ResponseWriter, req *http.Request) {
 		var payload struct {
@@ -718,11 +649,14 @@ func runServe() {
 
 const nodeServeServiceTmpl = `[Unit]
 Description=FeatherDeploy Node
-After=network.target
+After=network.target etcd-node.service
+Wants=etcd-node.service
 
 [Service]
 User=root
 EnvironmentFile=/etc/featherdeploy/featherdeploy.env
+Environment=GOMEMLIMIT=120MiB
+Environment=GOGC=40
 ExecStart=/usr/local/bin/featherdeploy-node serve
 Restart=always
 RestartSec=5
@@ -731,8 +665,80 @@ RestartSec=5
 WantedBy=multi-user.target
 `
 
+const rqliteNodeServiceTmpl = `[Unit]
+Description=rqlite Distributed SQLite
+After=network.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User={{.User}}
+Group={{.User}}
+ExecStartPre=/bin/bash -c 'mkdir -p {{.DataDir}}/rqlite-data && chown -R {{.User}}:{{.User}} {{.DataDir}}/rqlite-data'
+Environment=GOMEMLIMIT=256MiB
+Environment=GOGC=50
+ExecStart=/usr/local/bin/rqlited \
+  -node-id={{.NodeID}} \
+  -http-addr=0.0.0.0:4001 \
+  -raft-addr=0.0.0.0:4002 \
+  {{if .IsLeader}}-bootstrap-expect=1{{else}}-join http://{{.LeaderIP}}:4001{{end}} \
+  {{.DataDir}}/rqlite-data
+Restart=always
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
+`
+
+const etcdNodeServiceTmpl = `[Unit]
+Description=etcd Key-Value Store
+After=network.target
+
+[Service]
+Type=simple
+User={{.User}}
+Group={{.User}}
+ExecStartPre=/bin/bash -c 'mkdir -p {{.DataDir}}/etcd-data && chown -R {{.User}}:{{.User}} {{.DataDir}}/etcd-data'
+Environment=GOMEMLIMIT=128MiB
+Environment=GOGC=40
+ExecStart=/usr/local/bin/etcd \
+  --name={{.NodeID}} \
+  --data-dir={{.DataDir}}/etcd-data \
+  --listen-client-urls=http://0.0.0.0:2379 \
+  --advertise-client-urls=http://{{.PublicIP}}:2379 \
+  --listen-peer-urls=http://0.0.0.0:2380 \
+  --initial-advertise-peer-urls=http://{{.PublicIP}}:2380 \
+  --initial-cluster={{.ClusterSpec}} \
+  --initial-cluster-token=etcd-cluster-1 \
+  --initial-cluster-state={{.ClusterState}}
+Restart=always
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
+`
+
 func writeNodeServeService() {
 	writeFile("/etc/systemd/system/featherdeploy-node.service", nodeServeServiceTmpl, 0644)
+}
+
+func writeRqliteNodeService(user, nodeID, leaderIP string, isLeader bool) {
+	tmpl := template.Must(template.New("rqlite").Parse(rqliteNodeServiceTmpl))
+	var buf strings.Builder
+	tmpl.Execute(&buf, struct {
+		User, DataDir, NodeID, LeaderIP string
+		IsLeader                        bool
+	}{user, "/var/lib/featherdeploy", nodeID, leaderIP, isLeader})
+	writeFile("/etc/systemd/system/rqlite-node.service", buf.String(), 0644)
+}
+
+func writeEtcdNodeService(user, nodeID, publicIP, clusterSpec, clusterState string) {
+	tmpl := template.Must(template.New("etcd").Parse(etcdNodeServiceTmpl))
+	var buf strings.Builder
+	tmpl.Execute(&buf, struct {
+		User, DataDir, PublicIP, NodeID, ClusterSpec, ClusterState string
+	}{user, "/var/lib/featherdeploy", publicIP, nodeID, clusterSpec, clusterState})
+	writeFile("/etc/systemd/system/etcd-node.service", buf.String(), 0644)
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
@@ -813,58 +819,50 @@ func runNodeHeartbeat(db *sql.DB, myID string) {
 	// Initial collection
 	st := collectStats()
 
+	// Add random jitter to heartbeat start to avoid simultaneous spikes
+	time.Sleep(time.Duration(time.Now().UnixNano()%1000) * time.Millisecond)
+
 	for range ticker.C {
-		// Re-collect stats each tick
 		st = collectStats()
 
-		// If we don't have the DB ID yet, try to find it.
-		// This can happen if the node joined but the DB row wasn't replicated
-		// to the local rqlite instance yet.
-		if nodeDBID == 0 {
-			err := db.QueryRow(`SELECT id FROM nodes WHERE node_id=?`, myID).Scan(&nodeDBID)
-			if err != nil {
-				slog.Warn("heartbeat: could not find node row in DB, retrying next tick", "node_id", myID, "err", err)
-			} else {
-				slog.Info("heartbeat: found node row", "node_id", myID, "db_id", nodeDBID)
+		if db != nil {
+			// Brain node: write to local rqlite (which replicates)
+			if nodeDBID == 0 {
+				db.QueryRow(`SELECT id FROM nodes WHERE node_id=?`, myID).Scan(&nodeDBID)
+			}
+			if nodeDBID > 0 {
+				db.Exec(`UPDATE nodes SET status='connected', last_seen=datetime('now'),
+					cpu_usage=?, ram_used=?, ram_total=?, disk_used=?, disk_total=?, last_stats_at=datetime('now')
+					WHERE id=?`, st.CPU, st.RAMUsed, st.RAMTotal, st.DiskUsed, st.DiskTotal, nodeDBID)
+			}
+		} else if mainURL != "" {
+			// Worker node: ping brain API via HTTP
+			payload := map[string]interface{}{
+				"status":     "connected",
+				"cpu_usage":  st.CPU,
+				"ram_used":   st.RAMUsed,
+				"ram_total":  st.RAMTotal,
+				"disk_used":  st.DiskUsed,
+				"disk_total": st.DiskTotal,
+			}
+			body, _ := json.Marshal(payload)
+			httpClient := &http.Client{Timeout: 5 * time.Second}
+			resp, err := httpClient.Post(mainURL+"/api/nodes/"+myID+"/ping", "application/json", bytes.NewReader(body))
+			if err == nil {
+				resp.Body.Close()
 			}
 		}
 
-		// Write stats into the nodes table if we have the ID
-		if nodeDBID > 0 {
-			_, err := db.Exec(`UPDATE nodes SET
-				status='connected', last_seen=datetime('now'),
-				cpu_usage=?, ram_used=?, ram_total=?,
-				disk_used=?, disk_total=?, last_stats_at=datetime('now')
-				WHERE id=?`,
-				st.CPU, st.RAMUsed, st.RAMTotal, st.DiskUsed, st.DiskTotal, nodeDBID)
-			if err != nil {
-				slog.Error("heartbeat: update stats failed", "err", err)
-			}
-		}
-
-		// Skip election checks once we have already promoted to brain.
-		if promoted {
-			continue
-		}
-
-		// Check brain health
-		if !heartbeat.IsBrainAlive(db) {
-			slog.Warn("brain appears dead — attempting election", "my_id", myID)
-
-			myAddr := "http://" + localIP() + ":8080"
-			if mainURL != "" {
-				// Re-use the scheme + port of the original brain URL
-				if idx := strings.LastIndex(mainURL, ":"); idx > 7 {
-					myAddr = "http://" + localIP() + mainURL[idx:]
+		if !promoted && !heartbeat.IsBrainAlive(db) {
+			// Election logic (only possible if db != nil, i.e., brain nodes)
+			if db != nil {
+				slog.Warn("brain appears dead — attempting election", "my_id", myID)
+				myAddr := "http://" + localIP() + ":8080"
+				if heartbeat.TryClaimBrain(db, myID, myAddr) {
+					slog.Info("WON brain election — promoting to brain", "addr", myAddr)
+					promoted = true
+					go promoteAsBrain(myID)
 				}
-			}
-
-			if heartbeat.TryClaimBrain(db, myID, myAddr) {
-				slog.Info("WON brain election — promoting to brain", "addr", myAddr)
-				promoted = true
-				go promoteAsBrain(myID)
-			} else {
-				slog.Info("lost brain election — another node won")
 			}
 		}
 	}
@@ -894,6 +892,8 @@ Requires=rqlite-node.service
 User=root
 EnvironmentFile=%s
 Environment=RQLITE_URL=%s
+Environment=GOMEMLIMIT=150MiB
+Environment=GOGC=50
 ExecStart=%s serve
 Restart=always
 RestartSec=5

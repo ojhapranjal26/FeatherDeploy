@@ -56,6 +56,10 @@ func diskStatfs(path string) (used, total int64) {
 	return total - free, total
 }
 
+var (
+	lastIdle, lastTotal int64
+)
+
 func readCPUPercent() float64 {
 	read := func() (idle, total int64) {
 		f, err := os.Open("/proc/stat")
@@ -81,12 +85,20 @@ func readCPUPercent() float64 {
 		}
 		return
 	}
-	idle1, total1 := read()
-	time.Sleep(200 * time.Millisecond)
-	idle2, total2 := read()
-	if total2 == total1 {
+
+	idle, total := read()
+	if lastTotal == 0 {
+		lastIdle, lastTotal = idle, total
 		return 0
 	}
-	return 100.0 * float64(total2-idle2-(total1-idle1)) / float64(total2-total1)
+
+	idleDelta := idle - lastIdle
+	totalDelta := total - lastTotal
+	lastIdle, lastTotal = idle, total
+
+	if totalDelta <= 0 {
+		return 0
+	}
+	return 100.0 * float64(totalDelta-idleDelta) / float64(totalDelta)
 }
 

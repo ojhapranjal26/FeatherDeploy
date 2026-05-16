@@ -40,7 +40,14 @@ print_header() {
 print_header
 
 MODE="install"
-if is_installed; then
+JOIN_ARGS=""
+if [[ $# -gt 0 ]] && [[ "$1" == "join" ]]; then
+  MODE="join"
+  shift
+  JOIN_ARGS="$*"
+fi
+
+if is_installed && [ "$MODE" != "join" ]; then
   echo "  An existing FeatherDeploy installation was detected."
   echo ""
   echo "  What would you like to do?"
@@ -60,6 +67,7 @@ if is_installed; then
   fi
 fi
 echo "  Mode: $MODE" ; echo ""
+ARCH=$(detect_arch)
 
 # -- Helper: detect system architecture
 detect_arch() {
@@ -136,11 +144,11 @@ full_reset() {
   rm -f /etc/sudoers.d/featherdeploy-podman
   rm -f /etc/sysctl.d/99-featherdeploy.conf
 
-  rm -f /etc/caddy/featherdeploy-services.caddy
-  if [ -f /etc/caddy/Caddyfile ]; then
-    sed -i '/# Service domain routing.*FeatherDeploy/d' /etc/caddy/Caddyfile
-    sed -i '/import \/etc\/caddy\/featherdeploy-services\.caddy/d' /etc/caddy/Caddyfile
-    systemctl reload caddy 2>/dev/null || true
+  # ── Cleanup Nginx configs ─────────────────────────────────────────────────
+  rm -f /etc/nginx/sites-enabled/featherdeploy-*
+  rm -f /etc/nginx/sites-available/featherdeploy-*
+  if command -v nginx >/dev/null 2>&1; then
+    systemctl reload nginx 2>/dev/null || true
   fi
 
   sed -i "/^${SVC_USER}:/d" /etc/subuid 2>/dev/null || true
@@ -467,15 +475,11 @@ install_deps_apt() {
   else
     echo "  crun already installed -- skipping"
   fi
-  if ! command -v caddy >/dev/null 2>&1; then
-    echo "==> Installing Caddy..."
-    apt-get install -y debian-keyring debian-archive-keyring apt-transport-https 2>/dev/null || true
-    curl -fsSL 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg 2>/dev/null || true
-    curl -fsSL 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list >/dev/null 2>&1 || true
-    apt-get update -y 2>/dev/null || true
-    apt-get install -y caddy
+  if ! command -v nginx >/dev/null 2>&1; then
+    echo "==> Installing Nginx and Certbot..."
+    apt-get install -y nginx certbot python3-certbot-nginx
   else
-    echo "  Caddy already installed -- skipping"
+    echo "  Nginx already installed -- skipping"
   fi
   if ! command -v node >/dev/null 2>&1 || [ "$(node --version | cut -d. -f1 | tr -d v)" -lt 22 ]; then
     echo "==> Installing Node.js 22 LTS..."
@@ -494,8 +498,7 @@ install_deps_dnf() {
   dnf install -y slirp4netns netavark aardvark-dns passt containernetworking-plugins wireguard-tools 2>/dev/null || true
   command -v podman >/dev/null 2>&1 || dnf install -y podman
   command -v crun   >/dev/null 2>&1 || dnf install -y crun 2>/dev/null || echo '  WARNING: crun not available via dnf'
-  command -v caddy  >/dev/null 2>&1 || dnf install -y caddy 2>/dev/null || \
-    (dnf copr enable -y @caddy/caddy 2>/dev/null && dnf install -y caddy) || echo '  WARNING: caddy not via dnf'
+  command -v nginx  >/dev/null 2>&1 || dnf install -y nginx certbot python3-certbot-nginx
   if ! command -v node >/dev/null 2>&1 || [ "$(node --version | cut -d. -f1 | tr -d v)" -lt 22 ]; then
     dnf module enable -y nodejs:22 2>/dev/null || curl -fsSL https://rpm.nodesource.com/setup_22.x | bash - 2>/dev/null || true
     dnf install -y nodejs npm
@@ -510,7 +513,7 @@ install_deps_yum() {
   yum install -y --skip-broken slirp4netns netavark aardvark-dns passt containernetworking-plugins wireguard-tools 2>/dev/null || true
   command -v podman >/dev/null 2>&1 || yum install -y podman
   command -v crun   >/dev/null 2>&1 || yum install -y crun 2>/dev/null || echo '  WARNING: crun not available via yum'
-  command -v caddy  >/dev/null 2>&1 || (yum install -y yum-plugin-copr && yum copr enable -y @caddy/caddy && yum install -y caddy) || echo '  WARNING: caddy not via yum'
+  command -v nginx  >/dev/null 2>&1 || yum install -y nginx certbot python3-certbot-nginx
   if ! command -v node >/dev/null 2>&1 || [ "$(node --version | cut -d. -f1 | tr -d v)" -lt 22 ]; then
     curl -fsSL https://rpm.nodesource.com/setup_22.x | bash -
     yum install -y nodejs
@@ -521,14 +524,14 @@ install_deps_yum() {
 
 install_deps_apk() {
   apk update
-  apk add --no-cache curl git gcc musl-dev make nodejs npm podman caddy
+  apk add --no-cache curl git gcc musl-dev make nodejs npm podman nginx certbot
   apk add --no-cache crun 2>/dev/null || echo '  WARNING: crun not available via apk'
   apk add --no-cache slirp4netns netavark aardvark-dns passt wireguard-tools 2>/dev/null || true
   install_go_tarball ; configure_crun
 }
 
 install_deps_pacman() {
-  pacman -Sy --noconfirm curl git gcc make nodejs npm go podman caddy
+  pacman -Sy --noconfirm curl git gcc make nodejs npm go podman nginx certbot
   pacman -S --noconfirm slirp4netns netavark aardvark-dns passt wireguard-tools 2>/dev/null || true
   command -v crun >/dev/null 2>&1 || pacman -S --noconfirm crun 2>/dev/null || echo '  WARNING: crun not available via pacman'
   configure_crun
@@ -578,26 +581,28 @@ else
 fi
 REPO="$INSTALL_DIR"
 
-# -- 3. Build frontend
-echo "" ; echo "==> Building frontend..."
-cd "$REPO/frontend"
-npm ci --prefer-offline
-npm run build
+if [ "$MODE" != "join" ]; then
+  # -- 3. Build frontend
+  echo "" ; echo "==> Building frontend..."
+  cd "$REPO/frontend"
+  npm ci --prefer-offline
+  npm run build
 
-# -- 4. Embed frontend into Go
-echo "" ; echo "==> Embedding frontend into backend..."
-mkdir -p "$REPO/backend/web/dist"
-rm -rf "$REPO/backend/web/dist/"*
-cp -r "$REPO/frontend/dist/." "$REPO/backend/web/dist/"
+  # -- 4. Embed frontend into Go
+  echo "" ; echo "==> Embedding frontend into backend..."
+  mkdir -p "$REPO/backend/web/dist"
+  rm -rf "$REPO/backend/web/dist/"*
+  cp -r "$REPO/frontend/dist/." "$REPO/backend/web/dist/"
+fi
 
 # -- 5. Build Go binaries
 echo "" ; echo "==> Building FeatherDeploy main binary (CGO_ENABLED=0)..."
 cd "$REPO/backend"
 mkdir -p "$REPO/dist"
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+CGO_ENABLED=0 GOOS=linux GOARCH=$ARCH \
   go build -ldflags="-s -w" -o "$REPO/dist/featherdeploy" ./cmd/server/
 echo "==> Building FeatherDeploy node agent..."
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+CGO_ENABLED=0 GOOS=linux GOARCH=$ARCH \
   go build -ldflags="-s -w" -o "$REPO/dist/featherdeploy-node" ./cmd/node/
 
 # -- 6. Stop service (update / reinstall only)
@@ -709,15 +714,12 @@ if [ -f /proc/sys/user/max_user_namespaces ]; then
   fi
 fi
 
-# -- 8d. sudo rule: allow featherdeploy to run caddy reload + self-update as root
-echo "==> Installing sudo rule for featherdeploy → caddy + self-update..."
+# -- 8d. sudo rule: allow featherdeploy to run nginx reload + certbot as root
+echo "==> Installing sudo rule for featherdeploy → nginx + certbot..."
 cat > /etc/sudoers.d/featherdeploy-podman << 'SUDOEOF'
-featherdeploy ALL=(root) NOPASSWD: /bin/systemctl reload caddy
-featherdeploy ALL=(root) NOPASSWD: /usr/bin/systemctl reload caddy
-featherdeploy ALL=(root) NOPASSWD: /usr/bin/tee /etc/caddy/featherdeploy-services.caddy
-featherdeploy ALL=(root) NOPASSWD: /usr/bin/tee /etc/caddy/featherdeploy-panel.caddy
-featherdeploy ALL=(root) NOPASSWD: /usr/bin/tee /etc/caddy/Caddyfile
-featherdeploy ALL=(root) NOPASSWD: /usr/bin/tee -a /etc/caddy/Caddyfile
+featherdeploy ALL=(root) NOPASSWD: /usr/bin/systemctl reload nginx
+featherdeploy ALL=(root) NOPASSWD: /usr/bin/systemctl restart nginx
+featherdeploy ALL=(root) NOPASSWD: /usr/bin/certbot
 featherdeploy ALL=(root) NOPASSWD: /usr/local/bin/featherdeploy-update
 featherdeploy ALL=(root) NOPASSWD: /sbin/iptables
 featherdeploy ALL=(root) NOPASSWD: /usr/sbin/iptables
@@ -768,20 +770,13 @@ UPDATEEOF
 chmod 755 /usr/local/bin/featherdeploy-update
 echo "  featherdeploy-update installed"
 
-# -- 8e. Create the Caddy services + panel include files with correct ownership
-echo "==> Preparing Caddy services include file..."
-touch /etc/caddy/featherdeploy-services.caddy
-chown "${SVC_USER}:${SVC_USER}" /etc/caddy/featherdeploy-services.caddy
-chmod 644 /etc/caddy/featherdeploy-services.caddy
-touch /etc/caddy/featherdeploy-panel.caddy
-chown "${SVC_USER}:${SVC_USER}" /etc/caddy/featherdeploy-panel.caddy
-chmod 644 /etc/caddy/featherdeploy-panel.caddy
-# Allow the service user to atomically rename temp config files inside /etc/caddy/.
-# Without group-write on the directory, the atomic rename (fastest write path
-# in the Go daemon) fails silently and falls back to sudo tee every time.
-chgrp "${SVC_USER}" /etc/caddy
-chmod g+w /etc/caddy
-echo "  /etc/caddy/featherdeploy-services.caddy ready (dir group-writable for ${SVC_USER})"
+# -- 8e. Ensure Nginx directories exist
+echo "==> Preparing Nginx directories..."
+mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled
+# Allow the service user to write to these directories
+chgrp "${SVC_USER}" /etc/nginx/sites-available /etc/nginx/sites-enabled
+chmod g+w /etc/nginx/sites-available /etc/nginx/sites-enabled
+echo "  Nginx directories ready (group-writable for ${SVC_USER})"
 
 # -- 9. Set up data directory with correct ownership, then install + start rqlite
 echo "==> Setting up data directory..."
@@ -790,6 +785,11 @@ chown -R "${SVC_USER}:${SVC_USER}" /var/lib/featherdeploy
 chmod 750 /var/lib/featherdeploy
 chmod 750 "$RQLITE_DATA_DIR"
 echo "  Data directory ready: ${RQLITE_DATA_DIR}"
+
+if [ "$MODE" = "join" ]; then
+  echo "==> Joining FeatherDeploy cluster as worker..."
+  exec "$NODE_BINARY" join $JOIN_ARGS
+fi
 
 if [ "$MODE" = "install" ]; then
   echo "==> Cleaning up any previous rqlite installation..."
@@ -800,11 +800,19 @@ if [ "$MODE" = "install" ]; then
   chmod 750 "$RQLITE_DATA_DIR"
   install_rqlite --force
 else
-  install_rqlite
+  # On update, we only update rqlite if it's already installed (meaning this is a brain node)
+  if [ -f "/usr/local/bin/rqlited" ]; then
+    install_rqlite
+  else
+    echo "==> Worker node detected: skipping rqlite update"
+  fi
 fi
 
-write_rqlite_service
-ensure_rqlite_running
+# skip rqlite service start if it's not installed (worker node)
+if [ -f "/usr/local/bin/rqlited" ]; then
+  write_rqlite_service
+  ensure_rqlite_running
+fi
 
 # -- 10. Reinstall: wipe DB + run wizard
 if [ "$MODE" = "reinstall" ]; then
