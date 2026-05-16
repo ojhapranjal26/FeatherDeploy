@@ -3,7 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   Server, Plus, Trash2, Copy, Check, Loader2, RefreshCw,
   CheckCircle2, Clock, WifiOff, AlertCircle, Crown, Terminal,
-  Cpu, MemoryStick, HardDrive, Globe, X, Activity
+  Cpu, MemoryStick, HardDrive, Globe, X
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -21,7 +21,7 @@ import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import { toast } from 'sonner'
 import { useAuth } from '@/context/AuthContext'
-import { nodesApi, clusterApi, type Node, type AddNodeResponse, type ClusterBrain } from '@/api/nodes'
+import { nodesApi, clusterApi, type Node, type AddNodeResponse } from '@/api/nodes'
 import { useTimezone } from '@/context/TimezoneContext'
 import { formatDateFull } from '@/lib/dateFormat'
 
